@@ -47,6 +47,9 @@ int RenderEngine::queuedTasksCount() const noexcept {
 
 RenderTaskInfo RenderEngine::currentTaskInfo() const {
     std::lock_guard<std::mutex> lock(m_queueMutex);
+    if (m_currentTask.taskId.isEmpty() && !m_taskQueue.empty()) {
+        return m_taskQueue.front();
+    }
     return m_currentTask;
 }
 
@@ -101,6 +104,9 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+            m_currentTask = task;
+        }
         m_taskQueue.push(task);
     }
     m_queueCv.notify_one();
@@ -152,6 +158,9 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+            m_currentTask = task;
+        }
         m_taskQueue.push(task);
     }
     m_queueCv.notify_one();
