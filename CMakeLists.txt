@@ -44,6 +44,10 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 pkg_check_modules(JACK REQUIRED jack)
 pkg_check_modules(SOXR REQUIRED soxr)
+pkg_check_modules(AVCODEC REQUIRED libavcodec)
+pkg_check_modules(AVFORMAT REQUIRED libavformat)
+pkg_check_modules(AVUTIL REQUIRED libavutil)
+pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 
 qt_standard_project_setup(REQUIRES 6.4)
 
@@ -52,6 +56,17 @@ qt_add_executable(desk32
     src/main.cpp
     src/core/LanguageManager.hpp
     src/core/LanguageManager.cpp
+    src/core/EngineController.hpp
+    src/core/EngineController.cpp
+    src/core/log/LogEvent.hpp
+    src/core/log/LogRepository.hpp
+    src/core/log/LogService.hpp
+    src/core/log/LogService.cpp
+    src/engine/backend/PipeWireAudioOutput.hpp
+    src/engine/backend/PipeWireAudioOutput.cpp
+    src/engine/decoder/AudioDecoder.hpp
+    src/engine/decoder/FFmpegAudioDecoder.hpp
+    src/engine/decoder/FFmpegAudioDecoder.cpp
 )
 
 # QML Module Setup
@@ -80,10 +95,27 @@ target_link_libraries(desk32 PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Sql
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ALSA::ALSA
 )
 
 target_include_directories(desk32 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_include_directories(desk32 SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${SOXR_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
 )
 
 # Testing support

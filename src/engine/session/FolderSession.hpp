@@ -159,6 +159,23 @@ public:
         return false;
     }
 
+    bool retreatPrevious() {
+        if (m_currentIndex > 0) {
+            m_currentIndex--;
+            return true;
+        }
+        return false;
+    }
+
+    bool seekTrack(size_t index) {
+        if (index < m_tracks.size()) {
+            m_currentIndex = index;
+            m_isActive = true;
+            return true;
+        }
+        return false;
+    }
+
     void stopSession() {
         m_isActive = false;
         m_tracks.clear();

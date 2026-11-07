@@ -32,7 +32,11 @@ jobs:
             libpipewire-0.3-dev \
             libjack-jackd2-dev \
             libsoxr-dev \
-            libsqlite3-dev
+            libsqlite3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev
 
       - name: Configure CMake
         run: |

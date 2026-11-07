@@ -99,17 +99,29 @@ add_test(NAME benchmark_k3_float64 COMMAND benchmark_k3_float64)
 # Step 3: Different Sample Rate Switching & Kill Gate K2 PoC
 add_executable(test_sample_rate_switching
     test_sample_rate_switching.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
 )
 
 target_link_libraries(test_sample_rate_switching PRIVATE
     Qt6::Core
     Qt6::Test
     ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
 )
 
 target_include_directories(test_sample_rate_switching PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_sample_rate_switching SYSTEM PRIVATE
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
 )
 
 add_test(NAME test_sample_rate_switching COMMAND test_sample_rate_switching)
@@ -133,6 +145,7 @@ add_test(NAME test_external_insert_bridge COMMAND test_external_insert_bridge)
 # Step 4: Deck, Folder Session, and Operation Log PoC
 add_executable(test_step4_deck_session_log
     test_step4_deck_session_log.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
 )
 
 target_link_libraries(test_step4_deck_session_log PRIVATE
@@ -140,6 +153,10 @@ target_link_libraries(test_step4_deck_session_log PRIVATE
     Qt6::Test
     Qt6::Sql
     ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
 )
 
 target_include_directories(test_step4_deck_session_log PRIVATE
@@ -147,7 +164,136 @@ target_include_directories(test_step4_deck_session_log PRIVATE
     ${SOXR_INCLUDE_DIRS}
 )
 
+target_include_directories(test_step4_deck_session_log SYSTEM PRIVATE
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
 add_test(NAME test_step4_deck_session_log COMMAND test_step4_deck_session_log)
+
+# Phase 1.1: Audio Pipeline & Core Engine Integration
+add_executable(test_audio_pipeline
+    test_audio_pipeline.cpp
+)
+
+target_link_libraries(test_audio_pipeline PRIVATE
+    Qt6::Core
+    Qt6::Test
+    ${SOXR_LIBRARIES}
+)
+
+target_include_directories(test_audio_pipeline PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+add_test(NAME test_audio_pipeline COMMAND test_audio_pipeline)
+
+# Phase 1.2: Native PipeWire AudioOutput Implementation
+add_executable(test_pipewire_output
+    test_pipewire_output.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+)
+
+target_link_libraries(test_pipewire_output PRIVATE
+    Qt6::Core
+    Qt6::Test
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+)
+
+target_include_directories(test_pipewire_output PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+target_include_directories(test_pipewire_output SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${SOXR_INCLUDE_DIRS}
+)
+
+add_test(NAME test_pipewire_output COMMAND test_pipewire_output)
+
+# Phase 1.3: FFmpeg Audio Decoder Implementation
+add_executable(test_ffmpeg_decoder
+    test_ffmpeg_decoder.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+)
+
+target_link_libraries(test_ffmpeg_decoder PRIVATE
+    Qt6::Core
+    Qt6::Test
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+)
+
+target_include_directories(test_ffmpeg_decoder PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+target_include_directories(test_ffmpeg_decoder SYSTEM PRIVATE
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
+add_test(NAME test_ffmpeg_decoder COMMAND test_ffmpeg_decoder)
+
+# Phase 1.4: Reference Deck System & Folder Session Implementation
+add_executable(test_reference_decks
+    test_reference_decks.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+)
+
+target_link_libraries(test_reference_decks PRIVATE
+    Qt6::Core
+    Qt6::Test
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+)
+
+target_include_directories(test_reference_decks PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_reference_decks SYSTEM PRIVATE
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
+add_test(NAME test_reference_decks COMMAND test_reference_decks)
+
+# Phase 1.5: Log Tab Infrastructure Implementation
+add_executable(test_log_service
+    test_log_service.cpp
+    ../src/core/log/LogService.cpp
+)
+
+target_link_libraries(test_log_service PRIVATE
+    Qt6::Core
+    Qt6::Test
+    Qt6::Sql
+)
+
+target_include_directories(test_log_service PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+add_test(NAME test_log_service COMMAND test_log_service)
+
+
+
+
 
 
 

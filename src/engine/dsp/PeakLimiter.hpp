@@ -80,6 +80,7 @@ public:
     void setEnabled(bool enabled) { m_enabled = enabled; }
     bool isEnabled() const { return m_enabled; }
     double ceiling() const { return m_ceiling; }
+    size_t lookaheadSamples() const noexcept { return m_lookaheadSamples; }
 
 private:
     double m_sampleRate = 48000.0;

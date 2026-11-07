@@ -280,7 +280,7 @@ void TestStep4DeckSessionLog::testReferenceDeckTransportIndependenceAndLock()
     for (int i = 0; i < 40; ++i) {
         manager.deck('A')->renderBlock(buf.data(), 256);
     }
-    uint64_t posA = manager.deck('A')->playhead();
+    int64_t posA = manager.deck('A')->playhead();
     QVERIFY(posA > 10000);
 
     // Pause Deck B at frame 50000

@@ -3,6 +3,8 @@
 #include <QIcon>
 #include <QQuickStyle>
 #include "core/LanguageManager.hpp"
+#include "core/EngineController.hpp"
+#include "core/log/LogService.hpp"
 
 int main(int argc, char *argv[])
 {
@@ -21,8 +23,13 @@ int main(int argc, char *argv[])
     // Initialize bilingual language manager
     LanguageManager::instance().init(&app, &engine);
 
-    // Expose LanguageManager to QML
+    // Initialize Engine Controller & Subsystems
+    desk32::core::EngineController::instance().initialize();
+
+    // Expose Singletons to QML
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager", &LanguageManager::instance());
+    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController", &desk32::core::EngineController::instance());
+    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LogService", &desk32::core::log::LogService::instance());
 
     const QUrl url(QStringLiteral("qrc:/Desk32/qml/Main.qml"));
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreated,
