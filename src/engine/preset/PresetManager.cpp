@@ -344,3 +344,4 @@ bool PresetManager::deletePreset(const QString& category, const QString& presetN
 }
 
 } // namespace desk32::engine::preset
+
