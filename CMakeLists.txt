@@ -27,8 +27,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
-# Find Qt 6 Packages
-find_package(Qt6 6.5 REQUIRED COMPONENTS
+# Find Qt 6 Packages (Compatible with Ubuntu 24.04 LTS Qt 6.4.2+ and rolling Linux)
+find_package(Qt6 6.4 REQUIRED COMPONENTS
     Core
     Gui
     Qml
@@ -45,7 +45,7 @@ pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
 pkg_check_modules(JACK REQUIRED jack)
 pkg_check_modules(SOXR REQUIRED soxr)
 
-qt_standard_project_setup(REQUIRES 6.5)
+qt_standard_project_setup(REQUIRES 6.4)
 
 # Primary Desk32 Executable
 qt_add_executable(desk32
