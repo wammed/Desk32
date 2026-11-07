@@ -5,6 +5,8 @@
 #include <QVariantMap>
 #include <QVariantList>
 #include <memory>
+#include <array>
+#include <atomic>
 #include "engine/deck/DeckManager.hpp"
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
@@ -26,6 +28,9 @@ class EngineController : public QObject {
     Q_PROPERTY(double masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
+    Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
+    Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
 
 public:
     static EngineController& instance();
@@ -44,6 +49,9 @@ public:
     [[nodiscard]] double masterGain() const;
     [[nodiscard]] int xrunCount() const;
     [[nodiscard]] bool isDirectMode() const;
+    [[nodiscard]] int directModeStatus() const;
+    [[nodiscard]] int backendStatus() const;
+    [[nodiscard]] QString backendStatusText() const;
 
     // Property setters
     void setSwitchingMode(int mode);
@@ -94,10 +102,14 @@ private:
     std::shared_ptr<engine::pipeline::PeakLimiterNode> m_limiterNode;
     std::shared_ptr<engine::pipeline::ReverbNode> m_reverbNode;
 
-    int m_switchingMode = 0; // 0 = Normal, 1 = Comparative
-    int m_outputRoutingMode = 0; // 0 = Listening, 1 = RenderMonitor
-    bool m_globalDspBypass = false;
-    double m_masterGain = 1.0;
+    std::atomic<int> m_switchingMode{0}; // 0 = Normal, 1 = Comparative
+    std::atomic<int> m_outputRoutingMode{0}; // 0 = Listening, 1 = RenderMonitor
+    std::atomic<bool> m_globalDspBypass{false};
+    std::atomic<double> m_masterGain{1.0};
+
+    // Pre-allocated Audio Thread scratch buffers (strictly ZERO dynamic allocation in RT audio callback)
+    alignas(64) std::array<double, 4096> m_audioInL{};
+    alignas(64) std::array<double, 4096> m_audioInR{};
 };
 
 } // namespace desk32::core

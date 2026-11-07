@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <atomic>
 
 namespace desk32::engine::pipeline {
 
@@ -71,13 +72,13 @@ public:
         return total;
     }
 
-    [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed; }
-    void setBypassed(bool bypassed) noexcept { m_bypassed = bypassed; }
+    [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed.load(std::memory_order_relaxed); }
+    void setBypassed(bool bypassed) noexcept { m_bypassed.store(bypassed, std::memory_order_relaxed); }
 
     /// Real-time audio processing.
     /// Executes sequentially across all active nodes in the chain.
     inline void process(double* left, double* right, size_t frameCount) {
-        if (m_bypassed) return;
+        if (m_bypassed.load(std::memory_order_relaxed)) return;
 
         for (auto& node : m_nodes) {
             if (!node->isBypassed()) {
@@ -91,7 +92,7 @@ private:
     ChainPurpose m_purpose;
     std::vector<std::shared_ptr<AudioNode>> m_nodes;
     double m_sampleRate = 48000.0;
-    bool m_bypassed = false;
+    std::atomic<bool> m_bypassed{false};
 };
 
 } // namespace desk32::engine::pipeline

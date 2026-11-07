@@ -1,9 +1,11 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <algorithm>
-#include <QCollator>
+#include <cctype>
+#include <cstring>
 #include <QString>
 #include <QFileInfo>
 #include <QDir>
@@ -18,34 +20,38 @@ struct SessionTrack {
 
 class NaturalSortComparator {
 public:
-    /// Strictly deterministic natural sort comparison:
+    /// Strictly deterministic natural sort comparison (Phase 0 Specification):
     /// 1. Numerical chunk extraction and numerical magnitude comparison
-    /// 2. If numerical magnitudes equal, leading zero resolution via total chunk length
-    /// 3. Non-numeric characters compared case-insensitively (ASCII/Unicode toLower)
-    /// 4. If all chunks equal, exact binary byte comparison (Qt::CaseSensitive) as deterministic tie-breaker
-    /// Completely immune to OS locale, ICU dependency, or Qt QCollator implementation discrepancies.
-    static bool naturalSortLess(const QString& a, const QString& b) {
-        qsizetype i = 0, j = 0;
-        const qsizetype lenA = a.length();
-        const qsizetype lenB = b.length();
+    /// 2. If numerical magnitudes equal, leading zero resolution via total chunk length (shorter leading zeros first)
+    /// 3. Non-numeric characters compared case-insensitively (ASCII std::tolower)
+    /// 4. Final tie-breaker: strict binary UTF-8 byte comparison (std::lexicographical_compare on raw unsigned char)
+    /// Completely immune to OS locale, ICU dependency, or Qt QString UTF-16 code point discrepancies.
+    static bool naturalSortLess(std::string_view a, std::string_view b) {
+        size_t i = 0, j = 0;
+        const size_t lenA = a.length();
+        const size_t lenB = b.length();
+
+        auto isDigit = [](char c) -> bool {
+            return c >= '0' && c <= '9';
+        };
 
         while (i < lenA && j < lenB) {
-            const QChar ca = a[i];
-            const QChar cb = b[j];
+            const unsigned char ca = static_cast<unsigned char>(a[i]);
+            const unsigned char cb = static_cast<unsigned char>(b[j]);
 
-            if (ca.isDigit() && cb.isDigit()) {
+            if (isDigit(a[i]) && isDigit(b[j])) {
                 // Numeric chunk comparison
-                qsizetype startA = i;
+                size_t startA = i;
                 while (i < lenA && a[i] == '0') i++;
-                qsizetype numStartA = i;
-                while (i < lenA && a[i].isDigit()) i++;
-                qsizetype numLenA = i - numStartA;
+                size_t numStartA = i;
+                while (i < lenA && isDigit(a[i])) i++;
+                size_t numLenA = i - numStartA;
 
-                qsizetype startB = j;
+                size_t startB = j;
                 while (j < lenB && b[j] == '0') j++;
-                qsizetype numStartB = j;
-                while (j < lenB && b[j].isDigit()) j++;
-                qsizetype numLenB = j - numStartB;
+                size_t numStartB = j;
+                while (j < lenB && isDigit(b[j])) j++;
+                size_t numLenB = j - numStartB;
 
                 // Compare significant digits length
                 if (numLenA != numLenB) {
@@ -53,22 +59,22 @@ public:
                 }
 
                 // If same number of significant digits, compare digit-by-digit
-                for (qsizetype k = 0; k < numLenA; ++k) {
+                for (size_t k = 0; k < numLenA; ++k) {
                     if (a[numStartA + k] != b[numStartB + k]) {
                         return a[numStartA + k] < b[numStartB + k];
                     }
                 }
 
-                // If numeric value is identical (e.g. "02" vs "2"), resolve by total length
-                qsizetype totalLenA = i - startA;
-                qsizetype totalLenB = j - startB;
+                // If numeric value is identical (e.g. "02" vs "2"), resolve by total length (shorter first)
+                size_t totalLenA = i - startA;
+                size_t totalLenB = j - startB;
                 if (totalLenA != totalLenB) {
                     return totalLenA < totalLenB;
                 }
             } else {
-                // Non-numeric chunk comparison (case-insensitive)
-                const QChar lowA = ca.toLower();
-                const QChar lowB = cb.toLower();
+                // Non-numeric chunk comparison (case-insensitive for ASCII)
+                unsigned char lowA = (ca >= 'A' && ca <= 'Z') ? static_cast<unsigned char>(ca + ('a' - 'A')) : ca;
+                unsigned char lowB = (cb >= 'A' && cb <= 'Z') ? static_cast<unsigned char>(cb + ('a' - 'A')) : cb;
                 if (lowA != lowB) {
                     return lowA < lowB;
                 }
@@ -82,8 +88,24 @@ public:
             return lenA < lenB;
         }
 
-        // Final deterministic tie-breaker: strict binary case-sensitive comparison
-        return a.compare(b, Qt::CaseSensitive) < 0;
+        // Final deterministic tie-breaker: strict binary UTF-8 byte comparison (unsigned char)
+        return std::lexicographical_compare(
+            reinterpret_cast<const unsigned char*>(a.data()),
+            reinterpret_cast<const unsigned char*>(a.data()) + a.size(),
+            reinterpret_cast<const unsigned char*>(b.data()),
+            reinterpret_cast<const unsigned char*>(b.data()) + b.size()
+        );
+    }
+
+    static bool naturalSortLess(const QString& a, const QString& b) {
+        auto uA = a.toUtf8();
+        auto uB = b.toUtf8();
+        return naturalSortLess(std::string_view(uA.constData(), static_cast<size_t>(uA.size())),
+                               std::string_view(uB.constData(), static_cast<size_t>(uB.size())));
+    }
+
+    bool operator()(const std::string& a, const std::string& b) const {
+        return naturalSortLess(a, b);
     }
 
     bool operator()(const QString& a, const QString& b) const {
@@ -91,7 +113,7 @@ public:
     }
 
     bool operator()(const SessionTrack& a, const SessionTrack& b) const {
-        return naturalSortLess(QString::fromStdString(a.fileName), QString::fromStdString(b.fileName));
+        return naturalSortLess(a.fileName, b.fileName);
     }
 };
 
@@ -111,19 +133,14 @@ public:
         m_tracks.clear();
         m_tracks.reserve(fileNames.size());
 
-        NaturalSortComparator comparator;
-        std::vector<QString> sortedNames;
-        sortedNames.reserve(fileNames.size());
-        for (const auto& fn : fileNames) {
-            sortedNames.push_back(QString::fromStdString(fn));
-        }
+        std::vector<std::string> sortedNames = fileNames;
 
-        // Apply strict deterministic natural sort
-        std::sort(sortedNames.begin(), sortedNames.end(), comparator);
+        // Apply strict deterministic natural sort with UTF-8 byte tie-breaker
+        std::sort(sortedNames.begin(), sortedNames.end(), NaturalSortComparator{});
 
         for (size_t i = 0; i < sortedNames.size(); ++i) {
             SessionTrack tr;
-            tr.fileName = sortedNames[i].toStdString();
+            tr.fileName = sortedNames[i];
             tr.path = folderPath + "/" + tr.fileName;
             tr.index = i;
             m_tracks.push_back(std::move(tr));

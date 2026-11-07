@@ -5,6 +5,8 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <atomic>
+#include <algorithm>
 
 namespace desk32::engine::deck {
 
@@ -39,13 +41,18 @@ public:
         }
     }
 
-    [[nodiscard]] double graphRate() const noexcept { return m_graphRate; }
+    [[nodiscard]] double graphRate() const noexcept { return m_graphRate.load(std::memory_order_relaxed); }
     void setGraphRate(double rate) {
-        m_graphRate = rate;
+        m_graphRate.store(rate, std::memory_order_relaxed);
+        for (auto& d : m_decks) {
+            if (d) {
+                d->configureGraphRate(rate);
+            }
+        }
     }
 
-    [[nodiscard]] char activeDeckId() const noexcept { return m_activeDeckId; }
-    [[nodiscard]] char previousDeckId() const noexcept { return m_previousDeckId; }
+    [[nodiscard]] char activeDeckId() const noexcept { return m_activeDeckId.load(std::memory_order_relaxed); }
+    [[nodiscard]] char previousDeckId() const noexcept { return m_previousDeckId.load(std::memory_order_relaxed); }
 
     ReferenceDeck* deck(char id) {
         size_t idx = static_cast<size_t>(id - 'A');
@@ -58,16 +65,16 @@ public:
     }
 
     ReferenceDeck* activeDeck() {
-        return deck(m_activeDeckId);
+        return deck(m_activeDeckId.load(std::memory_order_relaxed));
     }
 
     const ReferenceDeck* activeDeck() const {
-        return deck(m_activeDeckId);
+        return deck(m_activeDeckId.load(std::memory_order_relaxed));
     }
 
     /// Perform deck switching with mode selection (Section 2.3)
     SwitchResult switchDeck(char targetId, SwitchingMode mode) {
-        char sourceId = m_activeDeckId;
+        char sourceId = m_activeDeckId.load(std::memory_order_relaxed);
         if (sourceId == targetId) {
             return {sourceId, targetId, mode, 0.0, true};
         }
@@ -101,8 +108,8 @@ public:
             tgt->play();
         }
 
-        m_previousDeckId = sourceId;
-        m_activeDeckId = targetId;
+        m_previousDeckId.store(sourceId, std::memory_order_relaxed);
+        m_activeDeckId.store(targetId, std::memory_order_relaxed);
 
         auto end = std::chrono::steady_clock::now();
         double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
@@ -110,9 +117,9 @@ public:
         return {sourceId, targetId, mode, elapsedMs, true};
     }
 
-    /// Direct Mode renegotiation simulation: re-negotiates graph rate directly with backend (Section 2.6)
+    /// Direct Mode renegotiation: re-negotiates graph rate directly with backend (Section 2.6)
     SwitchResult directModeSwitch(char targetId) {
-        char sourceId = m_activeDeckId;
+        char sourceId = m_activeDeckId.load(std::memory_order_relaxed);
         auto start = std::chrono::steady_clock::now();
 
         ReferenceDeck* tgt = deck(targetId);
@@ -120,16 +127,14 @@ public:
             return {sourceId, targetId, SwitchingMode::Normal, 0.0, false};
         }
 
-        // Backend sample rate reconfiguration (e.g. 44.1k -> 192k)
-        m_graphRate = tgt->trackInfo().sampleRate;
+        // Backend sample rate reconfiguration
+        setGraphRate(tgt->trackInfo().sampleRate);
 
         // Reconfigure active deck for direct mode (bypass resampler)
-        tgt->loadTrack(tgt->trackInfo(), m_graphRate);
+        tgt->loadTrack(tgt->trackInfo(), tgt->trackInfo().sampleRate);
         tgt->play();
-        m_activeDeckId = targetId;
-
-        // Simulate ALSA/PipeWire driver stream renegotiation handshake delay (typically 20-50ms)
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        m_previousDeckId.store(sourceId, std::memory_order_relaxed);
+        m_activeDeckId.store(targetId, std::memory_order_relaxed);
 
         auto finish = std::chrono::steady_clock::now();
         double elapsedMs = std::chrono::duration<double, std::milli>(finish - start).count();
@@ -139,12 +144,13 @@ public:
 
     /// Quick toggle between Deck A and Deck B
     SwitchResult quickSwitchAB(SwitchingMode mode = SwitchingMode::Comparative) {
-        char target = (m_activeDeckId == 'A') ? 'B' : 'A';
+        char target = (m_activeDeckId.load(std::memory_order_relaxed) == 'A') ? 'B' : 'A';
         return switchDeck(target, mode);
     }
 
     /// Render planar audio block from the currently active deck.
     /// In Normal mode, active decks in background also advance frames to maintain synchronization.
+    /// Uses pre-allocated member buffers to guarantee strictly ZERO dynamic memory allocation on the Audio Thread.
     size_t renderActiveBlock(double* outLeft, double* outRight, size_t frames) {
         ReferenceDeck* active = activeDeck();
         size_t rendered = 0;
@@ -156,12 +162,15 @@ public:
             std::fill_n(outRight, frames, 0.0);
         }
 
-        // Advance any playing background decks
+        // Advance any playing background decks without heap allocation
         for (auto& d : m_decks) {
             if (d.get() != active && d->state() == TransportState::Playing) {
-                std::vector<double> discardL(frames);
-                std::vector<double> discardR(frames);
-                d->renderBlock(discardL.data(), discardR.data(), frames);
+                size_t remaining = frames;
+                while (remaining > 0) {
+                    size_t chunk = std::min(remaining, size_t(4096));
+                    d->renderBlock(m_discardL.data(), m_discardR.data(), chunk);
+                    remaining -= chunk;
+                }
             }
         }
 
@@ -179,10 +188,14 @@ public:
     }
 
 private:
-    double m_graphRate = 48000.0;
-    char m_activeDeckId = 'A';
-    char m_previousDeckId = 'B';
+    std::atomic<double> m_graphRate{48000.0};
+    std::atomic<char> m_activeDeckId{'A'};
+    std::atomic<char> m_previousDeckId{'B'};
     std::array<std::unique_ptr<ReferenceDeck>, 4> m_decks;
+
+    // Pre-allocated Audio Thread scratch buffers for background deck advancement (zero RT heap allocation)
+    alignas(64) std::array<double, 4096> m_discardL{};
+    alignas(64) std::array<double, 4096> m_discardR{};
 };
 
 } // namespace desk32::engine::deck

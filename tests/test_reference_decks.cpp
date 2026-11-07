@@ -5,7 +5,45 @@
 #include <fstream>
 #include <vector>
 #include <cmath>
+#include <atomic>
+#include <cstdlib>
+#include <unistd.h>
+#include <cstring>
+#include <execinfo.h>
 #include "engine/deck/DeckManager.hpp"
+
+static std::atomic<bool> s_trackAllocations{false};
+static std::atomic<size_t> s_allocationCount{0};
+
+void* operator new(size_t size) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
+void* operator new[](size_t size) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
+void operator delete(void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, size_t) noexcept {
+    std::free(p);
+}
 
 using namespace desk32::engine::deck;
 
@@ -18,6 +56,7 @@ private slots:
     void testSwitchingDualModesAndQuickAB();
     void testDeckLockProtectionAndTransportPermission();
     void testFolderSessionIndexZeroAndReadAhead();
+    void testZeroDynamicAllocationInRenderBlock();
     void cleanupTestCase();
 
 private:
@@ -209,6 +248,34 @@ void TestReferenceDecks::testFolderSessionIndexZeroAndReadAhead()
     QVERIFY(!deck.advanceFolderNext());
     QVERIFY(!deck.folderSession().isActive());
     QCOMPARE(deck.state(), TransportState::Stopped);
+}
+
+void TestReferenceDecks::testZeroDynamicAllocationInRenderBlock()
+{
+    DeckManager manager(48000.0);
+    manager.deck('A')->loadTrack(m_wav1.toStdString(), 48000.0);
+    manager.deck('B')->loadTrack(m_wav2.toStdString(), 48000.0);
+    manager.deck('A')->play();
+    manager.deck('B')->play();
+
+    std::vector<double> outL(4096, 0.0);
+    std::vector<double> outR(4096, 0.0);
+
+    // Warm-up one render cycle
+    manager.renderActiveBlock(outL.data(), outR.data(), 256);
+
+    // Track dynamic memory allocations on Audio Thread rendering
+    s_allocationCount.store(0);
+    s_trackAllocations.store(true);
+
+    for (size_t frames : {size_t(64), size_t(128), size_t(256), size_t(512), size_t(1024), size_t(2048), size_t(4096)}) {
+        manager.renderActiveBlock(outL.data(), outR.data(), frames);
+    }
+
+    s_trackAllocations.store(false);
+
+    qDebug() << "Total dynamic heap allocations during renderActiveBlock:" << s_allocationCount.load();
+    QCOMPARE(s_allocationCount.load(), 0u);
 }
 
 void TestReferenceDecks::cleanupTestCase()

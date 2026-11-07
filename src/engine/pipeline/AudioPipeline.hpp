@@ -37,9 +37,17 @@ public:
         m_listeningReclaimer.drainAll();
     }
 
-    [[nodiscard]] double graphSampleRate() const noexcept { return m_graphSampleRate; }
+    [[nodiscard]] double graphSampleRate() const noexcept { return m_graphSampleRate.load(std::memory_order_relaxed); }
     void setGraphSampleRate(double sampleRate) {
-        m_graphSampleRate = sampleRate;
+        m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
+        auto* master = m_masterReclaimer.current();
+        if (master) {
+            master->configure(sampleRate);
+        }
+        auto* listening = m_listeningReclaimer.current();
+        if (listening) {
+            listening->configure(sampleRate);
+        }
     }
 
     [[nodiscard]] OutputPathMode outputMode() const noexcept { return m_outputMode.load(); }
@@ -122,7 +130,7 @@ public:
     }
 
 private:
-    double m_graphSampleRate;
+    std::atomic<double> m_graphSampleRate;
     std::atomic<OutputPathMode> m_outputMode{OutputPathMode::ListeningPath};
     std::atomic<double> m_listeningVolume{1.0};
     std::atomic<double> m_renderMonitorVolume{1.0};

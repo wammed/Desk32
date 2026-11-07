@@ -24,6 +24,12 @@ enum class StreamState {
     Error
 };
 
+enum class DirectModeStatus {
+    Unknown = 0,    ///< Unmeasured / Not yet queried or unconnected
+    Disabled = 1,   ///< Operating through PipeWire resampler/graph mixer
+    Active = 2      ///< Direct Mode confirmed (1:1 rate match, bit-perfect direct output)
+};
+
 struct StreamDiagnostics {
     uint32_t sampleRate = 48000;
     uint32_t channels = 2;
@@ -32,6 +38,7 @@ struct StreamDiagnostics {
     uint64_t xrunCount = 0;
     uint64_t totalFramesProcessed = 0;
     bool isDirectMode = false;
+    DirectModeStatus directModeStatus = DirectModeStatus::Unknown;
 };
 
 /// Native low-latency stereo PCM audio output powered by PipeWire (pw_stream / SPA)
@@ -66,6 +73,7 @@ public:
     [[nodiscard]] bool isRunning() const noexcept { return m_state.load(std::memory_order_relaxed) == StreamState::Streaming; }
 
     [[nodiscard]] StreamDiagnostics diagnostics() const noexcept;
+    [[nodiscard]] DirectModeStatus directModeStatus() const noexcept { return m_directModeStatus.load(std::memory_order_relaxed); }
 
     void setAudioCallback(AudioCallback callback) {
         m_callback = std::move(callback);
@@ -98,6 +106,7 @@ private:
     std::atomic<uint64_t> m_xrunCount{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};
     std::atomic<bool> m_isDirectMode{false};
+    std::atomic<DirectModeStatus> m_directModeStatus{DirectModeStatus::Unknown};
     bool m_offlineSimulation = false;
 
     AudioCallback m_callback;

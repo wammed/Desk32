@@ -3,6 +3,7 @@
 #include <string>
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 
 namespace desk32::engine::pipeline {
 
@@ -32,8 +33,8 @@ public:
         m_sampleRate = sampleRate;
     }
 
-    [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed; }
-    virtual void setBypassed(bool bypassed) noexcept { m_bypassed = bypassed; }
+    [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed.load(std::memory_order_relaxed); }
+    virtual void setBypassed(bool bypassed) noexcept { m_bypassed.store(bypassed, std::memory_order_relaxed); }
 
     [[nodiscard]] virtual int64_t latencyFrames() const noexcept { return 0; }
     virtual void reset() {}
@@ -49,7 +50,7 @@ protected:
     std::string m_name;
     NodeAffiliation m_affiliation;
     double m_sampleRate = 48000.0;
-    bool m_bypassed = false;
+    std::atomic<bool> m_bypassed{false};
 };
 
 } // namespace desk32::engine::pipeline

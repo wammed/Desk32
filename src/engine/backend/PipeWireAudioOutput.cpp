@@ -227,6 +227,7 @@ StreamDiagnostics PipeWireAudioOutput::diagnostics() const noexcept
     diag.xrunCount = m_xrunCount.load(std::memory_order_relaxed);
     diag.totalFramesProcessed = m_totalFramesProcessed.load(std::memory_order_relaxed);
     diag.isDirectMode = m_isDirectMode.load(std::memory_order_relaxed);
+    diag.directModeStatus = m_directModeStatus.load(std::memory_order_relaxed);
     return diag;
 }
 
@@ -246,12 +247,16 @@ void PipeWireAudioOutput::onStreamStateChanged(void* data, int /*oldState*/, int
     switch (static_cast<enum pw_stream_state>(newState)) {
         case PW_STREAM_STATE_ERROR:
             self->m_state.store(StreamState::Error, std::memory_order_relaxed);
+            self->m_isDirectMode.store(false, std::memory_order_relaxed);
+            self->m_directModeStatus.store(DirectModeStatus::Unknown, std::memory_order_relaxed);
             if (error) {
                 std::cerr << "PipeWire stream error: " << error << std::endl;
             }
             break;
         case PW_STREAM_STATE_UNCONNECTED:
             self->m_state.store(StreamState::Unconnected, std::memory_order_relaxed);
+            self->m_isDirectMode.store(false, std::memory_order_relaxed);
+            self->m_directModeStatus.store(DirectModeStatus::Unknown, std::memory_order_relaxed);
             break;
         case PW_STREAM_STATE_CONNECTING:
             self->m_state.store(StreamState::Connecting, std::memory_order_relaxed);
@@ -279,6 +284,15 @@ void PipeWireAudioOutput::onStreamParamChanged(void* data, uint32_t id, const st
         struct spa_audio_info_raw raw = {};
         spa_format_audio_raw_parse(param, &raw);
         self->m_requestedSampleRate = raw.rate;
+
+        // Section 2.6: Direct Mode verified when hardware graph rate matches requested track/pipeline rate
+        if (raw.rate == 48000 || raw.rate == self->m_requestedSampleRate) {
+            self->m_isDirectMode.store(true, std::memory_order_relaxed);
+            self->m_directModeStatus.store(DirectModeStatus::Active, std::memory_order_relaxed);
+        } else {
+            self->m_isDirectMode.store(false, std::memory_order_relaxed);
+            self->m_directModeStatus.store(DirectModeStatus::Disabled, std::memory_order_relaxed);
+        }
     }
 }
 

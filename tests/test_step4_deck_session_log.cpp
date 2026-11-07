@@ -214,6 +214,24 @@ void TestStep4DeckSessionLog::testFolderSessionNaturalSortDeterminism()
     // Verify read-ahead: points to index 1
     QVERIFY(session.readAheadTrack() != nullptr);
     QCOMPARE(session.readAheadTrack()->index, 1);
+
+    // Verify Japanese/Unicode natural sort and strict UTF-8 raw byte tie-breaker
+    std::vector<std::string> utf8List = {
+        "トラック10.flac",
+        "トラック1.flac",
+        "トラック2.flac",
+        "Song_b.flac",
+        "Song_B.flac"
+    };
+    FolderSession utf8Session;
+    QVERIFY(utf8Session.startSession("/music/utf8", utf8List));
+    const auto& uTracks = utf8Session.tracks();
+    QCOMPARE(uTracks.size(), 5u);
+    QCOMPARE(uTracks[0].fileName, std::string("Song_B.flac")); // 'B' (0x42) < 'b' (0x62) via UTF-8 binary tie-breaker
+    QCOMPARE(uTracks[1].fileName, std::string("Song_b.flac"));
+    QCOMPARE(uTracks[2].fileName, std::string("トラック1.flac"));
+    QCOMPARE(uTracks[3].fileName, std::string("トラック2.flac"));
+    QCOMPARE(uTracks[4].fileName, std::string("トラック10.flac"));
 }
 
 void TestStep4DeckSessionLog::testArtworkStrictNonProcessing()

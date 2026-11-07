@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -43,9 +44,8 @@ void FFmpegAudioDecoder::cleanup()
         m_formatCtx = nullptr;
     }
 
-    m_fifoL.clear();
-    m_fifoR.clear();
     m_fifoReadPos = 0;
+    m_fifoWritePos = 0;
     m_audioStreamIndex = -1;
     m_currentFrame = 0;
     m_isOpen = false;
@@ -210,16 +210,31 @@ bool FFmpegAudioDecoder::decodeNextPacket()
     while (true) {
         int ret = avcodec_receive_frame(m_codecCtx, m_decodedFrame);
         if (ret == 0) {
-            // Successfully retrieved a decoded frame. Convert to planar double.
+            // Successfully retrieved a decoded frame. Convert to planar double without heap allocation.
             const int inSamples = m_decodedFrame->nb_samples;
             if (inSamples <= 0) continue;
 
-            const int outCapacity = inSamples + 256;
-            std::vector<double> convertedL(static_cast<size_t>(outCapacity));
-            std::vector<double> convertedR(static_cast<size_t>(outCapacity));
+            // Compact FIFO if read pointer has advanced
+            if (m_fifoReadPos > 0) {
+                size_t unread = (m_fifoWritePos > m_fifoReadPos) ? (m_fifoWritePos - m_fifoReadPos) : 0;
+                if (unread > 0) {
+                    std::memmove(m_fifoL.data(), m_fifoL.data() + m_fifoReadPos, unread * sizeof(double));
+                    std::memmove(m_fifoR.data(), m_fifoR.data() + m_fifoReadPos, unread * sizeof(double));
+                }
+                m_fifoReadPos = 0;
+                m_fifoWritePos = unread;
+            }
+
+            size_t availableCapacity = (FIFO_CAPACITY > m_fifoWritePos) ? (FIFO_CAPACITY - m_fifoWritePos) : 0;
+            if (availableCapacity == 0) {
+                av_frame_unref(m_decodedFrame);
+                return true; // FIFO full
+            }
+
+            int outCapacity = static_cast<int>(std::min(availableCapacity, size_t(8192)));
             uint8_t* outData[2] = {
-                reinterpret_cast<uint8_t*>(convertedL.data()),
-                reinterpret_cast<uint8_t*>(convertedR.data())
+                reinterpret_cast<uint8_t*>(m_fifoL.data() + m_fifoWritePos),
+                reinterpret_cast<uint8_t*>(m_fifoR.data() + m_fifoWritePos)
             };
 
             int convertedFrames = swr_convert(
@@ -230,21 +245,12 @@ bool FFmpegAudioDecoder::decodeNextPacket()
                 inSamples
             );
 
-            if (convertedFrames > 0) {
-                // Prune read portion of FIFO before growing
-                if (m_fifoReadPos > 0) {
-                    m_fifoL.erase(m_fifoL.begin(), m_fifoL.begin() + static_cast<ptrdiff_t>(m_fifoReadPos));
-                    m_fifoR.erase(m_fifoR.begin(), m_fifoR.begin() + static_cast<ptrdiff_t>(m_fifoReadPos));
-                    m_fifoReadPos = 0;
-                }
+            av_frame_unref(m_decodedFrame);
 
-                m_fifoL.insert(m_fifoL.end(), convertedL.begin(), convertedL.begin() + convertedFrames);
-                m_fifoR.insert(m_fifoR.end(), convertedR.begin(), convertedR.begin() + convertedFrames);
-                av_frame_unref(m_decodedFrame);
+            if (convertedFrames > 0) {
+                m_fifoWritePos += static_cast<size_t>(convertedFrames);
                 return true;
             }
-
-            av_frame_unref(m_decodedFrame);
             continue;
         }
 
@@ -280,7 +286,7 @@ size_t FFmpegAudioDecoder::readFrames(double* left, double* right, size_t maxFra
     size_t framesRead = 0;
 
     while (framesRead < maxFrames) {
-        size_t availableInFifo = (m_fifoL.size() > m_fifoReadPos) ? (m_fifoL.size() - m_fifoReadPos) : 0;
+        size_t availableInFifo = (m_fifoWritePos > m_fifoReadPos) ? (m_fifoWritePos - m_fifoReadPos) : 0;
 
         if (availableInFifo > 0) {
             size_t toCopy = std::min(availableInFifo, maxFrames - framesRead);
@@ -319,9 +325,8 @@ bool FFmpegAudioDecoder::seek(int64_t targetFrame)
     }
 
     avcodec_flush_buffers(m_codecCtx);
-    m_fifoL.clear();
-    m_fifoR.clear();
     m_fifoReadPos = 0;
+    m_fifoWritePos = 0;
     m_currentFrame = targetFrame;
 
     return true;

@@ -90,14 +90,14 @@ ApplicationWindow {
                     width: 90
                     height: 22
                     radius: 3
-                    color: EngineController.isDirectMode ? "#00E67620" : "#22262c"
-                    border.color: EngineController.isDirectMode ? "#00E676" : "#363d47"
+                    color: EngineController.directModeStatus === 2 ? "#00E67620" : (EngineController.directModeStatus === 1 ? "#22262c" : "#1c1f24")
+                    border.color: EngineController.directModeStatus === 2 ? "#00E676" : (EngineController.directModeStatus === 1 ? "#363d47" : "#2a3038")
                     Label {
                         anchors.centerIn: parent
-                        text: qsTr("DIRECT MODE")
+                        text: EngineController.directModeStatus === 2 ? qsTr("DIRECT MODE") : (EngineController.directModeStatus === 1 ? qsTr("DIRECT: OFF") : qsTr("DIRECT: N/A"))
                         font.pixelSize: 10
                         font.bold: true
-                        color: EngineController.isDirectMode ? "#00E676" : "#758291"
+                        color: EngineController.directModeStatus === 2 ? "#00E676" : (EngineController.directModeStatus === 1 ? "#758291" : "#55606d")
                     }
                 }
                 Rectangle {
@@ -613,10 +613,10 @@ ApplicationWindow {
                             }
                             Item { Layout.fillWidth: true }
                             Label {
-                                text: "PIPEWIRE NATIVE // " + EngineController.graphSampleRate.toFixed(1) + " kHz // BUFFER: 256 // XRUN: " + EngineController.xrunCount
+                                text: "PIPEWIRE: " + EngineController.backendStatusText.toUpperCase() + " // " + (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz // BUFFER: 256 // XRUN: " + EngineController.xrunCount
                                 font.family: "Monospace"
                                 font.pixelSize: 12
-                                color: EngineController.xrunCount === 0 ? "#00E676" : "#FF5252"
+                                color: EngineController.backendStatusText === "Error" ? "#FF5252" : (EngineController.xrunCount === 0 ? "#00E676" : "#FF5252")
                             }
                         }
 

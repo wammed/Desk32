@@ -49,38 +49,75 @@ bool EngineController::initialize() {
 
     // 5. Initialize Native PipeWire AudioOutput
     m_audioOutput = std::make_unique<engine::backend::PipeWireAudioOutput>();
-    m_audioOutput->initialize(48000, 256);
+    bool initOk = m_audioOutput->initialize(48000, 256);
+    if (!initOk) {
+        log::LogService::instance().start();
+        log::LogService::instance().log(
+            "AudioEngine",
+            "Initialize",
+            "Failed",
+            "Failed to initialize PipeWire audio output context.",
+            "System",
+            "PipeWire",
+            "{\"error_code\":2001}"
+        );
+        emit diagnosticsChanged();
+        return false;
+    }
 
-    // Wire real-time audio callback
+    // Wire real-time audio callback (strictly ZERO dynamic memory allocations in RT path)
     m_audioOutput->setAudioCallback([this](float* outInterleaved, size_t frames) {
         if (!m_deckManager || !m_pipeline) {
             std::fill_n(outInterleaved, frames * 2, 0.0f);
             return;
         }
 
-        std::vector<double> inL(frames);
-        std::vector<double> inR(frames);
-        m_deckManager->renderActiveBlock(inL.data(), inR.data(), frames);
+        const double curGain = m_masterGain.load(std::memory_order_relaxed);
+        const int curRoute = m_outputRoutingMode.load(std::memory_order_relaxed);
 
-        // Apply master gain
-        if (m_masterGain != 1.0) {
-            for (size_t i = 0; i < frames; ++i) {
-                inL[i] *= m_masterGain;
-                inR[i] *= m_masterGain;
-            }
-        }
-
-        // Set output mode at Logical Render Tap
         m_pipeline->setOutputMode(
-            m_outputRoutingMode == 1 ? engine::routing::OutputPathMode::RenderMonitorPath
-                                     : engine::routing::OutputPathMode::ListeningPath
+            curRoute == 1 ? engine::routing::OutputPathMode::RenderMonitorPath
+                          : engine::routing::OutputPathMode::ListeningPath
         );
 
-        // Process through AudioPipeline directly into Float32 interleaved PCM with TPDF dither
-        m_pipeline->process(inL.data(), inR.data(), frames, outInterleaved, engine::format::SampleFormat::Float32, true);
+        size_t remaining = frames;
+        size_t offset = 0;
+        while (remaining > 0) {
+            size_t chunk = std::min(remaining, size_t(4096));
+            m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(), chunk);
+
+            // Apply master gain
+            if (curGain != 1.0) {
+                for (size_t i = 0; i < chunk; ++i) {
+                    m_audioInL[i] *= curGain;
+                    m_audioInR[i] *= curGain;
+                }
+            }
+
+            float* chunkOut = outInterleaved + (offset * 2);
+            m_pipeline->process(m_audioInL.data(), m_audioInR.data(), chunk,
+                                chunkOut, engine::format::SampleFormat::Float32, true);
+
+            remaining -= chunk;
+            offset += chunk;
+        }
     });
 
-    m_audioOutput->start();
+    bool startOk = m_audioOutput->start();
+    if (!startOk) {
+        log::LogService::instance().start();
+        log::LogService::instance().log(
+            "AudioEngine",
+            "StartStream",
+            "Failed",
+            "Failed to start PipeWire audio output stream.",
+            "System",
+            "PipeWire",
+            "{\"error_code\":2002}"
+        );
+        emit diagnosticsChanged();
+        return false;
+    }
 
     // Periodic check for seamless track auto-advancement in Folder Sessions
     auto* trackTimer = new QTimer(this);
@@ -120,19 +157,19 @@ double EngineController::graphSampleRate() const {
 }
 
 int EngineController::switchingMode() const {
-    return m_switchingMode;
+    return m_switchingMode.load(std::memory_order_relaxed);
 }
 
 int EngineController::outputRoutingMode() const {
-    return m_outputRoutingMode;
+    return m_outputRoutingMode.load(std::memory_order_relaxed);
 }
 
 bool EngineController::globalDspBypass() const {
-    return m_globalDspBypass;
+    return m_globalDspBypass.load(std::memory_order_relaxed);
 }
 
 double EngineController::masterGain() const {
-    return m_masterGain;
+    return m_masterGain.load(std::memory_order_relaxed);
 }
 
 int EngineController::xrunCount() const {
@@ -145,16 +182,36 @@ bool EngineController::isDirectMode() const {
     return m_audioOutput->diagnostics().isDirectMode;
 }
 
+int EngineController::directModeStatus() const {
+    if (!m_audioOutput) return 0; // Unknown
+    return static_cast<int>(m_audioOutput->directModeStatus());
+}
+
+int EngineController::backendStatus() const {
+    if (!m_audioOutput) return 0; // Unconnected
+    return static_cast<int>(m_audioOutput->state());
+}
+
+QString EngineController::backendStatusText() const {
+    if (!m_audioOutput) return "Unconnected";
+    switch (m_audioOutput->state()) {
+        case engine::backend::StreamState::Unconnected: return "Unconnected";
+        case engine::backend::StreamState::Connecting:  return "Connecting";
+        case engine::backend::StreamState::Paused:      return "Paused";
+        case engine::backend::StreamState::Streaming:   return "Streaming";
+        case engine::backend::StreamState::Error:       return "Error";
+    }
+    return "Unknown";
+}
+
 void EngineController::setSwitchingMode(int mode) {
-    if (m_switchingMode != mode) {
-        m_switchingMode = mode;
+    if (m_switchingMode.exchange(mode) != mode) {
         emit switchingModeChanged(mode);
     }
 }
 
 void EngineController::setOutputRoutingMode(int path) {
-    if (m_outputRoutingMode != path) {
-        m_outputRoutingMode = path;
+    if (m_outputRoutingMode.exchange(path) != path) {
         emit outputRoutingModeChanged(path);
         log::LogService::instance().log(
             "Routing",
@@ -168,8 +225,7 @@ void EngineController::setOutputRoutingMode(int path) {
 }
 
 void EngineController::setGlobalDspBypass(bool bypass) {
-    if (m_globalDspBypass != bypass) {
-        m_globalDspBypass = bypass;
+    if (m_globalDspBypass.exchange(bypass) != bypass) {
         if (m_peqNode) m_peqNode->setBypassed(bypass);
         if (m_geqNode) m_geqNode->setBypassed(bypass);
         if (m_filterNode) m_filterNode->setBypassed(bypass);
@@ -189,9 +245,10 @@ void EngineController::setGlobalDspBypass(bool bypass) {
 }
 
 void EngineController::setMasterGain(double gain) {
-    if (m_masterGain != gain) {
-        m_masterGain = std::clamp(gain, 0.0, 2.0);
-        emit masterGainChanged(m_masterGain);
+    double clamped = std::clamp(gain, 0.0, 2.0);
+    double prev = m_masterGain.exchange(clamped);
+    if (prev != clamped) {
+        emit masterGainChanged(clamped);
     }
 }
 

@@ -14,6 +14,7 @@ private slots:
     void testAudioPipelineFormatConversionAndClamping();
     void testOutputPathRoutingAndZeroLeakage();
     void testEpochReclamationHotSwap();
+    void testEpochReclaimerConcurrentStress();
     void cleanupTestCase();
 };
 
@@ -174,6 +175,48 @@ void TestAudioPipeline::testEpochReclamationHotSwap()
     // Drain remaining retired chains
     pipeline.reclaimRetiredMemory();
     QVERIFY(true);
+}
+
+void TestAudioPipeline::testEpochReclaimerConcurrentStress()
+{
+    // Section 9.3: Multi-threaded stress test of EpochReclaimer
+    // Verifies concurrent reader thread and writer swap thread with zero use-after-free
+    EpochReclaimer<std::string> reclaimer;
+    reclaimer.swapChain(std::make_unique<std::string>("Initial Value"));
+
+    std::atomic<bool> stopReader{false};
+    std::atomic<uint64_t> readCycles{0};
+
+    // Reader thread (simulating Audio Thread)
+    std::thread readerThread([&]() {
+        while (!stopReader.load(std::memory_order_relaxed)) {
+            auto guard = reclaimer.enterRead();
+            if (guard.chain) {
+                // Access content
+                volatile size_t sz = guard.chain->size();
+                (void)sz;
+            }
+            readCycles.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Writer thread (Control Thread) performs rapid swaps
+    const int swaps = 2000;
+    for (int i = 0; i < swaps; ++i) {
+        reclaimer.swapChain(std::make_unique<std::string>("Chain Version " + std::to_string(i)));
+        if (i % 50 == 0) {
+            reclaimer.reclaimRetired();
+        }
+    }
+
+    stopReader.store(true, std::memory_order_relaxed);
+    readerThread.join();
+
+    // After reader exits, reclaim all
+    reclaimer.reclaimRetired();
+    QCOMPARE(reclaimer.retiredCount(), 0u);
+    QVERIFY(readCycles.load() > 1000);
 }
 
 void TestAudioPipeline::cleanupTestCase()

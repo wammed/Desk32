@@ -2,6 +2,7 @@
 
 #include "AudioDecoder.hpp"
 #include <vector>
+#include <array>
 #include <memory>
 
 // Forward declare FFmpeg opaque structs to keep header C++ clean
@@ -52,10 +53,12 @@ private:
     AudioFormatInfo m_formatInfo;
     metadata::TrackMetadata m_metadata;
 
-    // Internal planar double FIFO buffers for smooth block delivery
-    std::vector<double> m_fifoL;
-    std::vector<double> m_fifoR;
+    // Pre-allocated internal planar double FIFO buffers for smooth, zero-allocation block delivery
+    static constexpr size_t FIFO_CAPACITY = 65536;
+    alignas(64) std::array<double, FIFO_CAPACITY> m_fifoL{};
+    alignas(64) std::array<double, FIFO_CAPACITY> m_fifoR{};
     size_t m_fifoReadPos = 0;
+    size_t m_fifoWritePos = 0;
 };
 
 } // namespace desk32::engine::decoder
