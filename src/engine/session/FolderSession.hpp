@@ -18,34 +18,81 @@ struct SessionTrack {
 
 class NaturalSortComparator {
 public:
-    NaturalSortComparator() {
-        m_collator.setNumericMode(true);
-        m_collator.setCaseSensitivity(Qt::CaseInsensitive);
-    }
-
     /// Strictly deterministic natural sort comparison:
-    /// 1. Natural collator comparison (numeric-aware, case-insensitive)
-    /// 2. If equal, length comparison (handles leading zeros like "01" vs "1")
-    /// 3. If still equal, exact binary byte comparison as deterministic tie-breaker
-    bool operator()(const QString& a, const QString& b) const {
-        int cmp = m_collator.compare(a, b);
-        if (cmp != 0) {
-            return cmp < 0;
+    /// 1. Numerical chunk extraction and numerical magnitude comparison
+    /// 2. If numerical magnitudes equal, leading zero resolution via total chunk length
+    /// 3. Non-numeric characters compared case-insensitively (ASCII/Unicode toLower)
+    /// 4. If all chunks equal, exact binary byte comparison (Qt::CaseSensitive) as deterministic tie-breaker
+    /// Completely immune to OS locale, ICU dependency, or Qt QCollator implementation discrepancies.
+    static bool naturalSortLess(const QString& a, const QString& b) {
+        qsizetype i = 0, j = 0;
+        const qsizetype lenA = a.length();
+        const qsizetype lenB = b.length();
+
+        while (i < lenA && j < lenB) {
+            const QChar ca = a[i];
+            const QChar cb = b[j];
+
+            if (ca.isDigit() && cb.isDigit()) {
+                // Numeric chunk comparison
+                qsizetype startA = i;
+                while (i < lenA && a[i] == '0') i++;
+                qsizetype numStartA = i;
+                while (i < lenA && a[i].isDigit()) i++;
+                qsizetype numLenA = i - numStartA;
+
+                qsizetype startB = j;
+                while (j < lenB && b[j] == '0') j++;
+                qsizetype numStartB = j;
+                while (j < lenB && b[j].isDigit()) j++;
+                qsizetype numLenB = j - numStartB;
+
+                // Compare significant digits length
+                if (numLenA != numLenB) {
+                    return numLenA < numLenB;
+                }
+
+                // If same number of significant digits, compare digit-by-digit
+                for (qsizetype k = 0; k < numLenA; ++k) {
+                    if (a[numStartA + k] != b[numStartB + k]) {
+                        return a[numStartA + k] < b[numStartB + k];
+                    }
+                }
+
+                // If numeric value is identical (e.g. "02" vs "2"), resolve by total length
+                qsizetype totalLenA = i - startA;
+                qsizetype totalLenB = j - startB;
+                if (totalLenA != totalLenB) {
+                    return totalLenA < totalLenB;
+                }
+            } else {
+                // Non-numeric chunk comparison (case-insensitive)
+                const QChar lowA = ca.toLower();
+                const QChar lowB = cb.toLower();
+                if (lowA != lowB) {
+                    return lowA < lowB;
+                }
+                i++;
+                j++;
+            }
         }
-        // Tie-breaker 1: length (e.g. "01" vs "1")
-        if (a.length() != b.length()) {
-            return a.length() > b.length(); // "01" before "1" or vice-versa consistently
+
+        // Shorter prefix goes first
+        if (i < lenA || j < lenB) {
+            return lenA < lenB;
         }
-        // Tie-breaker 2: strict binary byte comparison
+
+        // Final deterministic tie-breaker: strict binary case-sensitive comparison
         return a.compare(b, Qt::CaseSensitive) < 0;
     }
 
-    bool operator()(const SessionTrack& a, const SessionTrack& b) const {
-        return (*this)(QString::fromStdString(a.fileName), QString::fromStdString(b.fileName));
+    bool operator()(const QString& a, const QString& b) const {
+        return naturalSortLess(a, b);
     }
 
-private:
-    QCollator m_collator;
+    bool operator()(const SessionTrack& a, const SessionTrack& b) const {
+        return naturalSortLess(QString::fromStdString(a.fileName), QString::fromStdString(b.fileName));
+    }
 };
 
 class FolderSession {

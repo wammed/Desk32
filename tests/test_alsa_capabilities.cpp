@@ -31,6 +31,10 @@ void TestAlsaCapabilities::testCardEnumeration()
         }
     }
 
+    if (cardCount == 0) {
+        QSKIP("No ALSA hardware audio cards detected (running in headless CI/container environment).");
+    }
+
     QVERIFY(cardCount > 0);
 }
 

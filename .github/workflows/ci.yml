@@ -28,6 +28,7 @@ jobs:
             qt6-l10n-tools \
             libgl1-mesa-dev \
             libasound2-dev \
+            pipewire \
             libpipewire-0.3-dev \
             libjack-jackd2-dev \
             libsoxr-dev \
