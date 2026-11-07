@@ -33,7 +33,7 @@ public:
         m_sampleRate = sampleRate;
     }
 
-    [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed.load(std::memory_order_relaxed); }
+    [[nodiscard]] virtual bool isBypassed() const noexcept { return m_bypassed.load(std::memory_order_relaxed); }
     virtual void setBypassed(bool bypassed) noexcept { m_bypassed.store(bypassed, std::memory_order_relaxed); }
 
     [[nodiscard]] virtual int64_t latencyFrames() const noexcept { return 0; }

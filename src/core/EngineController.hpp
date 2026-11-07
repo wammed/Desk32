@@ -10,13 +10,15 @@
 #include "engine/deck/DeckManager.hpp"
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
+#include "engine/insert/ExternalInsertNode.hpp"
+#include "engine/preset/PresetManager.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
 #include "core/log/LogService.hpp"
 
 namespace desk32::core {
 
 /// Unified Studio Console Controller bridging QML UI with Engine Subsystems
-/// Coordinates DeckManager, AudioPipeline, PipeWireAudioOutput, and LogService.
+/// Coordinates DeckManager, AudioPipeline, PipeWireAudioOutput, LogService, ExternalInsert, and PresetManager.
 class EngineController : public QObject {
     Q_OBJECT
 
@@ -38,6 +40,17 @@ class EngineController : public QObject {
     Q_PROPERTY(int limiterLatencyFrames READ limiterLatencyFrames NOTIFY dspTelemetryChanged)
     Q_PROPERTY(QString listeningPresetName READ listeningPresetName NOTIFY listeningPresetChanged)
     Q_PROPERTY(bool listeningCorrectionActive READ listeningCorrectionActive NOTIFY outputRoutingModeChanged)
+
+    // Phase 3: External Insert & Host Bridge Telemetry
+    Q_PROPERTY(int externalInsertState READ externalInsertState NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertStateText READ externalInsertStateText NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(bool externalInsertBypassed READ isExternalInsertBypassed WRITE setExternalInsertBypass NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertReportedLatency READ externalInsertReportedLatency NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertMeasuredLatency READ externalInsertMeasuredLatency NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(double externalInsertMeasuredLatencyMs READ externalInsertMeasuredLatencyMs NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertDelayCompensation READ insertDelayCompensation WRITE setInsertDelayCompensation NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertXRunCount READ externalInsertXRunCount NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertLastError READ externalInsertLastError NOTIFY externalInsertStatusChanged)
 
 public:
     static EngineController& instance();
@@ -66,6 +79,17 @@ public:
     [[nodiscard]] int limiterLatencyFrames() const;
     [[nodiscard]] QString listeningPresetName() const;
     [[nodiscard]] bool listeningCorrectionActive() const;
+
+    // Phase 3 Getters
+    [[nodiscard]] int externalInsertState() const;
+    [[nodiscard]] QString externalInsertStateText() const;
+    [[nodiscard]] bool isExternalInsertBypassed() const;
+    [[nodiscard]] int externalInsertReportedLatency() const;
+    [[nodiscard]] int externalInsertMeasuredLatency() const;
+    [[nodiscard]] double externalInsertMeasuredLatencyMs() const;
+    [[nodiscard]] int insertDelayCompensation() const;
+    [[nodiscard]] int externalInsertXRunCount() const;
+    [[nodiscard]] QString externalInsertLastError() const;
 
     // Property setters
     void setSwitchingMode(int mode);
@@ -123,6 +147,32 @@ public:
     Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
 
+    // Phase 3: External Insert Host Operations (Section 6.0)
+    Q_INVOKABLE bool configureExternalInsert(const QString& clientName,
+                                            const QString& sendL, const QString& sendR,
+                                            const QString& returnL, const QString& returnR,
+                                            double sampleRate = 0.0, int bufferSize = 0,
+                                            int reportedLatencyFrames = 0);
+    Q_INVOKABLE void setExternalInsertBypass(bool bypass);
+    Q_INVOKABLE void triggerInsertLatencyMeasurement();
+    Q_INVOKABLE void recordInsertImpulseReturn(qint64 returnFrame);
+    Q_INVOKABLE QVariantMap getExternalInsertStatus() const;
+    Q_INVOKABLE void simulateInsertDisconnect();
+    Q_INVOKABLE void simulateInsertRecovery();
+    Q_INVOKABLE void setInsertDelayCompensation(int frames);
+
+    // Phase 3: Common Preset Management (Specification Section 11.1)
+    Q_INVOKABLE QStringList listPresets(const QString& category) const;
+    Q_INVOKABLE bool savePreset(const QString& category, const QString& presetName, const QVariantMap& data);
+    Q_INVOKABLE QVariantMap loadPreset(const QString& category, const QString& presetName);
+    Q_INVOKABLE bool deletePreset(const QString& category, const QString& presetName);
+    Q_INVOKABLE bool applyPresetProfile(const QString& category, const QString& presetName);
+    Q_INVOKABLE QVariantMap captureCurrentStateAsPreset(const QString& category);
+
+    // Direct access to nodes for tests
+    [[nodiscard]] std::shared_ptr<engine::insert::ExternalInsertNode> insertNode() const noexcept { return m_insertNode; }
+    [[nodiscard]] engine::preset::PresetManager& presetManager() noexcept { return m_presetManager; }
+
 signals:
     void activeDeckChanged(const QString& deckId);
     void graphSampleRateChanged(double rate);
@@ -140,6 +190,8 @@ signals:
     void compressorParametersChanged();
     void limiterParametersChanged();
     void reverbParametersChanged();
+    void externalInsertStatusChanged();
+    void presetManagementChanged();
 
 private:
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
@@ -153,6 +205,12 @@ private:
     std::shared_ptr<engine::pipeline::CompressorNode> m_compNode;
     std::shared_ptr<engine::pipeline::PeakLimiterNode> m_limiterNode;
     std::shared_ptr<engine::pipeline::ReverbNode> m_reverbNode;
+
+    // Phase 3: External Insert Node
+    std::shared_ptr<engine::insert::ExternalInsertNode> m_insertNode;
+
+    // Phase 3: Common Preset Manager
+    engine::preset::PresetManager& m_presetManager;
 
     // Listening Correction PEQ Node (downstream of Logical Render Tap, Section 5.10 & 5.11)
     std::shared_ptr<engine::pipeline::ParametricEqNode> m_listeningCorrectionNode;
@@ -169,4 +227,3 @@ private:
 };
 
 } // namespace desk32::core
-

@@ -310,6 +310,47 @@ target_include_directories(test_phase2_dsp PRIVATE
 
 add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
 
+# Phase 3: External Plugin Host Integration (External Insert & Preset Management)
+add_executable(test_phase3_external_insert
+    test_phase3_external_insert.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+)
+
+target_link_libraries(test_phase3_external_insert PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_phase3_external_insert PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_phase3_external_insert SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
+add_test(NAME test_phase3_external_insert COMMAND test_phase3_external_insert)
+
 
 
 

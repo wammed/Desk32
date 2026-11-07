@@ -69,6 +69,11 @@ qt_add_executable(desk32
     src/engine/decoder/FFmpegAudioDecoder.cpp
     src/engine/decoder/DecoderWorker.hpp
     src/engine/decoder/DecoderWorker.cpp
+    src/engine/insert/DelayCompensationBuffer.hpp
+    src/engine/insert/ExternalInsertBridge.hpp
+    src/engine/insert/ExternalInsertNode.hpp
+    src/engine/preset/PresetManager.hpp
+    src/engine/preset/PresetManager.cpp
 )
 
 # QML Module Setup
