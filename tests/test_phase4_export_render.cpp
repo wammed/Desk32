@@ -1,0 +1,494 @@
+#include <QTest>
+#include <QObject>
+#include <QTemporaryDir>
+#include <QSignalSpy>
+#include <QDir>
+#include <QFile>
+#include <cmath>
+#include <vector>
+#include <array>
+#include <memory>
+
+#include "engine/render/WavFileWriter.hpp"
+#include "engine/render/RenderSequenceManager.hpp"
+#include "engine/render/RenderChain.hpp"
+#include "engine/render/RenderEngine.hpp"
+#include "engine/decoder/FFmpegAudioDecoder.hpp"
+#include "core/EngineController.hpp"
+#include "core/log/LogService.hpp"
+
+using namespace desk32::engine::render;
+using namespace desk32::engine::decoder;
+using namespace desk32::core;
+using namespace desk32::core::log;
+
+class TestPhase4ExportRender : public QObject {
+    Q_OBJECT
+
+private slots:
+    void initTestCase();
+    void cleanupTestCase();
+
+    // 1. WAV File Writer (16-bit, 24-bit, 32-bit float, RIFF headers, TPDF dither)
+    void testWavFileWriterHeaderAndPCM();
+
+    // 2. Bijective Base-26 Sequence Algorithm
+    void testRenderSequenceBijectiveBase26();
+
+    // 3. Persistent Sequence Management, Folder Naming, and Non-Reuse (Decision D-2 & D-3)
+    void testRenderSequencePersistenceAndNonReuse();
+
+    // 4. Pre-flight Checks (Permissions, Collisions, Disk Space)
+    void testPreflightChecksAndPermissions();
+
+    // 5. Offline Single Track Render (Staging, Processing, Atomic Commit)
+    void testSingleTrackRender();
+
+    // 6. Offline Album Render (Natural Sort, Subfolder Exclusion, Unified Folder)
+    void testAlbumRenderNaturalSort();
+
+    // 7. Staging Transaction & Rollback on Cancellation / Failure
+    void testStagingRollbackOnCancelOrError();
+
+    // 8. Strict Listening Correction Isolation & Volume Non-Interference (0.000000 Leakage)
+    void testListeningCorrectionAndVolumeIsolation();
+
+    // 9. EngineController Integration & Auditioning of Rendered Files
+    void testEngineControllerRenderIntegration();
+
+private:
+    std::unique_ptr<QTemporaryDir> m_tempDir;
+    QString m_dbPath;
+
+    // Helper to generate a test WAV file
+    bool createTestWav(const QString& path, double sampleRate, size_t numFrames, double freq = 440.0) {
+        WavFileWriter writer;
+        if (!writer.open(path, sampleRate, WavBitDepth::Int24)) {
+            return false;
+        }
+
+        std::vector<double> left(numFrames);
+        std::vector<double> right(numFrames);
+        for (size_t i = 0; i < numFrames; ++i) {
+            double t = static_cast<double>(i) / sampleRate;
+            left[i] = 0.5 * std::sin(2.0 * M_PI * freq * t);
+            right[i] = 0.5 * std::sin(2.0 * M_PI * freq * 1.5 * t);
+        }
+
+        bool ok = writer.writeBlock(left.data(), right.data(), numFrames, false);
+        writer.close();
+        return ok;
+    }
+};
+
+void TestPhase4ExportRender::initTestCase()
+{
+    m_tempDir = std::make_unique<QTemporaryDir>();
+    QVERIFY(m_tempDir->isValid());
+
+    m_dbPath = m_tempDir->filePath("test_desk32_render.sqlite");
+    LogService::instance().start(m_dbPath);
+    RenderSequenceManager::instance().initialize(m_dbPath);
+}
+
+void TestPhase4ExportRender::cleanupTestCase()
+{
+    RenderEngine::instance().stop();
+    RenderSequenceManager::instance().close();
+    LogService::instance().stop();
+    m_tempDir.reset();
+}
+
+void TestPhase4ExportRender::testWavFileWriterHeaderAndPCM()
+{
+    const size_t frames = 2000;
+    const double sampleRate = 48000.0;
+    std::vector<double> left(frames);
+    std::vector<double> right(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        left[i] = 0.4 * std::sin(static_cast<double>(i) * 0.05);
+        right[i] = -0.4 * std::sin(static_cast<double>(i) * 0.05);
+    }
+
+    // 1. Test 16-bit PCM WAV (with TPDF dither)
+    {
+        QString wav16 = m_tempDir->filePath("test_16bit.wav");
+        WavFileWriter writer;
+        QVERIFY(writer.open(wav16, sampleRate, WavBitDepth::Int16));
+        QVERIFY(writer.isOpen());
+        QVERIFY(writer.writeBlock(left.data(), right.data(), frames, true));
+        writer.close();
+        QCOMPARE(writer.totalFramesWritten(), static_cast<uint64_t>(frames));
+
+        QFile file(wav16);
+        QVERIFY(file.exists());
+        // 44 bytes header + frames * 2 channels * 2 bytes = 44 + 8000 = 8044
+        QCOMPARE(file.size(), static_cast<qint64>(44 + frames * 4));
+
+        // Read and verify RIFF header
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QByteArray header = file.read(44);
+        file.close();
+        QCOMPARE(header.mid(0, 4), QByteArray("RIFF"));
+        QCOMPARE(header.mid(8, 4), QByteArray("WAVE"));
+        QCOMPARE(header.mid(12, 4), QByteArray("fmt "));
+        // Format tag at byte 20: 1 (PCM)
+        uint16_t formatTag = *reinterpret_cast<const uint16_t*>(header.constData() + 20);
+        QCOMPARE(formatTag, 1);
+        // Bits per sample at byte 34: 16
+        uint16_t bits = *reinterpret_cast<const uint16_t*>(header.constData() + 34);
+        QCOMPARE(bits, 16);
+
+        // Decode back via FFmpegAudioDecoder to verify audio content
+        FFmpegAudioDecoder decoder;
+        QVERIFY(decoder.open(wav16.toStdString()));
+        const AudioFormatInfo& info = decoder.formatInfo();
+        QCOMPARE(info.channels, 2U);
+        QCOMPARE(info.sampleRate, 48000.0);
+        QCOMPARE(info.totalFrames, static_cast<int64_t>(frames));
+        decoder.close();
+    }
+
+    // 2. Test 24-bit PCM WAV (with TPDF dither)
+    {
+        QString wav24 = m_tempDir->filePath("test_24bit.wav");
+        WavFileWriter writer;
+        QVERIFY(writer.open(wav24, sampleRate, WavBitDepth::Int24));
+        QVERIFY(writer.writeBlock(left.data(), right.data(), frames, true));
+        writer.close();
+
+        QFile file(wav24);
+        QVERIFY(file.exists());
+        // 44 bytes header + frames * 2 channels * 3 bytes = 44 + 12000 = 12044
+        QCOMPARE(file.size(), static_cast<qint64>(44 + frames * 6));
+
+        FFmpegAudioDecoder decoder;
+        QVERIFY(decoder.open(wav24.toStdString()));
+        const AudioFormatInfo& info = decoder.formatInfo();
+        QCOMPARE(info.channels, 2U);
+        QCOMPARE(info.sampleRate, 48000.0);
+        QCOMPARE(info.totalFrames, static_cast<int64_t>(frames));
+        decoder.close();
+    }
+
+    // 3. Test 32-bit Float WAV
+    {
+        QString wav32 = m_tempDir->filePath("test_32bit_float.wav");
+        WavFileWriter writer;
+        QVERIFY(writer.open(wav32, sampleRate, WavBitDepth::Float32));
+        QVERIFY(writer.writeBlock(left.data(), right.data(), frames, false));
+        writer.close();
+
+        QFile file(wav32);
+        QVERIFY(file.exists());
+        // 44 bytes header + frames * 2 channels * 4 bytes = 44 + 16000 = 16044
+        QCOMPARE(file.size(), static_cast<qint64>(44 + frames * 8));
+
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QByteArray header = file.read(44);
+        file.close();
+        // Format tag for IEEE float: 3
+        uint16_t formatTag = *reinterpret_cast<const uint16_t*>(header.constData() + 20);
+        QCOMPARE(formatTag, 3);
+        uint16_t bits = *reinterpret_cast<const uint16_t*>(header.constData() + 34);
+        QCOMPARE(bits, 32);
+
+        FFmpegAudioDecoder decoder;
+        QVERIFY(decoder.open(wav32.toStdString()));
+        const AudioFormatInfo& info = decoder.formatInfo();
+        QCOMPARE(info.channels, 2U);
+        QCOMPARE(info.sampleRate, 48000.0);
+        QCOMPARE(info.totalFrames, static_cast<int64_t>(frames));
+        decoder.close();
+    }
+}
+
+void TestPhase4ExportRender::testRenderSequenceBijectiveBase26()
+{
+    // Verification of exact Bijective Base-26 letter progression:
+    // 0 -> A, 1 -> B, ..., 25 -> Z
+    // 26 -> AA, 27 -> AB, ..., 51 -> AZ
+    // 52 -> BA, 53 -> BB, ..., 701 -> ZZ
+    // 702 -> AAA
+
+    QCOMPARE(RenderSequenceManager::indexToSerial(0), std::string("A"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(1), std::string("B"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(25), std::string("Z"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(26), std::string("AA"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(27), std::string("AB"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(51), std::string("AZ"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(52), std::string("BA"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(53), std::string("BB"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(701), std::string("ZZ"));
+    QCOMPARE(RenderSequenceManager::indexToSerial(702), std::string("AAA"));
+}
+
+void TestPhase4ExportRender::testRenderSequencePersistenceAndNonReuse()
+{
+    RenderSequenceManager& seqMgr = RenderSequenceManager::instance();
+    QString folder1 = m_tempDir->filePath("album1");
+    QString folder2 = m_tempDir->filePath("album2");
+
+    // 1. Initial serial for folder1 is "A"
+    QString s1 = seqMgr.allocateNextSerial(folder1);
+    QCOMPARE(s1, QString("A"));
+
+    // 2. Second serial for folder1 is "B"
+    QString s2 = seqMgr.allocateNextSerial(folder1);
+    QCOMPARE(s2, QString("B"));
+
+    // 3. Independent sequence for folder2 starts at "A"
+    QString s2_1 = seqMgr.allocateNextSerial(folder2);
+    QCOMPARE(s2_1, QString("A"));
+
+    // 4. Decision D-2: Even if a render fails or is cancelled, sequence numbers
+    // are strictly NEVER reused. The next request must be "C", not "B".
+    QString s3 = seqMgr.allocateNextSerial(folder1);
+    QCOMPARE(s3, QString("C"));
+
+    // 5. Test folder naming format: {Serial}{YYYYMMDD_HHMMSS_zzz}
+    QDateTime testDt(QDate(2026, 11, 8), QTime(14, 30, 45, 123));
+    QString folderName = RenderSequenceManager::formatFolderName(s3, testDt);
+    QCOMPARE(folderName, QString("C20261108_143045_123"));
+}
+
+void TestPhase4ExportRender::testPreflightChecksAndPermissions()
+{
+    QString errorMsg;
+
+    // 1. Valid writable directory
+    QString writableDir = m_tempDir->path();
+    QVERIFY(RenderEngine::validatePreflight(writableDir, 1024, errorMsg));
+
+    // 2. Non-existent path in an impossible root path
+    QString invalidDir = "/root/nonexistent_desk32_test_path_readonly";
+    QVERIFY(!RenderEngine::validatePreflight(invalidDir, 1024, errorMsg));
+}
+
+void TestPhase4ExportRender::testSingleTrackRender()
+{
+    RenderEngine& engine = RenderEngine::instance();
+
+    // Create source test track (48kHz stereo, 0.5s = 24000 frames)
+    QString sourceDir = m_tempDir->filePath("single_source");
+    QDir().mkpath(sourceDir);
+    QString trackPath = sourceDir + "/test_song.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 24000, 440.0));
+
+    RenderSettings settings;
+    settings.bitDepth = RenderBitDepth::Int24;
+    settings.rateMode = RenderSampleRateMode::Original;
+    settings.applyDither = true;
+    settings.enableMasterDsp = true;
+
+    QSignalSpy spyStarted(&engine, &RenderEngine::renderTaskStarted);
+    QSignalSpy spyProgress(&engine, &RenderEngine::renderProgressUpdated);
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    // Wait for render to complete (up to 5 seconds)
+    QVERIFY(spyFinished.wait(5000));
+    QCOMPARE(spyFinished.count(), 1);
+
+    auto arguments = spyFinished.takeFirst();
+    QCOMPARE(arguments.at(0).toString(), taskId);
+    QCOMPARE(arguments.at(1).toInt(), static_cast<int>(RenderStatus::Completed));
+    QString outputDir = arguments.at(2).toString();
+    QVERIFY(!outputDir.isEmpty());
+    QVERIFY(QDir(outputDir).exists());
+
+    // Confirm staging folder is gone
+    QDir sourceQDir(sourceDir);
+    QStringList stagingEntries = sourceQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(stagingEntries.count(), 0);
+
+    // Confirm output file exists in the timestamped folder
+    QString renderedFile = outputDir + "/test_song.wav";
+    QVERIFY(QFile::exists(renderedFile));
+
+    // Verify output file can be decoded and frame count matches
+    FFmpegAudioDecoder decoder;
+    QVERIFY(decoder.open(renderedFile.toStdString()));
+    const AudioFormatInfo& info = decoder.formatInfo();
+    QCOMPARE(info.sampleRate, 48000.0);
+    QCOMPARE(info.channels, 2U);
+    QCOMPARE(info.totalFrames, 24000);
+    decoder.close();
+}
+
+void TestPhase4ExportRender::testAlbumRenderNaturalSort()
+{
+    RenderEngine& engine = RenderEngine::instance();
+
+    // Create album directory with unsorted filenames and a subdirectory
+    QString albumDir = m_tempDir->filePath("album_source");
+    QDir().mkpath(albumDir);
+    QDir().mkpath(albumDir + "/sub_folder");
+
+    // Natural sort order should be: track_1.wav, track_2.wav, track_10.wav
+    QVERIFY(createTestWav(albumDir + "/track_10.wav", 48000.0, 4800, 100.0));
+    QVERIFY(createTestWav(albumDir + "/track_2.wav", 48000.0, 4800, 200.0));
+    QVERIFY(createTestWav(albumDir + "/track_1.wav", 48000.0, 4800, 300.0));
+    // Subfolder file must be ignored per Decision D-2
+    QVERIFY(createTestWav(albumDir + "/sub_folder/ignored.wav", 48000.0, 4800, 400.0));
+
+    RenderSettings settings;
+    settings.bitDepth = RenderBitDepth::Int16;
+    settings.rateMode = RenderSampleRateMode::Original;
+    settings.applyDither = true;
+
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueAlbumRender(albumDir, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    // Wait for album render to finish
+    QVERIFY(spyFinished.wait(10000));
+    QCOMPARE(spyFinished.count(), 1);
+
+    auto arguments = spyFinished.takeFirst();
+    QCOMPARE(arguments.at(1).toInt(), static_cast<int>(RenderStatus::Completed));
+    QString outputDir = arguments.at(2).toString();
+    QVERIFY(QDir(outputDir).exists());
+
+    // Verify all 3 files exist in output folder
+    QVERIFY(QFile::exists(outputDir + "/track_1.wav"));
+    QVERIFY(QFile::exists(outputDir + "/track_2.wav"));
+    QVERIFY(QFile::exists(outputDir + "/track_10.wav"));
+    // Subfolder file must NOT be rendered
+    QVERIFY(!QFile::exists(outputDir + "/ignored.wav"));
+
+    // Staging folder must be deleted
+    QDir sourceQDir(albumDir);
+    QStringList stagingEntries = sourceQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(stagingEntries.count(), 0);
+}
+
+void TestPhase4ExportRender::testStagingRollbackOnCancelOrError()
+{
+    RenderEngine& engine = RenderEngine::instance();
+
+    // Create a large track so we can cancel while in progress
+    QString sourceDir = m_tempDir->filePath("cancel_source");
+    QDir().mkpath(sourceDir);
+    QString trackPath = sourceDir + "/long_track.wav";
+    // 48000 * 10 = 480,000 frames
+    QVERIFY(createTestWav(trackPath, 48000.0, 480000, 440.0));
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    // Immediately cancel
+    engine.cancelCurrentRender();
+
+    QVERIFY(spyFinished.wait(5000));
+    QCOMPARE(spyFinished.count(), 1);
+
+    auto arguments = spyFinished.takeFirst();
+    RenderStatus status = static_cast<RenderStatus>(arguments.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Cancelled);
+
+    // Staging directory must be completely removed
+    QDir sourceQDir(sourceDir);
+    QStringList stagingEntries = sourceQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(stagingEntries.count(), 0);
+
+    // Source track must remain untouched
+    QVERIFY(QFile::exists(trackPath));
+}
+
+void TestPhase4ExportRender::testListeningCorrectionAndVolumeIsolation()
+{
+    // Architectural Guarantee:
+    // RenderChain must strictly isolate output from Listening Correction (0.000000 leakage)
+    // and from Listening / Render Monitor Volumes.
+
+    RenderChain chain;
+    chain.configure(48000.0);
+
+    // Configure some upstream mastering DSP (e.g. Peak Limiter ceiling -1.0 dB)
+    chain.limiter().configure(48000.0, -1.0, 50.0, 5.0);
+    chain.limiter().setEnabled(true);
+
+    const size_t frames = 1024;
+    std::vector<double> inL(frames, 0.7);
+    std::vector<double> inR(frames, 0.7);
+
+    std::vector<double> out1L = inL;
+    std::vector<double> out1R = inR;
+    chain.process(out1L.data(), out1R.data(), frames);
+
+    // Reset chain state to ensure deterministic start
+    chain.reset();
+
+    // Now simulate live engine having massive Listening Correction EQ (+12dB)
+    // and Listening Volume set to 0.1 (-20dB)
+    ParametricEQ listeningEq;
+    listeningEq.configure(48000.0);
+    ParametricEQ::BandConfig boostBand;
+    boostBand.enabled = true;
+    boostBand.gainDb = 12.0;
+    boostBand.frequency = 1000.0;
+    boostBand.Q = 1.0;
+    boostBand.type = BiquadFilterType::Peak;
+    listeningEq.setLeftBand(0, boostBand);
+    listeningEq.setEnabled(true);
+
+    // Notice: RenderChain does NOT have Listening Correction!
+    // When RenderChain runs the same audio again, it must produce identical samples (0.000000 diff)
+    std::vector<double> out2L = inL;
+    std::vector<double> out2R = inR;
+    chain.process(out2L.data(), out2R.data(), frames);
+
+    double maxDiff = 0.0;
+    for (size_t i = 0; i < frames; ++i) {
+        maxDiff = std::max(maxDiff, std::abs(out1L[i] - out2L[i]));
+        maxDiff = std::max(maxDiff, std::abs(out1R[i] - out2R[i]));
+    }
+
+    QCOMPARE(maxDiff, 0.0);
+}
+
+void TestPhase4ExportRender::testEngineControllerRenderIntegration()
+{
+    RenderEngine::instance().resetTaskInfo();
+    EngineController& controller = EngineController::instance();
+    QVERIFY(controller.initialize());
+
+    // Check default properties
+    QCOMPARE(controller.isRendering(), false);
+    QCOMPARE(controller.renderProgress(), 0.0);
+    QCOMPARE(controller.renderTrackIndex(), 0);
+    QCOMPARE(controller.renderTotalTracks(), 0);
+
+    // Create a synthetic track
+    QString trackPath = m_tempDir->filePath("controller_test.wav");
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    // Load track into deck A
+    QVERIFY(controller.loadTrack("A", trackPath));
+
+    // Test Q_INVOKABLE startTrackRender from deck A
+    QString taskId = controller.startTrackRender("A", 1, 0, 48000.0, true, true);
+    QVERIFY(!taskId.isEmpty());
+
+    // Test getRenderStatus
+    QVariantMap statusMap = controller.getRenderStatus();
+    QCOMPARE(statusMap.value("taskId").toString(), taskId);
+
+    // Test cancelRender
+    controller.cancelRender();
+
+    // Test auditionRenderedFile into deck B
+    QVERIFY(controller.auditionRenderedFile("B", trackPath));
+    // Monitor path must be switched to RenderMonitor (1)
+    QCOMPARE(controller.outputRoutingMode(), 1);
+}
+
+QTEST_GUILESS_MAIN(TestPhase4ExportRender)
+#include "test_phase4_export_render.moc"

@@ -12,7 +12,17 @@ EngineController& EngineController::instance() {
 EngineController::EngineController(QObject* parent)
     : QObject(parent)
     , m_presetManager(engine::preset::PresetManager::instance())
-{}
+    , m_renderEngine(engine::render::RenderEngine::instance())
+{
+    connect(&m_renderEngine, &engine::render::RenderEngine::renderProgressUpdated, this, [this]() {
+        emit renderStateChanged();
+    });
+    connect(&m_renderEngine, &engine::render::RenderEngine::renderTaskFinished, this,
+            [this](const QString& id, int status, const QString& outDir, const QString& err) {
+        emit renderStateChanged();
+        emit renderTaskFinished(id, status, outDir, err);
+    });
+}
 
 EngineController::~EngineController() {
     if (m_audioOutput) {
@@ -328,6 +338,31 @@ int EngineController::externalInsertXRunCount() const {
 QString EngineController::externalInsertLastError() const {
     if (!m_insertNode) return QString();
     return QString::fromStdString(m_insertNode->bridge().lastError());
+}
+
+bool EngineController::isRendering() const {
+    return m_renderEngine.isRendering();
+}
+
+double EngineController::renderProgress() const {
+    return m_renderEngine.currentTaskInfo().progress;
+}
+
+QString EngineController::renderCurrentTrackName() const {
+    return m_renderEngine.currentTaskInfo().currentTrackName;
+}
+
+int EngineController::renderTrackIndex() const {
+    auto info = m_renderEngine.currentTaskInfo();
+    return (info.totalTracks > 0) ? (info.currentTrackIndex + 1) : 0;
+}
+
+int EngineController::renderTotalTracks() const {
+    return m_renderEngine.currentTaskInfo().totalTracks;
+}
+
+QString EngineController::renderLastOutputDir() const {
+    return m_renderEngine.currentTaskInfo().finalOutputDir;
 }
 
 void EngineController::setSwitchingMode(int mode) {
@@ -1415,6 +1450,139 @@ QVariantMap EngineController::captureCurrentStateAsPreset(const QString& categor
     }
 
     return obj.toVariantMap();
+}
+
+// =========================================================================
+// Phase 4: Export & Render Operations (Section 5.11 & 20.1)
+// =========================================================================
+
+void EngineController::syncMasterDspToRenderEngine() {
+    if (m_peqNode && m_geqNode && m_filterNode && m_compNode && m_reverbNode && m_limiterNode) {
+        m_renderEngine.templateChain().copyParametersFrom(
+            m_peqNode->dsp(),
+            m_geqNode->dsp(),
+            m_filterNode->dsp(),
+            m_compNode->dsp(),
+            m_reverbNode->dsp(),
+            m_limiterNode->dsp()
+        );
+    }
+}
+
+QString EngineController::startTrackRender(const QString& deckId, int bitDepth, int rateMode, double customRate, bool applyDither, bool enableDsp) {
+    if (!m_deckManager || deckId.isEmpty()) return QString();
+    char id = deckId.toUpper().at(0).toLatin1();
+    auto* d = m_deckManager->deck(id);
+    if (!d || d->trackInfo().path.empty()) {
+        qWarning() << "EngineController: deck" << deckId << "has no track loaded for render.";
+        return QString();
+    }
+
+    syncMasterDspToRenderEngine();
+
+    engine::render::RenderSettings settings;
+    settings.bitDepth = (bitDepth == 0) ? engine::render::RenderBitDepth::Int16
+                      : ((bitDepth == 2) ? engine::render::RenderBitDepth::Float32 : engine::render::RenderBitDepth::Int24);
+    settings.rateMode = (rateMode == 1) ? engine::render::RenderSampleRateMode::Custom : engine::render::RenderSampleRateMode::Original;
+    settings.targetSampleRate = customRate > 0 ? customRate : 48000.0;
+    settings.applyDither = applyDither;
+    settings.enableMasterDsp = enableDsp;
+
+    QString trackPath = QString::fromStdString(d->trackInfo().path);
+    QString taskId = m_renderEngine.enqueueTrackRender(trackPath, settings);
+
+    if (!taskId.isEmpty()) {
+        log::LogService::instance().log(
+            "Render", "QueueTrackRender", "Success",
+            QString("Enqueued Track Render for %1 [Task: %2]").arg(trackPath, taskId),
+            "Track", trackPath
+        );
+        emit renderStateChanged();
+    }
+    return taskId;
+}
+
+QString EngineController::startAlbumRender(const QString& folderPath, int bitDepth, int rateMode, double customRate, bool applyDither, bool enableDsp) {
+    if (folderPath.isEmpty()) return QString();
+
+    syncMasterDspToRenderEngine();
+
+    engine::render::RenderSettings settings;
+    settings.bitDepth = (bitDepth == 0) ? engine::render::RenderBitDepth::Int16
+                      : ((bitDepth == 2) ? engine::render::RenderBitDepth::Float32 : engine::render::RenderBitDepth::Int24);
+    settings.rateMode = (rateMode == 1) ? engine::render::RenderSampleRateMode::Custom : engine::render::RenderSampleRateMode::Original;
+    settings.targetSampleRate = customRate > 0 ? customRate : 48000.0;
+    settings.applyDither = applyDither;
+    settings.enableMasterDsp = enableDsp;
+
+    QString taskId = m_renderEngine.enqueueAlbumRender(folderPath, settings);
+
+    if (!taskId.isEmpty()) {
+        log::LogService::instance().log(
+            "Render", "QueueAlbumRender", "Success",
+            QString("Enqueued Album Render for %1 [Task: %2]").arg(folderPath, taskId),
+            "Folder", folderPath
+        );
+        emit renderStateChanged();
+    }
+    return taskId;
+}
+
+void EngineController::cancelRender() {
+    m_renderEngine.cancelCurrentRender();
+    log::LogService::instance().log(
+        "Render", "CancelRender", "Info",
+        "Cancellation requested for active render task.",
+        "RenderEngine", "Queue"
+    );
+    emit renderStateChanged();
+}
+
+bool EngineController::auditionRenderedFile(const QString& targetDeckId, const QString& filePath) {
+    if (!QFile::exists(filePath)) {
+        qWarning() << "auditionRenderedFile: File does not exist:" << filePath;
+        return false;
+    }
+
+    // 1. Load track into target deck
+    bool loaded = loadTrack(targetDeckId, filePath);
+    if (!loaded) {
+        return false;
+    }
+
+    // 2. Select deck and switch to Render Monitor Path (Section 5.11.5)
+    // Auditioning rendered file must use the uncorrected monitoring path!
+    switchDeck(targetDeckId, 0);
+    setOutputRoutingMode(1); // 1 = RenderMonitorPath
+
+    log::LogService::instance().log(
+        "Render", "Audition", "Success",
+        QString("Auditioning rendered file '%1' on Deck %2 (Render Monitor Path engaged).")
+            .arg(filePath, targetDeckId),
+        "RenderAudition", filePath
+    );
+
+    return true;
+}
+
+QVariantMap EngineController::getRenderStatus() const {
+    QVariantMap map;
+    auto task = m_renderEngine.currentTaskInfo();
+
+    map["isRendering"] = m_renderEngine.isRendering();
+    map["taskId"] = task.taskId;
+    map["type"] = (task.type == engine::render::RenderType::Album) ? "Album" : "Track";
+    map["status"] = static_cast<int>(task.status);
+    map["progress"] = task.progress;
+    map["currentTrackIndex"] = task.currentTrackIndex + 1;
+    map["totalTracks"] = task.totalTracks;
+    map["currentTrackName"] = task.currentTrackName;
+    map["serial"] = task.serial;
+    map["finalOutputDir"] = task.finalOutputDir;
+    map["errorMessage"] = task.errorMessage;
+    map["queuedTasksCount"] = m_renderEngine.queuedTasksCount();
+
+    return map;
 }
 
 } // namespace desk32::core

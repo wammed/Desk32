@@ -74,6 +74,12 @@ qt_add_executable(desk32
     src/engine/insert/ExternalInsertNode.hpp
     src/engine/preset/PresetManager.hpp
     src/engine/preset/PresetManager.cpp
+    src/engine/render/WavFileWriter.hpp
+    src/engine/render/RenderSequenceManager.hpp
+    src/engine/render/RenderSequenceManager.cpp
+    src/engine/render/RenderChain.hpp
+    src/engine/render/RenderEngine.hpp
+    src/engine/render/RenderEngine.cpp
 )
 
 # QML Module Setup

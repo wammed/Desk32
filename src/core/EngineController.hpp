@@ -12,6 +12,7 @@
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
 #include "engine/preset/PresetManager.hpp"
+#include "engine/render/RenderEngine.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
 #include "core/log/LogService.hpp"
 
@@ -52,6 +53,14 @@ class EngineController : public QObject {
     Q_PROPERTY(int externalInsertXRunCount READ externalInsertXRunCount NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(QString externalInsertLastError READ externalInsertLastError NOTIFY externalInsertStatusChanged)
 
+    // Phase 4: Export & Render Telemetry (Section 5.11 & 20.1)
+    Q_PROPERTY(bool isRendering READ isRendering NOTIFY renderStateChanged)
+    Q_PROPERTY(double renderProgress READ renderProgress NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderCurrentTrackName READ renderCurrentTrackName NOTIFY renderStateChanged)
+    Q_PROPERTY(int renderTrackIndex READ renderTrackIndex NOTIFY renderStateChanged)
+    Q_PROPERTY(int renderTotalTracks READ renderTotalTracks NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderLastOutputDir READ renderLastOutputDir NOTIFY renderStateChanged)
+
 public:
     static EngineController& instance();
 
@@ -90,6 +99,14 @@ public:
     [[nodiscard]] int insertDelayCompensation() const;
     [[nodiscard]] int externalInsertXRunCount() const;
     [[nodiscard]] QString externalInsertLastError() const;
+
+    // Phase 4 Getters
+    [[nodiscard]] bool isRendering() const;
+    [[nodiscard]] double renderProgress() const;
+    [[nodiscard]] QString renderCurrentTrackName() const;
+    [[nodiscard]] int renderTrackIndex() const;
+    [[nodiscard]] int renderTotalTracks() const;
+    [[nodiscard]] QString renderLastOutputDir() const;
 
     // Property setters
     void setSwitchingMode(int mode);
@@ -169,9 +186,17 @@ public:
     Q_INVOKABLE bool applyPresetProfile(const QString& category, const QString& presetName);
     Q_INVOKABLE QVariantMap captureCurrentStateAsPreset(const QString& category);
 
+    // Phase 4: Export & Render Operations (Section 5.11 & 20.1)
+    Q_INVOKABLE QString startTrackRender(const QString& deckId, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
+    Q_INVOKABLE QString startAlbumRender(const QString& folderPath, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
+    Q_INVOKABLE void cancelRender();
+    Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath);
+    Q_INVOKABLE QVariantMap getRenderStatus() const;
+
     // Direct access to nodes for tests
     [[nodiscard]] std::shared_ptr<engine::insert::ExternalInsertNode> insertNode() const noexcept { return m_insertNode; }
     [[nodiscard]] engine::preset::PresetManager& presetManager() noexcept { return m_presetManager; }
+    [[nodiscard]] engine::render::RenderEngine& renderEngine() noexcept { return m_renderEngine; }
 
 signals:
     void activeDeckChanged(const QString& deckId);
@@ -192,8 +217,12 @@ signals:
     void reverbParametersChanged();
     void externalInsertStatusChanged();
     void presetManagementChanged();
+    void renderStateChanged();
+    void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
 
 private:
+    void syncMasterDspToRenderEngine();
+
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
     std::unique_ptr<engine::backend::PipeWireAudioOutput> m_audioOutput;
@@ -211,6 +240,9 @@ private:
 
     // Phase 3: Common Preset Manager
     engine::preset::PresetManager& m_presetManager;
+
+    // Phase 4: Export & Render Engine
+    engine::render::RenderEngine& m_renderEngine;
 
     // Listening Correction PEQ Node (downstream of Logical Render Tap, Section 5.10 & 5.11)
     std::shared_ptr<engine::pipeline::ParametricEqNode> m_listeningCorrectionNode;

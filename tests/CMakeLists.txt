@@ -319,6 +319,8 @@ add_executable(test_phase3_external_insert
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
 )
 
 target_link_libraries(test_phase3_external_insert PRIVATE
@@ -350,6 +352,50 @@ target_include_directories(test_phase3_external_insert SYSTEM PRIVATE
 )
 
 add_test(NAME test_phase3_external_insert COMMAND test_phase3_external_insert)
+
+# Phase 4: Export and Render Engine (Offline Processing, Bijective Base-26 Serial, Staging & Rollback)
+add_executable(test_phase4_export_render
+    test_phase4_export_render.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+)
+
+target_link_libraries(test_phase4_export_render PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_phase4_export_render PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_phase4_export_render SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
+add_test(NAME test_phase4_export_render COMMAND test_phase4_export_render)
+
 
 
 
