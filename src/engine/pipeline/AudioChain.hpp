@@ -61,6 +61,9 @@ public:
 
     [[nodiscard]] size_t nodeCount() const noexcept { return m_nodes.size(); }
     [[nodiscard]] const std::vector<std::shared_ptr<AudioNode>>& nodes() const noexcept { return m_nodes; }
+    [[nodiscard]] AudioNode* node(size_t index) noexcept { return index < m_nodes.size() ? m_nodes[index].get() : nullptr; }
+    [[nodiscard]] const AudioNode* node(size_t index) const noexcept { return index < m_nodes.size() ? m_nodes[index].get() : nullptr; }
+    [[nodiscard]] std::shared_ptr<AudioNode> nodeShared(size_t index) const noexcept { return index < m_nodes.size() ? m_nodes[index] : nullptr; }
 
     [[nodiscard]] int64_t totalLatencyFrames() const noexcept {
         int64_t total = 0;

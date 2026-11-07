@@ -2,6 +2,9 @@
 
 #include "BiquadFilter.hpp"
 #include <array>
+#include <vector>
+#include <atomic>
+#include <algorithm>
 
 // 32-Band Graphic Equalizer (1/3 Octave ISO Frequencies)
 class GraphicEQ
@@ -12,6 +15,7 @@ public:
     GraphicEQ()
     {
         initFrequencies();
+        configure(48000.0);
     }
 
     void initFrequencies()
@@ -42,14 +46,50 @@ public:
         }
     }
 
+    [[nodiscard]] double bandGain(size_t index) const noexcept {
+        return (index < NUM_BANDS) ? m_gainsDb[index] : 0.0;
+    }
+
+    [[nodiscard]] double bandFrequency(size_t index) const noexcept {
+        return (index < NUM_BANDS) ? m_frequencies[index] : 0.0;
+    }
+
     void setBandGain(size_t index, double gainDb)
     {
         if (index < NUM_BANDS) {
-            m_gainsDb[index] = gainDb;
+            double clamped = std::clamp(gainDb, -12.0, 12.0);
+            m_gainsDb[index] = clamped;
             const double Q = 4.318;
             double freq = std::min(m_frequencies[index], m_sampleRate * 0.48);
-            m_leftFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, gainDb);
-            m_rightFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, gainDb);
+            m_leftFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, clamped);
+            m_rightFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, clamped);
+        }
+    }
+
+    void resetAllBands()
+    {
+        for (size_t i = 0; i < NUM_BANDS; ++i) {
+            setBandGain(i, 0.0);
+        }
+    }
+
+    /// Calculate combined magnitude response curve for visualization
+    void calculateResponseCurve(const std::vector<double>& frequencies, std::vector<double>& outDb) const
+    {
+        outDb.resize(frequencies.size(), 0.0);
+        if (!m_enabled.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        for (size_t f = 0; f < frequencies.size(); ++f) {
+            double sumDb = 0.0;
+            const double freq = frequencies[f];
+            for (size_t b = 0; b < NUM_BANDS; ++b) {
+                if (std::abs(m_gainsDb[b]) > 0.01) {
+                    sumDb += m_leftFilters[b].magnitudeResponseDb(freq);
+                }
+            }
+            outDb[f] = sumDb;
         }
     }
 
@@ -61,7 +101,7 @@ public:
 
     inline void process(double& left, double& right)
     {
-        if (!m_enabled) return;
+        if (!m_enabled.load(std::memory_order_relaxed)) return;
 
         for (size_t i = 0; i < NUM_BANDS; ++i) {
             left = m_leftFilters[i].process(left);
@@ -69,12 +109,12 @@ public:
         }
     }
 
-    void setEnabled(bool enabled) { m_enabled = enabled; }
-    bool isEnabled() const { return m_enabled; }
+    void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
+    [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
 
 private:
     double m_sampleRate = 48000.0;
-    bool m_enabled = true;
+    std::atomic<bool> m_enabled{false};
     std::array<double, NUM_BANDS> m_frequencies;
     std::array<double, NUM_BANDS> m_gainsDb;
     std::array<BiquadFilter, NUM_BANDS> m_leftFilters;

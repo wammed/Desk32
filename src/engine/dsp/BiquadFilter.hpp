@@ -111,6 +111,31 @@ public:
         return output;
     }
 
+    /// Calculate magnitude response in dB at a given frequency
+    [[nodiscard]] double magnitudeResponseDb(double frequency) const noexcept
+    {
+        if (m_sampleRate <= 0.0 || frequency <= 0.0) return 0.0;
+        const double w = 2.0 * std::numbers::pi * frequency / m_sampleRate;
+        const double cos_w = std::cos(w);
+        const double sin_w = std::sin(w);
+        const double cos_2w = std::cos(2.0 * w);
+        const double sin_2w = std::sin(2.0 * w);
+
+        const double numReal = m_b0 + m_b1 * cos_w + m_b2 * cos_2w;
+        const double numImag = -m_b1 * sin_w - m_b2 * sin_2w;
+        const double denReal = 1.0 + m_a1 * cos_w + m_a2 * cos_2w;
+        const double denImag = -m_a1 * sin_w - m_a2 * sin_2w;
+
+        const double numSq = numReal * numReal + numImag * numImag;
+        const double denSq = denReal * denReal + denImag * denImag;
+
+        if (denSq < 1e-15) return 0.0;
+        const double magSq = numSq / denSq;
+        if (magSq < 1e-15) return -120.0;
+
+        return 10.0 * std::log10(magSq);
+    }
+
 private:
     double m_sampleRate = 48000.0;
     double m_frequency = 1000.0;

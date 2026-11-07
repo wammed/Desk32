@@ -94,16 +94,9 @@ bool PipeWireAudioOutput::start()
         return false;
     }
 
-    if (pw_thread_loop_start(m_threadLoop) < 0) {
-        return false;
-    }
-
-    pw_thread_loop_lock(m_threadLoop);
-
+    // Connect to PipeWire context first (thread loop is not started yet)
     m_core = pw_context_connect(m_context, nullptr, 0);
     if (!m_core) {
-        pw_thread_loop_unlock(m_threadLoop);
-        pw_thread_loop_stop(m_threadLoop);
         return false;
     }
 
@@ -121,8 +114,6 @@ bool PipeWireAudioOutput::start()
     if (!m_stream) {
         pw_core_disconnect(m_core);
         m_core = nullptr;
-        pw_thread_loop_unlock(m_threadLoop);
-        pw_thread_loop_stop(m_threadLoop);
         return false;
     }
 
@@ -155,13 +146,19 @@ bool PipeWireAudioOutput::start()
         m_stream = nullptr;
         pw_core_disconnect(m_core);
         m_core = nullptr;
-        pw_thread_loop_unlock(m_threadLoop);
-        pw_thread_loop_stop(m_threadLoop);
+        return false;
+    }
+
+    if (pw_thread_loop_start(m_threadLoop) < 0) {
+        pw_stream_disconnect(m_stream);
+        pw_stream_destroy(m_stream);
+        m_stream = nullptr;
+        pw_core_disconnect(m_core);
+        m_core = nullptr;
         return false;
     }
 
     m_state.store(StreamState::Connecting, std::memory_order_relaxed);
-    pw_thread_loop_unlock(m_threadLoop);
     return true;
 }
 
@@ -188,6 +185,8 @@ void PipeWireAudioOutput::stop()
     }
 
     if (m_threadLoop) {
+        pw_thread_loop_stop(m_threadLoop);
+
         pw_thread_loop_lock(m_threadLoop);
         if (m_stream) {
             pw_stream_disconnect(m_stream);
@@ -200,7 +199,6 @@ void PipeWireAudioOutput::stop()
         }
         m_state.store(StreamState::Unconnected, std::memory_order_relaxed);
         pw_thread_loop_unlock(m_threadLoop);
-        pw_thread_loop_stop(m_threadLoop);
     }
 }
 

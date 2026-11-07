@@ -67,6 +67,8 @@ qt_add_executable(desk32
     src/engine/decoder/AudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.cpp
+    src/engine/decoder/DecoderWorker.hpp
+    src/engine/decoder/DecoderWorker.cpp
 )
 
 # QML Module Setup

@@ -44,6 +44,7 @@ void TestDspMeasurement::testItem6LimiterStressSuppression()
     // Test PeakLimiter suppression under +24 dBFS overload (15.85x linear)
     PeakLimiter limiter;
     limiter.configure(48000.0, -0.1); // -0.1 dB ceiling approx 0.98855
+    limiter.setEnabled(true);
 
     const double freq = 1000.0;
     const double amplitude = std::pow(10.0, 24.0 / 20.0);

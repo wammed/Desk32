@@ -3,6 +3,7 @@
 #include "AudioChain.hpp"
 #include "BuiltInDspNodes.hpp"
 #include "engine/dsp/Resampler.hpp"
+#include "engine/dsp/ParameterCommandQueue.hpp"
 #include "engine/format/FormatConverter.hpp"
 #include "engine/memory/EpochReclaimer.hpp"
 #include "engine/routing/OutputPathRouter.hpp"
@@ -38,15 +39,32 @@ public:
     }
 
     [[nodiscard]] double graphSampleRate() const noexcept { return m_graphSampleRate.load(std::memory_order_relaxed); }
+
+    /// Reconfigure graph sample rate safely without mutating live running chains in-place.
+    /// Builds fresh chains configured at the new rate, atomically swaps via EpochReclaimer.
     void setGraphSampleRate(double sampleRate) {
         m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
-        auto* master = m_masterReclaimer.current();
-        if (master) {
-            master->configure(sampleRate);
+
+        // Safely reconfigure Master Chain via atomic swap
+        auto* currentMaster = m_masterReclaimer.current();
+        if (currentMaster) {
+            auto newMaster = std::make_unique<AudioChain>(currentMaster->name(), ChainPurpose::MasteringChain);
+            for (size_t i = 0; i < currentMaster->nodeCount(); ++i) {
+                newMaster->appendNode(currentMaster->nodeShared(i));
+            }
+            newMaster->configure(sampleRate);
+            m_masterReclaimer.swapChain(std::move(newMaster));
         }
-        auto* listening = m_listeningReclaimer.current();
-        if (listening) {
-            listening->configure(sampleRate);
+
+        // Safely reconfigure Listening Chain via atomic swap
+        auto* currentListening = m_listeningReclaimer.current();
+        if (currentListening) {
+            auto newListening = std::make_unique<AudioChain>(currentListening->name(), ChainPurpose::ListeningCorrectionChain);
+            for (size_t i = 0; i < currentListening->nodeCount(); ++i) {
+                newListening->appendNode(currentListening->nodeShared(i));
+            }
+            newListening->configure(sampleRate);
+            m_listeningReclaimer.swapChain(std::move(newListening));
         }
     }
 
@@ -59,18 +77,20 @@ public:
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume.load(); }
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
+    [[nodiscard]] dsp::ParameterCommandQueue& paramQueue() noexcept { return m_paramQueue; }
+
     /// Hot-swap Mastering Chain (Control Thread execution).
     /// Safe, lock-free swap verified by EpochReclaimer.
     void swapMasterChain(std::unique_ptr<AudioChain> newChain) {
         if (!newChain || newChain->purpose() != ChainPurpose::MasteringChain) return;
-        newChain->configure(m_graphSampleRate);
+        newChain->configure(m_graphSampleRate.load(std::memory_order_relaxed));
         m_masterReclaimer.swapChain(std::move(newChain));
     }
 
     /// Hot-swap Listening Correction Chain (Control Thread execution).
     void swapListeningChain(std::unique_ptr<AudioChain> newChain) {
         if (!newChain || newChain->purpose() != ChainPurpose::ListeningCorrectionChain) return;
-        newChain->configure(m_graphSampleRate);
+        newChain->configure(m_graphSampleRate.load(std::memory_order_relaxed));
         m_listeningReclaimer.swapChain(std::move(newChain));
     }
 
@@ -82,13 +102,17 @@ public:
 
     /// Real-time audio rendering call (Audio Thread execution).
     /// Guarantees:
-    /// - Operates on planar double buffers through DSP & Listening Correction.
     /// - Strictly zero heap allocation or blocking locks.
+    /// - Drains DSP parameter queue at the block boundary.
+    /// - Operates on planar double buffers through DSP & Listening Correction.
     /// - Branches at Logical Render Tap: Render Monitor bypasses Listening Correction with 0.000000 leakage.
     /// - Converts to target device PCM format with TPDF dither via FormatConverter at the boundary.
     void process(double* left, double* right, size_t frameCount,
                  void* outPcmBuffer, SampleFormat targetFormat, bool applyDither = true)
     {
+        // 0. Drain pending DSP parameter commands at the block boundary on Audio Thread
+        drainParameterCommands();
+
         // 1. Enter epoch to protect current active chains from destruction during Audio Thread execution
         auto masterGuard = m_masterReclaimer.enterRead();
         auto listeningGuard = m_listeningReclaimer.enterRead();
@@ -130,10 +154,190 @@ public:
     }
 
 private:
+    void drainParameterCommands() noexcept {
+        dsp::DspCommand cmd;
+        while (m_paramQueue.pop(cmd)) {
+            applyDspCommand(cmd);
+        }
+    }
+
+    void applyDspCommand(const dsp::DspCommand& cmd) noexcept {
+        auto* master = m_masterReclaimer.current();
+        auto* listening = m_listeningReclaimer.current();
+
+        switch (cmd.type) {
+        case dsp::DspCommandType::SetGeqBandGain:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
+                        geqNode->dsp().setBandGain(cmd.index, static_cast<double>(cmd.param1));
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::ResetAllGeqBands:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
+                        geqNode->dsp().resetAllBands();
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetPeqBand:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
+                        ParametricEQ::BandConfig cfg;
+                        cfg.frequency = static_cast<double>(cmd.param1);
+                        cfg.gainDb = static_cast<double>(cmd.param2);
+                        cfg.Q = static_cast<double>(cmd.param3);
+                        cfg.type = static_cast<BiquadFilterType>(cmd.intParam1);
+                        cfg.enabled = (cmd.boolFlag1 != 0);
+                        if (cmd.subIndex == 1) {
+                            peqNode->dsp().setRightBand(cmd.index, cfg);
+                        } else {
+                            peqNode->dsp().setLeftBand(cmd.index, cfg);
+                        }
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetPeqBandEnabled:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
+                        if (cmd.subIndex == 1) {
+                            auto cfg = peqNode->dsp().rightBand(cmd.index);
+                            cfg.enabled = (cmd.boolFlag1 != 0);
+                            peqNode->dsp().setRightBand(cmd.index, cfg);
+                        } else {
+                            auto cfg = peqNode->dsp().leftBand(cmd.index);
+                            cfg.enabled = (cmd.boolFlag1 != 0);
+                            peqNode->dsp().setLeftBand(cmd.index, cfg);
+                        }
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::ApplyPeqPreset:
+            {
+                const char* presetNames[] = {
+                    "Monitor Flat", "Acoustic Clarity", "Harman Target", "Bass Punch", "Vocal Air"
+                };
+                if (cmd.subIndex == 1) {
+                    if (listening) {
+                        for (size_t i = 0; i < listening->nodeCount(); ++i) {
+                            if (auto* peqNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
+                                if (cmd.index < 5) {
+                                    peqNode->dsp().applyPreset(presetNames[cmd.index]);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    if (master) {
+                        for (size_t i = 0; i < master->nodeCount(); ++i) {
+                            if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
+                                if (cmd.index < 5) {
+                                    peqNode->dsp().applyPreset(presetNames[cmd.index]);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetFilterParams:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
+                        filterNode->dsp().setHpfFrequency(static_cast<double>(cmd.param1));
+                        filterNode->dsp().setLpfFrequency(static_cast<double>(cmd.param2));
+                        filterNode->dsp().setHpfSlope(static_cast<HighLowPassFilter::FilterSlope>(cmd.intParam1));
+                        filterNode->dsp().setLpfSlope(static_cast<HighLowPassFilter::FilterSlope>(cmd.intParam2));
+                        filterNode->dsp().setHpfEnabled(cmd.boolFlag1 != 0);
+                        filterNode->dsp().setLpfEnabled(cmd.boolFlag2 != 0);
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetCompressorParams:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* compNode = dynamic_cast<CompressorNode*>(master->node(i))) {
+                        compNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                                  static_cast<double>(cmd.param1),
+                                                  static_cast<double>(cmd.param2),
+                                                  static_cast<double>(cmd.param3),
+                                                  static_cast<double>(cmd.param4),
+                                                  0.0,
+                                                  static_cast<double>(cmd.param5));
+                        compNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetLimiterParams:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* limiterNode = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
+                        limiterNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                                     static_cast<double>(cmd.param1),
+                                                     static_cast<double>(cmd.param2),
+                                                     static_cast<double>(cmd.param3));
+                        limiterNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetReverbParams:
+            if (master) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* reverbNode = dynamic_cast<ReverbNode*>(master->node(i))) {
+                        reverbNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                                    static_cast<double>(cmd.param1),
+                                                    static_cast<double>(cmd.param2),
+                                                    static_cast<double>(cmd.param3),
+                                                    static_cast<double>(cmd.param4),
+                                                    cmd.boolFlag2 != 0);
+                        reverbNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        break;
+                    }
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetNodeBypass:
+            if (cmd.subIndex == 1) {
+                if (listening && cmd.index < listening->nodeCount()) {
+                    listening->node(cmd.index)->setBypassed(cmd.boolFlag1 != 0);
+                }
+            } else {
+                if (master && cmd.index < master->nodeCount()) {
+                    master->node(cmd.index)->setBypassed(cmd.boolFlag1 != 0);
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
     std::atomic<double> m_graphSampleRate;
     std::atomic<OutputPathMode> m_outputMode{OutputPathMode::ListeningPath};
     std::atomic<double> m_listeningVolume{1.0};
     std::atomic<double> m_renderMonitorVolume{1.0};
+
+    dsp::ParameterCommandQueue m_paramQueue;
 
     EpochReclaimer<AudioChain> m_masterReclaimer;
     EpochReclaimer<AudioChain> m_listeningReclaimer;

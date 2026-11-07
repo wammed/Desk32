@@ -92,6 +92,7 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
     // Create a Listening Correction chain with massive boost (+12 dB on peak filter)
     auto listenChain = std::make_unique<AudioChain>("Test Listening", ChainPurpose::ListeningCorrectionChain);
     auto headphoneEq = std::make_shared<ParametricEqNode>("Headphone EQ", NodeAffiliation::ListeningCorrection);
+    headphoneEq->dsp().setEnabled(true);
 
     ParametricEQ::BandConfig cfg;
     cfg.enabled = true;

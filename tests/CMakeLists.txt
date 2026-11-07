@@ -100,6 +100,7 @@ add_test(NAME benchmark_k3_float64 COMMAND benchmark_k3_float64)
 add_executable(test_sample_rate_switching
     test_sample_rate_switching.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
 )
 
 target_link_libraries(test_sample_rate_switching PRIVATE
@@ -146,6 +147,7 @@ add_test(NAME test_external_insert_bridge COMMAND test_external_insert_bridge)
 add_executable(test_step4_deck_session_log
     test_step4_deck_session_log.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
 )
 
 target_link_libraries(test_step4_deck_session_log PRIVATE
@@ -247,6 +249,7 @@ add_test(NAME test_ffmpeg_decoder COMMAND test_ffmpeg_decoder)
 add_executable(test_reference_decks
     test_reference_decks.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
 )
 
 target_link_libraries(test_reference_decks PRIVATE
@@ -290,6 +293,23 @@ target_include_directories(test_log_service PRIVATE
 )
 
 add_test(NAME test_log_service COMMAND test_log_service)
+
+# Phase 2: Acoustic Correction & Built-in DSP Implementation
+add_executable(test_phase2_dsp
+    test_phase2_dsp.cpp
+)
+
+target_link_libraries(test_phase2_dsp PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+
+target_include_directories(test_phase2_dsp PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
+
 
 
 

@@ -32,6 +32,13 @@ class EngineController : public QObject {
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
 
+    // Phase 2: Dynamic DSP Telemetry & Status Properties
+    Q_PROPERTY(double compressorGainReductionDb READ compressorGainReductionDb NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double limiterGainReductionDb READ limiterGainReductionDb NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(int limiterLatencyFrames READ limiterLatencyFrames NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(QString listeningPresetName READ listeningPresetName NOTIFY listeningPresetChanged)
+    Q_PROPERTY(bool listeningCorrectionActive READ listeningCorrectionActive NOTIFY outputRoutingModeChanged)
+
 public:
     static EngineController& instance();
 
@@ -52,6 +59,13 @@ public:
     [[nodiscard]] int directModeStatus() const;
     [[nodiscard]] int backendStatus() const;
     [[nodiscard]] QString backendStatusText() const;
+
+    // Phase 2 Getters
+    [[nodiscard]] double compressorGainReductionDb() const;
+    [[nodiscard]] double limiterGainReductionDb() const;
+    [[nodiscard]] int limiterLatencyFrames() const;
+    [[nodiscard]] QString listeningPresetName() const;
+    [[nodiscard]] bool listeningCorrectionActive() const;
 
     // Property setters
     void setSwitchingMode(int mode);
@@ -76,7 +90,37 @@ public:
 
     // QML-invokable DSP & EQ Console Operations
     Q_INVOKABLE void setGeqBandGain(int bandIndex, double gainDb);
+    Q_INVOKABLE double getGeqBandGain(int bandIndex);
+    Q_INVOKABLE void resetAllGeqBands();
+    Q_INVOKABLE QVariantList getGeqCurve(int numPoints = 128);
+
+    // 24-Band PEQ Operations (Left 12 + Right 12)
+    Q_INVOKABLE QVariantMap getPeqBand(bool isRightChannel, int bandIndex);
+    Q_INVOKABLE void setPeqBand(bool isRightChannel, int bandIndex, double frequency, double gainDb, double q, int filterType, bool enabled);
+    Q_INVOKABLE void setPeqBandEnabled(bool isRightChannel, int bandIndex, bool enabled);
+    Q_INVOKABLE QVariantList getPeqCurve(bool isRightChannel, int numPoints = 128);
+    Q_INVOKABLE void applyPeqPreset(const QString& presetName);
+
+    // Dynamic Processors & Filters
+    Q_INVOKABLE void setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope);
+    Q_INVOKABLE QVariantMap getFilterParams();
+    Q_INVOKABLE QVariantList getFilterCurve(int numPoints = 128);
+
+    Q_INVOKABLE void setCompressorParams(double thresholdDb, double ratio, double attackMs, double releaseMs, double makeupDb, double kneeDb);
+    Q_INVOKABLE QVariantMap getCompressorParams();
+
+    Q_INVOKABLE void setLimiterParams(double ceilingDb, double releaseMs, double lookaheadMs);
+    Q_INVOKABLE QVariantMap getLimiterParams();
+
+    Q_INVOKABLE void setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving);
+    Q_INVOKABLE QVariantMap getReverbParams();
+
+    // Listening Correction Presets (Section 5.10)
+    Q_INVOKABLE QStringList availableListeningPresets();
+    Q_INVOKABLE void setListeningPreset(const QString& presetName);
+
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
+    Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
 
 signals:
@@ -88,6 +132,14 @@ signals:
     void masterGainChanged(double gain);
     void diagnosticsChanged();
     void deckStateChanged(const QString& deckId);
+    void dspTelemetryChanged();
+    void listeningPresetChanged(const QString& name);
+    void peqParametersChanged();
+    void geqParametersChanged();
+    void filterParametersChanged();
+    void compressorParametersChanged();
+    void limiterParametersChanged();
+    void reverbParametersChanged();
 
 private:
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
@@ -101,6 +153,10 @@ private:
     std::shared_ptr<engine::pipeline::CompressorNode> m_compNode;
     std::shared_ptr<engine::pipeline::PeakLimiterNode> m_limiterNode;
     std::shared_ptr<engine::pipeline::ReverbNode> m_reverbNode;
+
+    // Listening Correction PEQ Node (downstream of Logical Render Tap, Section 5.10 & 5.11)
+    std::shared_ptr<engine::pipeline::ParametricEqNode> m_listeningCorrectionNode;
+    QString m_listeningPresetName{"Monitor Flat"};
 
     std::atomic<int> m_switchingMode{0}; // 0 = Normal, 1 = Comparative
     std::atomic<int> m_outputRoutingMode{0}; // 0 = Listening, 1 = RenderMonitor

@@ -16,6 +16,7 @@ class OutputPathRouter {
 public:
     OutputPathRouter() {
         m_listeningCorrection.configure(48000.0);
+        m_listeningCorrection.setEnabled(true);
     }
 
     void setSampleRate(double sampleRate) {

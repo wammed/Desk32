@@ -188,8 +188,9 @@ ApplicationWindow {
 
         // 1. STUDIO CONSOLE VIEW
         ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 10
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.margins: 10
             spacing: 10
 
             // TOP ROW: Left Wing (4 Decks), Center (Main Monitor), Right Wing (Master/DSP)
@@ -804,7 +805,7 @@ ApplicationWindow {
                         // 3-Path Output Routing Box
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 110
+                            Layout.preferredHeight: 135
                             color: "#101215"
                             border.color: "#20252b"
                             radius: 4
@@ -827,6 +828,27 @@ ApplicationWindow {
                                     onClicked: EngineController.outputRoutingMode = 0
                                 }
 
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 26
+                                    visible: EngineController.outputRoutingMode === 0
+                                    spacing: 6
+
+                                    Label {
+                                        text: qsTr("Profile:")
+                                        font.pixelSize: 10
+                                        color: "#808c99"
+                                    }
+
+                                    ComboBox {
+                                        id: listeningProfileCombo
+                                        Layout.fillWidth: true
+                                        model: EngineController.availableListeningPresets()
+                                        currentIndex: Math.max(0, model.indexOf(EngineController.listeningPresetName))
+                                        onActivated: EngineController.setListeningPreset(currentText)
+                                    }
+                                }
+
                                 RadioButton {
                                     text: qsTr("Render Monitor Path (Pure Master, 0.000000 Leakage)")
                                     checked: EngineController.outputRoutingMode === 1
@@ -835,10 +857,10 @@ ApplicationWindow {
                             }
                         }
 
-                        // DSP NODES INDIVIDUAL BYPASS TOGGLES
+                        // DSP NODES INDIVIDUAL BYPASS TOGGLES & TELEMETRY
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 160
+                            Layout.preferredHeight: 180
                             color: "#101215"
                             border.color: "#20252b"
                             radius: 4
@@ -871,12 +893,58 @@ ApplicationWindow {
                                     rowSpacing: 4
                                     columnSpacing: 8
 
-                                    CheckBox { text: "PEQ (24-Band)"; checked: true; onToggled: EngineController.setDspNodeBypass("PEQ", !checked) }
-                                    CheckBox { text: "GEQ (32-Band)"; checked: true; onToggled: EngineController.setDspNodeBypass("GEQ", !checked) }
-                                    CheckBox { text: "HPF / LPF"; checked: true; onToggled: EngineController.setDspNodeBypass("Filter", !checked) }
-                                    CheckBox { text: "Compressor"; checked: true; onToggled: EngineController.setDspNodeBypass("Compressor", !checked) }
-                                    CheckBox { text: "Peak Limiter"; checked: true; onToggled: EngineController.setDspNodeBypass("Limiter", !checked) }
-                                    CheckBox { text: "Reverb"; checked: true; onToggled: EngineController.setDspNodeBypass("Reverb", !checked) }
+                                    CheckBox {
+                                        text: "PEQ (24-Band)"
+                                        checked: !EngineController.isDspNodeBypassed("PEQ")
+                                        onToggled: EngineController.setDspNodeBypass("PEQ", !checked)
+                                    }
+                                    CheckBox {
+                                        text: "GEQ (32-Band)"
+                                        checked: !EngineController.isDspNodeBypassed("GEQ")
+                                        onToggled: EngineController.setDspNodeBypass("GEQ", !checked)
+                                    }
+                                    CheckBox {
+                                        text: "HPF / LPF"
+                                        checked: !EngineController.isDspNodeBypassed("Filter")
+                                        onToggled: EngineController.setDspNodeBypass("Filter", !checked)
+                                    }
+                                    CheckBox {
+                                        text: "Reverb"
+                                        checked: !EngineController.isDspNodeBypassed("Reverb")
+                                        onToggled: EngineController.setDspNodeBypass("Reverb", !checked)
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        CheckBox {
+                                            text: "Compressor"
+                                            checked: !EngineController.isDspNodeBypassed("Compressor")
+                                            onToggled: EngineController.setDspNodeBypass("Compressor", !checked)
+                                        }
+                                        Label {
+                                            text: EngineController.compressorGainReductionDb > 0.05 ? ("GR -" + EngineController.compressorGainReductionDb.toFixed(1) + " dB") : "0.0 dB"
+                                            font.pixelSize: 9
+                                            font.family: "Monospace"
+                                            color: EngineController.compressorGainReductionDb > 0.1 ? "#FFB300" : "#606c7a"
+                                        }
+                                    }
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        CheckBox {
+                                            text: "Peak Limiter"
+                                            checked: !EngineController.isDspNodeBypassed("Limiter")
+                                            onToggled: EngineController.setDspNodeBypass("Limiter", !checked)
+                                        }
+                                        Label {
+                                            text: EngineController.limiterGainReductionDb > 0.05 ? ("GR -" + EngineController.limiterGainReductionDb.toFixed(1) + " dB") : (EngineController.limiterLatencyFrames + "smp")
+                                            font.pixelSize: 9
+                                            font.family: "Monospace"
+                                            color: EngineController.limiterGainReductionDb > 0.1 ? "#FF5252" : "#606c7a"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -965,16 +1033,36 @@ ApplicationWindow {
                 }
             }
 
-            // BOTTOM ROW: Full-Width Studio EQ Console (approx 450px height)
+            // BOTTOM ROW: Full-Width Studio EQ Console (approx 520px height)
             Rectangle {
+                id: eqConsoleRect
                 Layout.fillWidth: true
-                Layout.preferredHeight: 450
+                Layout.preferredHeight: 520
                 color: "#13161a"
                 border.color: "#242930"
                 border.width: 1
                 radius: 4
 
                 property string eqMode: "geq" // "geq" or "peq"
+                onEqModeChanged: {
+                    eqCanvas.requestPaint();
+                    if (eqMode === "peq") {
+                        peqContainer.reloadBand();
+                    }
+                }
+
+                Connections {
+                    target: EngineController
+                    function onGeqParametersChanged() {
+                        eqCanvas.requestPaint();
+                    }
+                    function onPeqParametersChanged() {
+                        eqCanvas.requestPaint();
+                        if (eqConsoleRect.eqMode === "peq") {
+                            peqContainer.reloadBand();
+                        }
+                    }
+                }
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -992,90 +1080,556 @@ ApplicationWindow {
                         }
                         Item { Layout.fillWidth: true }
                         Button {
+                            text: qsTr("Reset All GEQ (0 dB)")
+                            font.pixelSize: 11
+                            visible: eqConsoleRect.eqMode === "geq"
+                            onClicked: {
+                                EngineController.resetAllGeqBands();
+                                eqCanvas.requestPaint();
+                            }
+                        }
+                        Button {
                             text: qsTr("32-Band GEQ (Full Console)")
-                            flat: parent.parent.parent.eqMode !== "geq"
-                            highlighted: parent.parent.parent.eqMode === "geq"
-                            onClicked: parent.parent.parent.eqMode = "geq"
+                            flat: eqConsoleRect.eqMode !== "geq"
+                            highlighted: eqConsoleRect.eqMode === "geq"
+                            onClicked: eqConsoleRect.eqMode = "geq"
                         }
                         Button {
                             text: qsTr("24-Band PEQ (Left 12 + Right 12)")
-                            flat: parent.parent.parent.eqMode !== "peq"
-                            highlighted: parent.parent.parent.eqMode === "peq"
-                            onClicked: parent.parent.parent.eqMode = "peq"
+                            flat: eqConsoleRect.eqMode !== "peq"
+                            highlighted: eqConsoleRect.eqMode === "peq"
+                            onClicked: eqConsoleRect.eqMode = "peq"
                         }
                     }
 
-                    // 32-BAND GRAPHIC EQUALIZER VIEW (32 Vertical Faders)
-                    RowLayout {
+                    // DYNAMIC FREQUENCY RESPONSE CURVE CANVAS (SECTION 5.8)
+                    Rectangle {
                         Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        spacing: 4
-                        visible: parent.parent.eqMode === "geq"
+                        Layout.preferredHeight: 120
+                        color: "#090b0e"
+                        border.color: "#1f242c"
+                        radius: 3
+                        clip: true
 
-                        Repeater {
-                            model: [
-                                "20", "25", "31.5", "40", "50", "63", "80", "100",
-                                "125", "160", "200", "250", "315", "400", "500", "630",
-                                "800", "1k", "1.25k", "1.6k", "2k", "2.5k", "3.15k", "4k",
-                                "5k", "6.3k", "8k", "10k", "12.5k", "16k", "20k", "25k"
+                        Canvas {
+                            id: eqCanvas
+                            anchors.fill: parent
+                            antialiasing: true
+
+                            property var isoGeqFreqs: [
+                                16.0, 20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0,
+                                100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0,
+                                630.0, 800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0,
+                                4000.0, 5000.0, 6300.0, 8000.0, 10000.0, 12500.0, 16000.0, 20000.0
                             ]
 
-                            Rectangle {
-                                Layout.fillWidth: true
-                                Layout.fillHeight: true
-                                color: "#0d0f12"
-                                border.color: "#1c2128"
-                                radius: 2
+                            onAvailableChanged: if (available) requestPaint()
+                            onWidthChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            Component.onCompleted: requestPaint()
 
-                                ColumnLayout {
-                                    anchors.fill: parent
-                                    anchors.margins: 4
-                                    spacing: 2
+                            function peqFreqToX(f, w) {
+                                var minLog = Math.log10(20.0);
+                                var maxLog = Math.log10(20000.0);
+                                var curLog = Math.log10(Math.max(20.0, Math.min(20000.0, f)));
+                                return (curLog - minLog) / (maxLog - minLog) * w;
+                            }
 
-                                    Label {
-                                        Layout.alignment: Qt.AlignHCenter
-                                        text: (geqSlider.value > 0 ? "+" : "") + geqSlider.value.toFixed(1)
-                                        font.pixelSize: 9
-                                        font.family: "Monospace"
-                                        color: geqSlider.value !== 0 ? "#00E5FF" : "#606c7a"
+                            function geqFreqToX(f, w, centers) {
+                                var safeF = Math.max(1.0, f);
+                                if (!centers || centers.length < 32) {
+                                    var cw = (w - 31 * 4.0) / 32.0;
+                                    centers = [];
+                                    for (var idx = 0; idx < 32; ++idx) {
+                                        centers.push(idx * (cw + 4.0) + cw * 0.5);
+                                    }
+                                }
+                                if (safeF <= isoGeqFreqs[0]) {
+                                    var x0 = centers[0];
+                                    var x1 = centers[1];
+                                    var t0 = Math.log10(safeF / isoGeqFreqs[0]) / Math.log10(isoGeqFreqs[1] / isoGeqFreqs[0]);
+                                    return Math.max(0, x0 + t0 * (x1 - x0));
+                                }
+                                if (safeF >= isoGeqFreqs[31]) {
+                                    var xN = centers[31];
+                                    var xP = centers[30];
+                                    var tN = Math.log10(safeF / isoGeqFreqs[31]) / Math.log10(isoGeqFreqs[31] / isoGeqFreqs[30]);
+                                    return Math.min(w, xN + tN * (xN - xP));
+                                }
+                                for (var b = 0; b < 31; ++b) {
+                                    if (safeF >= isoGeqFreqs[b] && safeF <= isoGeqFreqs[b + 1]) {
+                                        var xb = centers[b];
+                                        var xNext = centers[b + 1];
+                                        var tb = Math.log10(safeF / isoGeqFreqs[b]) / Math.log10(isoGeqFreqs[b + 1] / isoGeqFreqs[b]);
+                                        return xb + tb * (xNext - xb);
+                                    }
+                                }
+                                return w * 0.5;
+                            }
+
+                            function dbToY(db, h) {
+                                var clamped = Math.max(-18.0, Math.min(18.0, db));
+                                return h * (0.5 - (clamped / 36.0));
+                            }
+
+                            onPaint: {
+                                var ctx = getContext("2d");
+                                if (!ctx) return;
+                                var w = width;
+                                var h = height;
+                                if (w <= 0 || h <= 0) return;
+                                ctx.clearRect(0, 0, w, h);
+
+                                // Background
+                                ctx.fillStyle = "#090b0e";
+                                ctx.fillRect(0, 0, w, h);
+
+                                // Horizontal dB Grid
+                                var dbLines = [-12, -6, 0, 6, 12];
+                                for (var i = 0; i < dbLines.length; ++i) {
+                                    var y = dbToY(dbLines[i], h);
+                                    ctx.beginPath();
+                                    ctx.strokeStyle = dbLines[i] === 0 ? "#37474f" : "#141a22";
+                                    ctx.lineWidth = dbLines[i] === 0 ? 1.5 : 1.0;
+                                    ctx.moveTo(0, y);
+                                    ctx.lineTo(w, y);
+                                    ctx.stroke();
+
+                                    ctx.fillStyle = dbLines[i] === 0 ? "#78909c" : "#455a64";
+                                    ctx.font = "9px monospace";
+                                    ctx.fillText((dbLines[i] > 0 ? "+" : "") + dbLines[i] + " dB", 4, y - 2);
+                                }
+
+                                var isGeq = (eqConsoleRect.eqMode === "geq");
+
+                                // Compute fader column centers for GEQ pixel-perfect alignment
+                                var faderCenters = new Array(32);
+                                var colWidth = (w - 31 * 4.0) / 32.0;
+                                for (var fi = 0; fi < 32; ++fi) {
+                                    var it = (typeof geqRepeater !== "undefined" && geqRepeater.itemAt) ? geqRepeater.itemAt(fi) : null;
+                                    if (it && it.width > 0) {
+                                        faderCenters[fi] = it.x + it.width * 0.5;
+                                    } else {
+                                        faderCenters[fi] = fi * (colWidth + 4.0) + colWidth * 0.5;
+                                    }
+                                }
+
+                                // Vertical Frequency Grid
+                                var gridFreqs = [50, 100, 200, 500, 1000, 2000, 5000, 10000];
+                                for (var j = 0; j < gridFreqs.length; ++j) {
+                                    var x = isGeq ? geqFreqToX(gridFreqs[j], w, faderCenters) : peqFreqToX(gridFreqs[j], w);
+                                    ctx.beginPath();
+                                    ctx.strokeStyle = "#141a22";
+                                    ctx.lineWidth = 1.0;
+                                    ctx.moveTo(x, 0);
+                                    ctx.lineTo(x, h);
+                                    ctx.stroke();
+
+                                    ctx.fillStyle = "#455a64";
+                                    ctx.font = "9px monospace";
+                                    var label = gridFreqs[j] >= 1000 ? (gridFreqs[j] / 1000) + "k" : gridFreqs[j];
+                                    ctx.fillText(label, x + 2, h - 4);
+                                }
+
+                                if (isGeq) {
+                                    // 32-Band GEQ Curve (exact fader-aligned curve)
+                                    var pts = EngineController.getGeqCurve(256);
+                                    if (pts && pts.length > 1) {
+                                        ctx.beginPath();
+                                        ctx.strokeStyle = "#00E5FF";
+                                        ctx.lineWidth = 2.0;
+                                        for (var k = 0; k < pts.length; ++k) {
+                                            var px = geqFreqToX(pts[k].f, w, faderCenters);
+                                            var py = dbToY(pts[k].db, h);
+                                            if (k === 0) ctx.moveTo(px, py);
+                                            else ctx.lineTo(px, py);
+                                        }
+                                        ctx.stroke();
+                                    }
+                                } else {
+                                    // 24-Band PEQ Curves (Left & Right channels)
+                                    var ptsL = EngineController.getPeqCurve(false, 128);
+                                    if (ptsL && ptsL.length > 1) {
+                                        ctx.beginPath();
+                                        ctx.strokeStyle = "#00E5FF";
+                                        ctx.lineWidth = 2.0;
+                                        for (var l = 0; l < ptsL.length; ++l) {
+                                            var lx = peqFreqToX(ptsL[l].f, w);
+                                            var ly = dbToY(ptsL[l].db, h);
+                                            if (l === 0) ctx.moveTo(lx, ly);
+                                            else ctx.lineTo(lx, ly);
+                                        }
+                                        ctx.stroke();
                                     }
 
-                                    Slider {
-                                        id: geqSlider
-                                        Layout.fillHeight: true
-                                        Layout.alignment: Qt.AlignHCenter
-                                        orientation: Qt.Vertical
-                                        from: -12.0
-                                        to: 12.0
-                                        value: 0.0
-                                        onMoved: EngineController.setGeqBandGain(index, value)
-                                    }
-
-                                    Label {
-                                        Layout.alignment: Qt.AlignHCenter
-                                        text: modelData
-                                        font.pixelSize: 9
-                                        font.family: "Monospace"
-                                        color: "#808c99"
+                                    var ptsR = EngineController.getPeqCurve(true, 128);
+                                    if (ptsR && ptsR.length > 1) {
+                                        ctx.beginPath();
+                                        ctx.strokeStyle = "#FF9100";
+                                        ctx.lineWidth = 1.8;
+                                        for (var m = 0; m < ptsR.length; ++m) {
+                                            var rx = peqFreqToX(ptsR[m].f, w);
+                                            var ry = dbToY(ptsR[m].db, h);
+                                            if (m === 0) ctx.moveTo(rx, ry);
+                                            else ctx.lineTo(rx, ry);
+                                        }
+                                        ctx.stroke();
                                     }
                                 }
                             }
                         }
+
+                        // Curve Legend for PEQ
+                        RowLayout {
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.margins: 6
+                            spacing: 12
+                            visible: eqConsoleRect.eqMode === "peq"
+
+                            RowLayout {
+                                spacing: 4
+                                Rectangle { width: 10; height: 3; color: "#00E5FF" }
+                                Label { text: qsTr("Left Channel"); font.pixelSize: 9; color: "#808c99" }
+                            }
+                            RowLayout {
+                                spacing: 4
+                                Rectangle { width: 10; height: 3; color: "#FF9100" }
+                                Label { text: qsTr("Right Channel"); font.pixelSize: 9; color: "#808c99" }
+                            }
+                        }
                     }
 
-                    // 24-BAND PARAMETRIC EQUALIZER VIEW
-                    Rectangle {
+                    // STACKLAYOUT FOR EQ VIEWS (CLEAN ISOLATION BETWEEN GEQ AND PEQ)
+                    StackLayout {
+                        id: eqStack
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        color: "#0d0f12"
-                        border.color: "#1c2128"
-                        visible: parent.parent.eqMode === "peq"
+                        currentIndex: eqConsoleRect.eqMode === "geq" ? 0 : 1
 
-                        Label {
-                            anchors.centerIn: parent
-                            text: qsTr("24-Band Parametric EQ Strip (Left 12 Bands + Right 12 Bands Independent Editing)")
-                            color: "#808c99"
-                            font.pixelSize: 14
+                        // PAGE 0: 32-BAND GRAPHIC EQUALIZER VIEW
+                        RowLayout {
+                            id: geqRowLayout
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            spacing: 4
+
+                            Repeater {
+                                id: geqRepeater
+                                model: [
+                                    "16", "20", "25", "31.5", "40", "50", "63", "80",
+                                    "100", "125", "160", "200", "250", "315", "400", "500",
+                                    "630", "800", "1k", "1.25k", "1.6k", "2k", "2.5k", "3.15k",
+                                    "4k", "5k", "6.3k", "8k", "10k", "12.5k", "16k", "20k"
+                                ]
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#0d0f12"
+                                    border.color: "#1c2128"
+                                    radius: 2
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onDoubleClicked: {
+                                            geqSlider.value = 0.0;
+                                            EngineController.setGeqBandGain(index, 0.0);
+                                            eqCanvas.requestPaint();
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 4
+                                        spacing: 2
+
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: (geqSlider.value > 0 ? "+" : "") + geqSlider.value.toFixed(1)
+                                            font.pixelSize: 9
+                                            font.family: "Monospace"
+                                            color: geqSlider.value !== 0 ? "#00E5FF" : "#606c7a"
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    geqSlider.value = 0.0;
+                                                    EngineController.setGeqBandGain(index, 0.0);
+                                                    eqCanvas.requestPaint();
+                                                }
+                                            }
+                                        }
+
+                                        Slider {
+                                            id: geqSlider
+                                            Layout.fillHeight: true
+                                            Layout.alignment: Qt.AlignHCenter
+                                            orientation: Qt.Vertical
+                                            from: -12.0
+                                            to: 12.0
+                                            value: EngineController.getGeqBandGain(index)
+                                            onMoved: {
+                                                EngineController.setGeqBandGain(index, value);
+                                                eqCanvas.requestPaint();
+                                            }
+
+                                            Connections {
+                                                target: EngineController
+                                                function onGeqParametersChanged() {
+                                                    geqSlider.value = EngineController.getGeqBandGain(index);
+                                                }
+                                            }
+                                        }
+
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: modelData
+                                            font.pixelSize: 9
+                                            font.family: "Monospace"
+                                            color: "#808c99"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // PAGE 1: 24-BAND PARAMETRIC EQUALIZER VIEW
+                        Rectangle {
+                            id: peqContainer
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            color: "#0d0f12"
+                            border.color: "#1c2128"
+                            radius: 2
+
+                            property bool isRightChannel: false
+                            property int currentBandIndex: 0
+
+                            function updateActiveBand() {
+                                if (!bandEnableCheck || !typeCombo || !freqSlider || !gainSlider || !qSlider) return;
+                                EngineController.setPeqBand(
+                                    isRightChannel,
+                                    currentBandIndex,
+                                    freqSlider.value,
+                                    gainSlider.value,
+                                    qSlider.value,
+                                    typeCombo.currentIndex,
+                                    bandEnableCheck.checked
+                                );
+                                eqCanvas.requestPaint();
+                            }
+
+                            function reloadBand() {
+                                var b = EngineController.getPeqBand(isRightChannel, currentBandIndex);
+                                if (!b || !bandEnableCheck || !typeCombo || !freqSlider || !gainSlider || !qSlider) return;
+                                bandEnableCheck.checked = (b.enabled !== undefined) ? b.enabled : true;
+                                typeCombo.currentIndex = (b.type !== undefined) ? Math.min(5, Math.max(0, b.type)) : 0;
+                                freqSlider.value = (b.frequency !== undefined) ? b.frequency : 1000.0;
+                                gainSlider.value = (b.gainDb !== undefined) ? b.gainDb : 0.0;
+                                qSlider.value = (b.q !== undefined) ? b.q : 1.0;
+                                eqCanvas.requestPaint();
+                            }
+
+                            Component.onCompleted: reloadBand()
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 8
+
+                                // Channel and Preset Bar
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    Button {
+                                        text: qsTr("LEFT CHANNEL (12 Bands)")
+                                        flat: peqContainer.isRightChannel
+                                        highlighted: !peqContainer.isRightChannel
+                                        onClicked: {
+                                            peqContainer.isRightChannel = false;
+                                            peqContainer.reloadBand();
+                                        }
+                                    }
+
+                                    Button {
+                                        text: qsTr("RIGHT CHANNEL (12 Bands)")
+                                        flat: !peqContainer.isRightChannel
+                                        highlighted: peqContainer.isRightChannel
+                                        onClicked: {
+                                            peqContainer.isRightChannel = true;
+                                            peqContainer.reloadBand();
+                                        }
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: qsTr("Preset:")
+                                        font.pixelSize: 11
+                                        color: "#808c99"
+                                    }
+
+                                    ComboBox {
+                                        id: peqPresetCombo
+                                        model: EngineController.availableListeningPresets()
+                                    }
+
+                                    Button {
+                                        text: qsTr("Apply Preset")
+                                        onClicked: {
+                                            EngineController.applyPeqPreset(peqPresetCombo.currentText);
+                                            peqContainer.reloadBand();
+                                            eqCanvas.requestPaint();
+                                        }
+                                    }
+                                }
+
+                                // Band Selector Strip (1 to 12)
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+
+                                    Repeater {
+                                        model: 12
+                                        Button {
+                                            Layout.fillWidth: true
+                                            text: "Band " + (index + 1)
+                                            flat: peqContainer.currentBandIndex !== index
+                                            highlighted: peqContainer.currentBandIndex === index
+                                            onClicked: {
+                                                peqContainer.currentBandIndex = index;
+                                                peqContainer.reloadBand();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Selected Band Parameter Deck
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#111418"
+                                    border.color: "#212730"
+                                    radius: 4
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 16
+
+                                        // Band Enabled & Type
+                                        ColumnLayout {
+                                            Layout.preferredWidth: 160
+                                            spacing: 8
+
+                                            CheckBox {
+                                                id: bandEnableCheck
+                                                text: qsTr("Band Enabled")
+                                                checked: true
+                                                onToggled: peqContainer.updateActiveBand()
+                                            }
+
+                                            Label {
+                                                text: qsTr("Filter Type:")
+                                                font.pixelSize: 10
+                                                color: "#808c99"
+                                            }
+
+                                            ComboBox {
+                                                id: typeCombo
+                                                Layout.fillWidth: true
+                                                model: ["Peak (Bell)", "Low Shelf", "High Shelf", "Notch", "Low Pass", "High Pass"]
+                                                onActivated: peqContainer.updateActiveBand()
+                                            }
+                                        }
+
+                                        // Frequency Slider
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 4
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Center Frequency"); font.pixelSize: 11; color: "#A0AAB2" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: (freqSlider.value >= 1000 ? (freqSlider.value / 1000).toFixed(2) + " kHz" : Math.round(freqSlider.value) + " Hz")
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
+                                                    color: "#00E5FF"
+                                                }
+                                            }
+
+                                            Slider {
+                                                id: freqSlider
+                                                Layout.fillWidth: true
+                                                from: 20.0
+                                                to: 20000.0
+                                                value: 1000.0
+                                                onMoved: peqContainer.updateActiveBand()
+                                            }
+                                        }
+
+                                        // Gain Slider
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 4
+                                            enabled: typeCombo.currentIndex <= 2 // Gain applies only to Peak, Low Shelf, High Shelf
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Band Gain"); font.pixelSize: 11; color: "#A0AAB2" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: (gainSlider.value > 0 ? "+" : "") + gainSlider.value.toFixed(1) + " dB"
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
+                                                    color: gainSlider.value !== 0 ? "#00E5FF" : "#808c99"
+                                                }
+                                            }
+
+                                            Slider {
+                                                id: gainSlider
+                                                Layout.fillWidth: true
+                                                from: -18.0
+                                                to: 18.0
+                                                value: 0.0
+                                                onMoved: peqContainer.updateActiveBand()
+                                            }
+                                        }
+
+                                        // Q / Resonance Slider
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 4
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Q Factor"); font.pixelSize: 11; color: "#A0AAB2" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: "Q: " + qSlider.value.toFixed(2)
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
+                                                    color: "#00E5FF"
+                                                }
+                                            }
+
+                                            Slider {
+                                                id: qSlider
+                                                Layout.fillWidth: true
+                                                from: 0.1
+                                                to: 10.0
+                                                value: 1.0
+                                                onMoved: peqContainer.updateActiveBand()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
