@@ -1223,10 +1223,8 @@ ApplicationWindow {
                                                     }
                                                 }
 
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    acceptedButtons: Qt.NoButton
-                                                    onDoubleClicked: {
+                                                TapHandler {
+                                                    onDoubleTapped: {
                                                         EngineController.setMasterGainL(1.0);
                                                         masterSliderL.value = 1.0;
                                                         if (masterSectionRect.fadersLinked) {
@@ -1372,10 +1370,8 @@ ApplicationWindow {
                                                     }
                                                 }
 
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    acceptedButtons: Qt.NoButton
-                                                    onDoubleClicked: {
+                                                TapHandler {
+                                                    onDoubleTapped: {
                                                         EngineController.setMasterGainR(1.0);
                                                         masterSliderR.value = 1.0;
                                                         if (masterSectionRect.fadersLinked) {
@@ -1695,12 +1691,12 @@ ApplicationWindow {
                         }
                     }
 
-                    // STACKLAYOUT FOR EQ VIEWS (CLEAN ISOLATION BETWEEN GEQ AND PEQ)
+                    // STACKLAYOUT FOR EQ & EXTERNAL INSERT VIEWS (GEQ / PEQ / INSERT HOST)
                     StackLayout {
                         id: eqStack
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        currentIndex: eqConsoleRect.eqMode === "geq" ? 0 : 1
+                        currentIndex: eqConsoleRect.eqMode === "geq" ? 0 : (eqConsoleRect.eqMode === "peq" ? 1 : 2)
 
                         // PAGE 0: 32-BAND GRAPHIC EQUALIZER VIEW
                         RowLayout {
@@ -2032,7 +2028,6 @@ ApplicationWindow {
                             id: insertControlCenter
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            visible: eqConsoleRect.eqMode === "insert"
                             color: "transparent"
 
                             Connections {
@@ -2046,43 +2041,52 @@ ApplicationWindow {
                                 }
                             }
 
-                            onVisibleChanged: {
-                                if (visible) {
+                            StackLayout.onIsCurrentItemChanged: {
+                                if (StackLayout.isCurrentItem) {
                                     insertPresetCombo.model = EngineController.listPresets("external_insert");
                                 }
                             }
 
                             RowLayout {
                                 anchors.fill: parent
-                                spacing: 10
+                                spacing: 12
 
-                                // CARD 1: PORT ROUTING & CLIENT CONFIGURATION
+                                // ================= CARD 1: HOST ROUTING & PORTS =================
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    color: "#0d0f12"
-                                    border.color: "#1c2128"
-                                    radius: 3
+                                    color: "#0f1217"
+                                    border.color: "#222934"
+                                    border.width: 1
+                                    radius: 6
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 12
-                                        spacing: 8
+                                        anchors.margins: 14
+                                        spacing: 10
 
-                                        Label {
-                                            text: qsTr("1. PORT ROUTING & HOST CLIENT")
-                                            font.bold: true
-                                            font.pixelSize: 11
-                                            color: "#00E5FF"
+                                        // Card Header with Accent Line
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Rectangle { width: 4; height: 16; radius: 2; color: "#00E5FF" }
+                                            Label {
+                                                text: qsTr("1. HOST ROUTING & PORTS")
+                                                font.bold: true
+                                                font.pixelSize: 12
+                                                color: "#00E5FF"
+                                            }
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 2
-                                            Label { text: qsTr("Target Host Client Name:"); font.pixelSize: 10; color: "#808c99" }
+                                            spacing: 4
+                                            Label { text: qsTr("Target Host Client Name:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                             TextField {
                                                 id: insertClientNameInput
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 32
+                                                font.pixelSize: 11
                                                 text: EngineController.externalInsertClientName
                                                 placeholderText: "e.g. Carla, lsp-plugins"
                                             }
@@ -2090,25 +2094,31 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 6
+                                            spacing: 8
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 2
-                                                Label { text: qsTr("Send Port L:"); font.pixelSize: 10; color: "#808c99" }
+                                                spacing: 4
+                                                Label { text: qsTr("Send Port L:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertSendLInput
                                                     Layout.fillWidth: true
+                                                    Layout.preferredHeight: 32
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
                                                     text: EngineController.externalInsertSendPortL
                                                     placeholderText: "carla:audio_in_1"
                                                 }
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 2
-                                                Label { text: qsTr("Send Port R:"); font.pixelSize: 10; color: "#808c99" }
+                                                spacing: 4
+                                                Label { text: qsTr("Send Port R:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertSendRInput
                                                     Layout.fillWidth: true
+                                                    Layout.preferredHeight: 32
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
                                                     text: EngineController.externalInsertSendPortR
                                                     placeholderText: "carla:audio_in_2"
                                                 }
@@ -2117,25 +2127,31 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 6
+                                            spacing: 8
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 2
-                                                Label { text: qsTr("Return Port L:"); font.pixelSize: 10; color: "#808c99" }
+                                                spacing: 4
+                                                Label { text: qsTr("Return Port L:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertReturnLInput
                                                     Layout.fillWidth: true
+                                                    Layout.preferredHeight: 32
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
                                                     text: EngineController.externalInsertReturnPortL
                                                     placeholderText: "carla:audio_out_1"
                                                 }
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 2
-                                                Label { text: qsTr("Return Port R:"); font.pixelSize: 10; color: "#808c99" }
+                                                spacing: 4
+                                                Label { text: qsTr("Return Port R:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertReturnRInput
                                                     Layout.fillWidth: true
+                                                    Layout.preferredHeight: 32
+                                                    font.pixelSize: 11
+                                                    font.family: "Monospace"
                                                     text: EngineController.externalInsertReturnPortR
                                                     placeholderText: "carla:audio_out_2"
                                                 }
@@ -2150,7 +2166,10 @@ ApplicationWindow {
                                             Button {
                                                 text: qsTr("Connect / Reconfigure")
                                                 highlighted: true
+                                                font.pixelSize: 12
+                                                font.bold: true
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 34
                                                 onClicked: {
                                                     EngineController.configureExternalInsert(
                                                         insertClientNameInput.text,
@@ -2166,38 +2185,48 @@ ApplicationWindow {
                                             }
                                             Button {
                                                 text: qsTr("Disconnect")
-                                                Layout.preferredWidth: 90
+                                                font.pixelSize: 11
+                                                Layout.preferredWidth: 100
+                                                Layout.preferredHeight: 34
                                                 onClicked: EngineController.disconnectExternalInsert()
                                             }
                                         }
                                     }
                                 }
 
-                                // CARD 2: HOST STATUS & SIGNAL INTEGRITY
+                                // ================= CARD 2: SIGNAL INTEGRITY & STATUS =================
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    color: "#0d0f12"
-                                    border.color: "#1c2128"
-                                    radius: 3
+                                    color: "#0f1217"
+                                    border.color: "#222934"
+                                    border.width: 1
+                                    radius: 6
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 12
-                                        spacing: 8
+                                        anchors.margins: 14
+                                        spacing: 10
 
-                                        Label {
-                                            text: qsTr("2. HOST STATUS & INTEGRITY")
-                                            font.bold: true
-                                            font.pixelSize: 11
-                                            color: "#00E5FF"
+                                        // Card Header
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Rectangle { width: 4; height: 16; radius: 2; color: "#00E676" }
+                                            Label {
+                                                text: qsTr("2. STATUS & INTEGRITY")
+                                                font.bold: true
+                                                font.pixelSize: 12
+                                                color: "#00E676"
+                                            }
                                         }
 
+                                        // Status Hero Panel
                                         Rectangle {
                                             id: insertBadgeFull
                                             Layout.fillWidth: true
-                                            height: 44
-                                            radius: 3
+                                            height: 48
+                                            radius: 4
                                             property int st: EngineController.externalInsertState
                                             property bool isByp: EngineController.externalInsertBypassed
                                             color: st === 2 ? (isByp ? "#FFD60020" : "#00E67620") : (st === 1 ? "#00E5FF20" : (st === 0 ? "#1c2128" : "#FF525220"))
@@ -2205,26 +2234,27 @@ ApplicationWindow {
 
                                             RowLayout {
                                                 anchors.fill: parent
-                                                anchors.margins: 8
+                                                anchors.margins: 10
                                                 spacing: 10
                                                 Rectangle {
-                                                    width: 12
-                                                    height: 12
-                                                    radius: 6
+                                                    width: 14
+                                                    height: 14
+                                                    radius: 7
                                                     color: insertBadgeFull.border.color
                                                 }
                                                 ColumnLayout {
-                                                    spacing: 1
+                                                    spacing: 2
                                                     Label {
                                                         text: EngineController.externalInsertStateText.toUpperCase()
                                                         font.bold: true
-                                                        font.pixelSize: 11
+                                                        font.pixelSize: 12
+                                                        font.family: "Monospace"
                                                         color: insertBadgeFull.border.color
                                                     }
                                                     Label {
                                                         text: EngineController.externalInsertBypassed ? qsTr("Dry Bypass Active (Lossless passthrough)") : qsTr("Active Stream passing through Insert Node")
-                                                        font.pixelSize: 9
-                                                        color: "#9aa5b1"
+                                                        font.pixelSize: 10
+                                                        color: "#A0AAB2"
                                                     }
                                                 }
                                             }
@@ -2232,7 +2262,9 @@ ApplicationWindow {
 
                                         Button {
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: 30
+                                            Layout.preferredHeight: 34
+                                            font.pixelSize: 11
+                                            font.bold: true
                                             text: EngineController.externalInsertBypassed ? qsTr("ENGAGE INSERT (DISABLE BYPASS)") : qsTr("FORCE DRY BYPASS (MUTE INSERT)")
                                             highlighted: !EngineController.externalInsertBypassed
                                             onClicked: EngineController.setExternalInsertBypass(!EngineController.externalInsertBypassed)
@@ -2240,43 +2272,44 @@ ApplicationWindow {
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 3
+                                            spacing: 6
 
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                Label { text: qsTr("Feedback Protection:"); font.pixelSize: 9; color: "#808c99" }
+                                                Label { text: qsTr("Feedback Protection:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: qsTr("PASSED (SAFE)"); font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                                Label { text: qsTr("PASSED (SAFE)"); font.pixelSize: 11; font.bold: true; color: "#00E676" }
                                             }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                Label { text: qsTr("Sample Rate Match:"); font.pixelSize: 9; color: "#808c99" }
+                                                Label { text: qsTr("Sample Rate Match:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz (MATCHED)"; font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                                Label { text: (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz (MATCHED)"; font.pixelSize: 11; font.bold: true; color: "#00E676" }
                                             }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                Label { text: qsTr("Buffer Size Match:"); font.pixelSize: 9; color: "#808c99" }
+                                                Label { text: qsTr("Buffer Size Match:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: "256 smp (MATCHED)"; font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                                Label { text: "256 smp (MATCHED)"; font.pixelSize: 11; font.bold: true; color: "#00E676" }
                                             }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                Label { text: qsTr("Insert XRUN / Dropouts:"); font.pixelSize: 9; color: "#808c99" }
+                                                Label { text: qsTr("Insert Dropouts (XRUN):"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
                                                     text: EngineController.externalInsertXRunCount.toString()
-                                                    font.pixelSize: 9
+                                                    font.pixelSize: 12
                                                     font.bold: true
+                                                    font.family: "Monospace"
                                                     color: EngineController.externalInsertXRunCount === 0 ? "#00E676" : "#FF5252"
                                                 }
                                                 Button {
                                                     text: qsTr("Reset")
-                                                    font.pixelSize: 8
-                                                    Layout.preferredHeight: 18
+                                                    font.pixelSize: 10
+                                                    Layout.preferredHeight: 24
                                                     onClicked: EngineController.resetInsertXRuns()
                                                 }
                                             }
@@ -2286,58 +2319,67 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 6
+                                            spacing: 8
                                             Button {
                                                 text: qsTr("Simulate Drop")
-                                                font.pixelSize: 8
+                                                font.pixelSize: 10
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 28
                                                 onClicked: EngineController.simulateInsertDisconnect()
                                             }
                                             Button {
                                                 text: qsTr("Simulate Recovery")
-                                                font.pixelSize: 8
+                                                font.pixelSize: 10
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 28
                                                 onClicked: EngineController.simulateInsertRecovery()
                                             }
                                         }
                                     }
                                 }
 
-                                // CARD 3: PDC & LATENCY CALIBRATION
+                                // ================= CARD 3: PDC & LATENCY CALIBRATION =================
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    color: "#0d0f12"
-                                    border.color: "#1c2128"
-                                    radius: 3
+                                    color: "#0f1217"
+                                    border.color: "#222934"
+                                    border.width: 1
+                                    radius: 6
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 12
-                                        spacing: 8
+                                        anchors.margins: 14
+                                        spacing: 10
 
-                                        Label {
-                                            text: qsTr("3. PDC & LATENCY CALIBRATION")
-                                            font.bold: true
-                                            font.pixelSize: 11
-                                            color: "#00E5FF"
+                                        // Card Header
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Rectangle { width: 4; height: 16; radius: 2; color: "#FF9100" }
+                                            Label {
+                                                text: qsTr("3. PDC & LATENCY CALIBRATION")
+                                                font.bold: true
+                                                font.pixelSize: 12
+                                                color: "#FF9100"
+                                            }
                                         }
 
                                         Rectangle {
                                             Layout.fillWidth: true
-                                            height: 36
+                                            height: 40
                                             color: "#07090b"
-                                            border.color: "#181d24"
-                                            radius: 2
+                                            border.color: "#1d232c"
+                                            radius: 3
                                             RowLayout {
                                                 anchors.fill: parent
-                                                anchors.margins: 6
-                                                Label { text: qsTr("Reported Latency:"); font.pixelSize: 9; color: "#808c99" }
+                                                anchors.margins: 8
+                                                Label { text: qsTr("Reported Latency:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
                                                     text: EngineController.externalInsertReportedLatency + " smp (" + (EngineController.externalInsertReportedLatency / 48.0).toFixed(2) + " ms)"
                                                     font.family: "Monospace"
-                                                    font.pixelSize: 10
+                                                    font.pixelSize: 11
                                                     font.bold: true
                                                     color: "#00E5FF"
                                                 }
@@ -2346,21 +2388,21 @@ ApplicationWindow {
 
                                         Rectangle {
                                             Layout.fillWidth: true
-                                            height: 36
+                                            height: 40
                                             color: "#07090b"
-                                            border.color: "#181d24"
-                                            radius: 2
+                                            border.color: "#1d232c"
+                                            radius: 3
                                             RowLayout {
                                                 anchors.fill: parent
-                                                anchors.margins: 6
-                                                Label { text: qsTr("Measured (Impulse):"); font.pixelSize: 9; color: "#808c99" }
+                                                anchors.margins: 8
+                                                Label { text: qsTr("Measured (Impulse):"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
                                                     text: EngineController.externalInsertMeasuredLatency >= 0 ?
                                                           (EngineController.externalInsertMeasuredLatency + " smp (" + EngineController.externalInsertMeasuredLatencyMs.toFixed(2) + " ms)") :
                                                           qsTr("Not Calibrated")
                                                     font.family: "Monospace"
-                                                    font.pixelSize: 10
+                                                    font.pixelSize: 11
                                                     font.bold: true
                                                     color: EngineController.externalInsertMeasuredLatency >= 0 ? "#00E676" : "#FFB300"
                                                 }
@@ -2370,24 +2412,24 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("CALIBRATE IMPULSE LATENCY NOW")
                                             font.bold: true
-                                            font.pixelSize: 9
+                                            font.pixelSize: 11
                                             highlighted: true
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: 28
+                                            Layout.preferredHeight: 34
                                             onClicked: EngineController.calibrateInsertLatency()
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 2
+                                            spacing: 4
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                Label { text: qsTr("Delay Compensation Buffer:"); font.pixelSize: 9; color: "#808c99" }
+                                                Label { text: qsTr("Delay Compensation Buffer:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
                                                     text: EngineController.externalInsertDelayCompensation + " smp (" + (EngineController.externalInsertDelayCompensation / 48.0).toFixed(2) + " ms)"
                                                     font.family: "Monospace"
-                                                    font.pixelSize: 10
+                                                    font.pixelSize: 11
                                                     font.bold: true
                                                     color: "#00E5FF"
                                                 }
@@ -2407,11 +2449,13 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 4
+                                            spacing: 6
                                             Button {
                                                 text: qsTr("To Measured")
-                                                font.pixelSize: 8
+                                                font.pixelSize: 10
+                                                font.bold: true
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 30
                                                 enabled: EngineController.externalInsertMeasuredLatency >= 0
                                                 onClicked: {
                                                     if (EngineController.externalInsertMeasuredLatency >= 0) {
@@ -2421,53 +2465,59 @@ ApplicationWindow {
                                             }
                                             Button {
                                                 text: qsTr("To Reported")
-                                                font.pixelSize: 8
+                                                font.pixelSize: 10
+                                                font.bold: true
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 30
                                                 onClicked: EngineController.setInsertDelayCompensation(EngineController.externalInsertReportedLatency)
                                             }
                                             Button {
                                                 text: qsTr("Zero (0)")
-                                                font.pixelSize: 8
-                                                Layout.preferredWidth: 60
+                                                font.pixelSize: 10
+                                                Layout.preferredWidth: 70
+                                                Layout.preferredHeight: 30
                                                 onClicked: EngineController.setInsertDelayCompensation(0)
                                             }
                                         }
                                     }
                                 }
 
-                                // CARD 4: PRESET MANAGEMENT (XDG COMPLIANT)
+                                // ================= CARD 4: PRESET MANAGEMENT (XDG) =================
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    color: "#0d0f12"
-                                    border.color: "#1c2128"
-                                    radius: 3
+                                    color: "#0f1217"
+                                    border.color: "#222934"
+                                    border.width: 1
+                                    radius: 6
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 12
-                                        spacing: 8
+                                        anchors.margins: 14
+                                        spacing: 10
 
-                                        Label {
-                                            text: qsTr("4. PRESET MANAGEMENT (XDG)")
-                                            font.bold: true
-                                            font.pixelSize: 11
-                                            color: "#00E5FF"
-                                        }
-
-                                        Label {
-                                            text: qsTr("Category: external_insert")
-                                            font.pixelSize: 9
-                                            color: "#6c7885"
+                                        // Card Header
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Rectangle { width: 4; height: 16; radius: 2; color: "#B388FF" }
+                                            Label {
+                                                text: qsTr("4. PRESET MANAGEMENT (XDG)")
+                                                font.bold: true
+                                                font.pixelSize: 12
+                                                color: "#B388FF"
+                                            }
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 2
-                                            Label { text: qsTr("Select Preset:"); font.pixelSize: 9; color: "#808c99" }
+                                            spacing: 4
+                                            Label { text: qsTr("Select Preset Profile:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
                                             ComboBox {
                                                 id: insertPresetCombo
                                                 Layout.fillWidth: true
+                                                Layout.preferredHeight: 34
+                                                font.pixelSize: 11
                                                 model: EngineController.listPresets("external_insert")
                                             }
                                         }
@@ -2475,9 +2525,10 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("Apply Selected Preset")
                                             font.bold: true
-                                            font.pixelSize: 9
+                                            font.pixelSize: 11
                                             highlighted: true
                                             Layout.fillWidth: true
+                                            Layout.preferredHeight: 34
                                             onClicked: {
                                                 if (insertPresetCombo.currentText.length > 0) {
                                                     EngineController.applyPresetProfile("external_insert", insertPresetCombo.currentText);
@@ -2487,18 +2538,23 @@ ApplicationWindow {
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 2
-                                            Label { text: qsTr("Save Current Setup:"); font.pixelSize: 9; color: "#808c99" }
+                                            spacing: 4
+                                            Label { text: qsTr("Save Current Setup As Preset:"); font.pixelSize: 11; color: "#A0AAB2" }
                                             RowLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 4
+                                                spacing: 6
                                                 TextField {
                                                     id: newPresetNameInput
                                                     Layout.fillWidth: true
-                                                    placeholderText: qsTr("Preset name...")
+                                                    Layout.preferredHeight: 32
+                                                    font.pixelSize: 11
+                                                    placeholderText: qsTr("Preset profile name...")
                                                 }
                                                 Button {
                                                     text: qsTr("Save")
+                                                    font.bold: true
+                                                    font.pixelSize: 11
+                                                    Layout.preferredHeight: 32
                                                     enabled: newPresetNameInput.text.trim().length > 0
                                                     onClicked: {
                                                         var map = EngineController.captureCurrentStateAsPreset("external_insert");
@@ -2514,8 +2570,9 @@ ApplicationWindow {
 
                                         Button {
                                             text: qsTr("Delete Selected Preset")
-                                            font.pixelSize: 8
+                                            font.pixelSize: 10
                                             Layout.fillWidth: true
+                                            Layout.preferredHeight: 28
                                             enabled: insertPresetCombo.currentText !== "Carla Default" && insertPresetCombo.currentText !== "LSP Plugins Rack"
                                             onClicked: {
                                                 if (insertPresetCombo.currentText.length > 0) {
@@ -2526,8 +2583,8 @@ ApplicationWindow {
                                         }
 
                                         Label {
-                                            text: qsTr("Factory presets (Carla, LSP) are protected.")
-                                            font.pixelSize: 8
+                                            text: qsTr("Factory presets (Carla, LSP) are write-protected.")
+                                            font.pixelSize: 10
                                             color: "#6c7885"
                                             wrapMode: Text.WordWrap
                                             Layout.fillWidth: true

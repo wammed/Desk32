@@ -98,8 +98,8 @@ public:
             tgt->play();
         } else {
             // Normal mode (Section 2.3):
-            // Maintains independent transport state and position.
-            tgt->play();
+            // Strictly maintains each deck's independent transport state and position.
+            // Do NOT forcefully trigger play() on target deck.
         }
 
         m_previousDeckId.store(sourceId, std::memory_order_relaxed);

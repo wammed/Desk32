@@ -11,6 +11,7 @@
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
+#include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/preset/PresetManager.hpp"
 #include "engine/render/RenderEngine.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
@@ -29,8 +30,8 @@ class EngineController : public QObject {
     Q_PROPERTY(int outputRoutingMode READ outputRoutingMode WRITE setOutputRoutingMode NOTIFY outputRoutingModeChanged)
     Q_PROPERTY(bool globalDspBypass READ globalDspBypass WRITE setGlobalDspBypass NOTIFY globalDspBypassChanged)
     Q_PROPERTY(double masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
-    Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY masterGainChanged)
-    Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY masterGainChanged)
+    Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY masterGainLChanged)
+    Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY masterGainRChanged)
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
@@ -122,13 +123,13 @@ public:
     [[nodiscard]] int renderTotalTracks() const;
     [[nodiscard]] QString renderLastOutputDir() const;
 
-    // Property setters
-    void setSwitchingMode(int mode);
-    void setOutputRoutingMode(int path);
-    void setGlobalDspBypass(bool bypass);
-    void setMasterGain(double gain);
-    void setMasterGainL(double gain);
-    void setMasterGainR(double gain);
+    // Property setters & QML invokables
+    Q_INVOKABLE void setSwitchingMode(int mode);
+    Q_INVOKABLE void setOutputRoutingMode(int path);
+    Q_INVOKABLE void setGlobalDspBypass(bool bypass);
+    Q_INVOKABLE void setMasterGain(double gain);
+    Q_INVOKABLE void setMasterGainL(double gain);
+    Q_INVOKABLE void setMasterGainR(double gain);
 
     // QML-invokable Deck Operations
     Q_INVOKABLE void play(const QString& deckId);
@@ -224,6 +225,8 @@ signals:
     void outputRoutingModeChanged(int path);
     void globalDspBypassChanged(bool bypass);
     void masterGainChanged(double gain);
+    void masterGainLChanged(double gain);
+    void masterGainRChanged(double gain);
     void diagnosticsChanged();
     void deckStateChanged(const QString& deckId);
     void dspTelemetryChanged();
@@ -273,6 +276,10 @@ private:
     std::atomic<double> m_masterGain{1.0};
     std::atomic<double> m_masterGainL{1.0};
     std::atomic<double> m_masterGainR{1.0};
+
+    // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
+    engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};
+    engine::dsp::ParameterSmoother m_gainSmootherR{1.0, 15.0};
 
     // Pre-allocated Audio Thread scratch buffers (strictly ZERO dynamic allocation in RT audio callback)
     alignas(64) std::array<double, 4096> m_audioInL{};

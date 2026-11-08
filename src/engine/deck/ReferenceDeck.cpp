@@ -10,3 +10,4 @@ ReferenceDeck::ReferenceDeck(char id)
 ReferenceDeck::~ReferenceDeck() = default;
 
 } // namespace desk32::engine::deck
+

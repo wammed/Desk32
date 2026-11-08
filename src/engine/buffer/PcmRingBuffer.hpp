@@ -18,7 +18,7 @@ struct StereoFrame {
 /// Consumer (Audio Thread) reads PCM frames with strictly ZERO locks, ZERO heap allocations, and ZERO blocking.
 class PcmRingBuffer {
 public:
-    static constexpr size_t DEFAULT_CAPACITY_FRAMES = 65536; // ~1.36s at 48kHz, ~0.34s at 192kHz
+    static constexpr size_t DEFAULT_CAPACITY_FRAMES = 262144; // ~5.46s at 48kHz, ~1.36s at 192kHz
 
     explicit PcmRingBuffer(size_t capacityFrames = DEFAULT_CAPACITY_FRAMES)
         : m_capacity(nextPowerOfTwo(std::max<size_t>(1024, capacityFrames))),

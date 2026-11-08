@@ -117,7 +117,9 @@ private:
     std::array<double, CHUNK_SIZE> m_tempChunkL{};
     std::array<double, CHUNK_SIZE> m_tempChunkR{};
     std::array<double, CHUNK_SIZE * 2> m_tempInterleavedIn{};
-    std::array<buffer::StereoFrame, CHUNK_SIZE * 4> m_tempInterleavedOut{};
+    std::array<buffer::StereoFrame, CHUNK_SIZE * 8> m_tempInterleavedOut{};
+    size_t m_pendingOutOffset = 0;
+    size_t m_pendingOutCount = 0;
 };
 
 } // namespace desk32::engine::decoder

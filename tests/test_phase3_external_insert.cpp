@@ -495,6 +495,52 @@ void TestPhase3ExternalInsert::testEngineControllerIntegration() {
 
     // Cleanup
     QVERIFY(controller.deletePreset("external_insert", "SavedCarlaConfig"));
+
+    // 8. Master Gain Independent L/R Controls & Synchronization
+    QSignalSpy masterGainSpy(&controller, &EngineController::masterGainChanged);
+    QSignalSpy masterGainLSpy(&controller, &EngineController::masterGainLChanged);
+    QSignalSpy masterGainRSpy(&controller, &EngineController::masterGainRChanged);
+
+    // Set Master Gain collectively
+    controller.setMasterGain(0.8);
+    QCOMPARE(controller.masterGain(), 0.8);
+    QCOMPARE(controller.masterGainL(), 0.8);
+    QCOMPARE(controller.masterGainR(), 0.8);
+    QVERIFY(masterGainSpy.count() > 0);
+    QVERIFY(masterGainLSpy.count() > 0);
+    QVERIFY(masterGainRSpy.count() > 0);
+
+    masterGainSpy.clear();
+    masterGainLSpy.clear();
+    masterGainRSpy.clear();
+
+    // Set Master Gain L independently
+    controller.setMasterGainL(1.2);
+    QCOMPARE(controller.masterGainL(), 1.2);
+    QCOMPARE(controller.masterGainR(), 0.8);
+    QCOMPARE(controller.masterGain(), 1.0); // (1.2 + 0.8) / 2 = 1.0
+    QCOMPARE(masterGainLSpy.count(), 1);
+    QCOMPARE(masterGainRSpy.count(), 0);
+    QCOMPARE(masterGainSpy.count(), 1);
+
+    masterGainSpy.clear();
+    masterGainLSpy.clear();
+    masterGainRSpy.clear();
+
+    // Set Master Gain R independently
+    controller.setMasterGainR(1.6);
+    QCOMPARE(controller.masterGainL(), 1.2);
+    QCOMPARE(controller.masterGainR(), 1.6);
+    QCOMPARE(controller.masterGain(), 1.4); // (1.2 + 1.6) / 2 = 1.4
+    QCOMPARE(masterGainLSpy.count(), 0);
+    QCOMPARE(masterGainRSpy.count(), 1);
+    QCOMPARE(masterGainSpy.count(), 1);
+
+    // Reset to unity
+    controller.setMasterGain(1.0);
+    QCOMPARE(controller.masterGainL(), 1.0);
+    QCOMPARE(controller.masterGainR(), 1.0);
+    QCOMPARE(controller.masterGain(), 1.0);
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

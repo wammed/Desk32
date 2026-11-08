@@ -189,7 +189,9 @@ size_t DecoderWorker::readAudioBlock(double* outLeft, double* outRight, size_t f
     }
 
     m_playhead.fetch_add(static_cast<int64_t>(read), std::memory_order_relaxed);
-    m_cmdCv.notify_one(); // Signal worker thread that space is now available
+    if (m_ringBuffer.availableWrite() >= 4096) {
+        m_cmdCv.notify_one(); // Signal worker thread when space is available
+    }
     return read;
 }
 
@@ -201,13 +203,13 @@ void DecoderWorker::workerLoop() {
             if (m_pendingCommands.empty() &&
                 (!m_isOpen.load(std::memory_order_relaxed) ||
                  m_isEof.load(std::memory_order_relaxed) ||
-                 m_ringBuffer.availableWrite() < CHUNK_SIZE)) {
+                 (m_pendingOutCount == 0 && m_ringBuffer.availableWrite() < 4096))) {
                 m_cmdCv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
                     return !m_running.load(std::memory_order_relaxed) ||
                            !m_pendingCommands.empty() ||
                            (m_isOpen.load(std::memory_order_relaxed) &&
                             !m_isEof.load(std::memory_order_relaxed) &&
-                            m_ringBuffer.availableWrite() >= CHUNK_SIZE);
+                            (m_pendingOutCount > 0 || m_ringBuffer.availableWrite() >= 4096));
                 });
             }
             cmds.swap(m_pendingCommands);
@@ -222,7 +224,19 @@ void DecoderWorker::workerLoop() {
         while (m_running.load(std::memory_order_relaxed) &&
                m_isOpen.load(std::memory_order_relaxed) &&
                !m_isEof.load(std::memory_order_relaxed) &&
-               m_ringBuffer.availableWrite() >= CHUNK_SIZE) {
+               (m_pendingOutCount > 0 || m_ringBuffer.availableWrite() >= 4096)) {
+
+            // Prevent busy spin if ring buffer is temporarily completely full
+            if (m_pendingOutCount > 0 && m_ringBuffer.availableWrite() == 0) {
+                std::unique_lock<std::mutex> lock(m_cmdMutex);
+                m_cmdCv.wait_for(lock, std::chrono::milliseconds(5), [this]() {
+                    return !m_running.load(std::memory_order_relaxed) ||
+                           !m_pendingCommands.empty() ||
+                           m_ringBuffer.availableWrite() > 0;
+                });
+                if (!m_pendingCommands.empty() || !m_running.load(std::memory_order_relaxed)) break;
+            }
+
             doDecodeChunk();
             {
                 std::lock_guard<std::mutex> lock(m_cmdMutex);
@@ -236,6 +250,8 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
     switch (cmd.type) {
     case WorkerCommandType::Open: {
         m_ringBuffer.clear();
+        m_pendingOutOffset = 0;
+        m_pendingOutCount = 0;
         m_syntheticPos = 0;
         m_isEof.store(false, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
@@ -248,24 +264,25 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
                 m_decoder = std::move(dec);
             }
         }
-        doDecodeChunk();
-        doDecodeChunk();
+        for (int i = 0; i < 4; ++i) {
+            doDecodeChunk();
+        }
         m_seekCompleted.store(cmd.sequence, std::memory_order_release);
         break;
     }
     case WorkerCommandType::Seek: {
         m_ringBuffer.clear();
+        m_pendingOutOffset = 0;
+        m_pendingOutCount = 0;
         m_isEof.store(false, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
         if (m_isSynthetic.load(std::memory_order_relaxed)) {
             m_syntheticPos = cmd.targetFrame;
-            doDecodeChunk();
-            doDecodeChunk();
+            for (int i = 0; i < 4; ++i) doDecodeChunk();
         } else if (m_decoder) {
             m_decoder->seek(cmd.targetFrame);
             m_resampler.reset();
-            doDecodeChunk();
-            doDecodeChunk();
+            for (int i = 0; i < 4; ++i) doDecodeChunk();
         }
         m_seekCompleted.store(cmd.sequence, std::memory_order_release);
         break;
@@ -276,6 +293,8 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         break;
     case WorkerCommandType::Stop:
         m_ringBuffer.clear();
+        m_pendingOutOffset = 0;
+        m_pendingOutCount = 0;
         m_isEof.store(false, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
         m_syntheticPos = 0;
@@ -295,6 +314,17 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
 }
 
 void DecoderWorker::doDecodeChunk() {
+    // 1. Drain any pending resampled output frames from previous chunk first
+    if (m_pendingOutCount > 0) {
+        size_t written = m_ringBuffer.write(m_tempInterleavedOut.data() + m_pendingOutOffset, m_pendingOutCount);
+        m_pendingOutOffset += written;
+        m_pendingOutCount -= written;
+        if (m_pendingOutCount > 0) {
+            return; // Ring buffer full; resume draining on next loop iteration
+        }
+        m_pendingOutOffset = 0;
+    }
+
     if (m_isSynthetic.load(std::memory_order_relaxed)) {
         if (m_syntheticPos >= static_cast<int64_t>(m_trackInfo.totalFrames)) {
             m_isEof.store(true, std::memory_order_release);
@@ -310,7 +340,19 @@ void DecoderWorker::doDecodeChunk() {
             m_tempChunkR[i] = s;
         }
         m_syntheticPos += static_cast<int64_t>(framesToGen);
-        m_ringBuffer.writePlanar(m_tempChunkL.data(), m_tempChunkR.data(), framesToGen);
+
+        size_t written = 0;
+        while (written < framesToGen && m_running.load(std::memory_order_relaxed)) {
+            size_t w = m_ringBuffer.writePlanar(m_tempChunkL.data() + written, m_tempChunkR.data() + written, framesToGen - written);
+            written += w;
+            if (written < framesToGen) {
+                std::unique_lock<std::mutex> lock(m_cmdMutex);
+                if (!m_pendingCommands.empty()) break;
+                m_cmdCv.wait_for(lock, std::chrono::milliseconds(2), [this]() {
+                    return !m_running.load(std::memory_order_relaxed) || !m_pendingCommands.empty() || m_ringBuffer.availableWrite() > 0;
+                });
+            }
+        }
         return;
     }
 
@@ -326,7 +368,18 @@ void DecoderWorker::doDecodeChunk() {
     }
 
     if (m_resampler.isBypass()) {
-        m_ringBuffer.writePlanar(m_tempChunkL.data(), m_tempChunkR.data(), read);
+        size_t written = 0;
+        while (written < read && m_running.load(std::memory_order_relaxed)) {
+            size_t w = m_ringBuffer.writePlanar(m_tempChunkL.data() + written, m_tempChunkR.data() + written, read - written);
+            written += w;
+            if (written < read) {
+                std::unique_lock<std::mutex> lock(m_cmdMutex);
+                if (!m_pendingCommands.empty()) break;
+                m_cmdCv.wait_for(lock, std::chrono::milliseconds(2), [this]() {
+                    return !m_running.load(std::memory_order_relaxed) || !m_pendingCommands.empty() || m_ringBuffer.availableWrite() > 0;
+                });
+            }
+        }
     } else {
         // Interleave for SoXR
         for (size_t i = 0; i < read; ++i) {
@@ -335,11 +388,15 @@ void DecoderWorker::doDecodeChunk() {
         }
 
         size_t inDone = 0, outDone = 0;
-        size_t maxOut = CHUNK_SIZE * 4;
+        size_t maxOut = CHUNK_SIZE * 8;
         bool ok = m_resampler.process(m_tempInterleavedIn.data(), read, inDone,
                                       reinterpret_cast<double*>(m_tempInterleavedOut.data()), maxOut, outDone);
         if (ok && outDone > 0) {
-            m_ringBuffer.write(m_tempInterleavedOut.data(), outDone);
+            size_t written = m_ringBuffer.write(m_tempInterleavedOut.data(), outDone);
+            if (written < outDone) {
+                m_pendingOutOffset = written;
+                m_pendingOutCount = outDone - written;
+            }
         }
     }
 }

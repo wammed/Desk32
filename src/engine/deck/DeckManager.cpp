@@ -14,3 +14,4 @@ DeckManager::DeckManager(double graphRate)
 DeckManager::~DeckManager() = default;
 
 } // namespace desk32::engine::deck
+

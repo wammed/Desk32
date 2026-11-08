@@ -99,6 +99,11 @@ bool EngineController::initialize() {
     m_pipeline->swapMasterChain(std::move(masterChain));
     m_pipeline->swapListeningChain(std::move(listeningChain));
 
+    m_gainSmootherL.configure(48000.0, 15.0);
+    m_gainSmootherR.configure(48000.0, 15.0);
+    m_gainSmootherL.reset(m_masterGainL.load(std::memory_order_relaxed));
+    m_gainSmootherR.reset(m_masterGainR.load(std::memory_order_relaxed));
+
     // 5. Initialize Native PipeWire AudioOutput
     m_audioOutput = std::make_unique<engine::backend::PipeWireAudioOutput>();
     bool initOk = m_audioOutput->initialize(48000, 256);
@@ -137,15 +142,11 @@ bool EngineController::initialize() {
             size_t chunk = std::min(remaining, size_t(4096));
             m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(), chunk);
 
-            // Apply master gain (independent L/R)
-            const double curGainL = m_masterGainL.load(std::memory_order_relaxed);
-            const double curGainR = m_masterGainR.load(std::memory_order_relaxed);
-            if (curGainL != 1.0 || curGainR != 1.0) {
-                for (size_t i = 0; i < chunk; ++i) {
-                    m_audioInL[i] *= curGainL;
-                    m_audioInR[i] *= curGainR;
-                }
-            }
+            // Apply master gain with smooth interpolation (independent L/R, zipper noise-free)
+            m_gainSmootherL.setTarget(m_masterGainL.load(std::memory_order_relaxed));
+            m_gainSmootherR.setTarget(m_masterGainR.load(std::memory_order_relaxed));
+            m_gainSmootherL.process(m_audioInL.data(), chunk);
+            m_gainSmootherR.process(m_audioInR.data(), chunk);
 
             float* chunkOut = outInterleaved + (offset * 2);
             m_pipeline->process(m_audioInL.data(), m_audioInR.data(), chunk,
@@ -460,19 +461,31 @@ void EngineController::setMasterGain(double gain) {
     m_masterGainR.store(clamped, std::memory_order_relaxed);
     if (prev != clamped) {
         emit masterGainChanged(clamped);
+        emit masterGainLChanged(clamped);
+        emit masterGainRChanged(clamped);
     }
 }
 
 void EngineController::setMasterGainL(double gain) {
     double clamped = std::clamp(gain, 0.0, 2.0);
-    m_masterGainL.store(clamped, std::memory_order_relaxed);
-    emit masterGainChanged(clamped);
+    double prev = m_masterGainL.exchange(clamped, std::memory_order_relaxed);
+    if (prev != clamped) {
+        emit masterGainLChanged(clamped);
+        double avg = (clamped + m_masterGainR.load(std::memory_order_relaxed)) * 0.5;
+        m_masterGain.store(avg, std::memory_order_relaxed);
+        emit masterGainChanged(avg);
+    }
 }
 
 void EngineController::setMasterGainR(double gain) {
     double clamped = std::clamp(gain, 0.0, 2.0);
-    m_masterGainR.store(clamped, std::memory_order_relaxed);
-    emit masterGainChanged(clamped);
+    double prev = m_masterGainR.exchange(clamped, std::memory_order_relaxed);
+    if (prev != clamped) {
+        emit masterGainRChanged(clamped);
+        double avg = (m_masterGainL.load(std::memory_order_relaxed) + clamped) * 0.5;
+        m_masterGain.store(avg, std::memory_order_relaxed);
+        emit masterGainChanged(avg);
+    }
 }
 
 void EngineController::play(const QString& deckId) {
