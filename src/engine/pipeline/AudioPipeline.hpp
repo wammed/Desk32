@@ -37,6 +37,9 @@ public:
     explicit AudioPipeline(double graphSampleRate = 48000.0)
         : m_graphSampleRate(graphSampleRate)
     {
+        if (graphSampleRate != 48000.0) {
+            m_paramMailbox.setSampleRate(graphSampleRate);
+        }
         m_cachedTelemetry.graphSampleRate = graphSampleRate;
         for (auto& buf : m_telemetryBuffers) {
             buf.graphSampleRate = graphSampleRate;
@@ -63,6 +66,7 @@ public:
     /// Builds fresh chains with deep-cloned nodes configured at the new rate, atomically swaps via EpochReclaimer (P0-08, P0-13).
     void setGraphSampleRate(double sampleRate) {
         m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
+        m_paramMailbox.setSampleRate(sampleRate);
 
         // Safely deep-clone Master Chain under ReadGuard protection, then configure and swap
         std::unique_ptr<AudioChain> newMaster;
@@ -100,8 +104,9 @@ public:
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume.load(); }
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
-    /// Lock-free, wait-free Telemetry Snapshot retrieval (P0-26)
-    /// UI Thread strictly reads published snapshots; NEVER accesses active DSP instances directly.
+    /// Thread-safe Telemetry Snapshot retrieval for Control / UI Thread (P0-26, P0-29).
+    /// Audio Thread publishes via publishTelemetry() strictly lock-free and wait-free.
+    /// UI / Reader threads serialize reading via m_telemetryReadMutex to safely copy published telemetry.
     [[nodiscard]] DspTelemetry currentTelemetry() const noexcept {
         std::lock_guard<std::mutex> lock(m_telemetryReadMutex);
         uint32_t cur = m_sharedTelemetryState.load(std::memory_order_acquire);
@@ -287,20 +292,8 @@ private:
         // P0-26, P0-27: Continuous parameters (GEQ, PEQ, Filter) are updated exclusively
         // via DspParameterMailbox to prevent double-update racing and parameter rewind.
         case dsp::DspCommandType::ApplyPeqPreset:
-            // Listening chain preset selection (discrete preset trigger)
-            if (cmd.subIndex == 1 && listening) {
-                const char* presetNames[] = {
-                    "Monitor Flat", "Acoustic Clarity", "Harman Target", "Bass Punch", "Vocal Air"
-                };
-                for (size_t i = 0; i < listening->nodeCount(); ++i) {
-                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
-                        if (cmd.index < 5) {
-                            peqNode->dsp().applyPreset(presetNames[cmd.index]);
-                        }
-                        break;
-                    }
-                }
-            }
+            // P0-27: Discrete PEQ preset calculation is strictly executed on Control Thread via
+            // paramMailbox().setListeningPreset() to prevent heavy coefficient computation in Audio Thread.
             break;
         case dsp::DspCommandType::SetCompressorParams:
             // P0-14: Structural and mathematical configure is handled exclusively on Control Thread
@@ -363,68 +356,60 @@ private:
         }
     }
 
-    void drainParameterMailbox(AudioChain* master, [[maybe_unused]] AudioChain* listening) noexcept {
+    void drainParameterMailbox(AudioChain* master, AudioChain* listening) noexcept {
         dsp::ContinuousDspParameters params;
         if (!m_paramMailbox.fetchUpdates(params)) {
             return;
         }
 
         if (master) {
-            // 1. Graphic EQ band gains
+            // 1. Graphic EQ: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.geqModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
-                        for (size_t b = 0; b < 32; ++b) {
-                            if (params.geqModifiedMask & (1u << b)) {
-                                geqNode->dsp().setBandGain(b, static_cast<double>(params.geqGains[b]));
-                            }
-                        }
+                        geqNode->dsp().applyAllCoefficients(params.geqCoefficients);
                         break;
                     }
                 }
             }
 
-            // 2. Parametric EQ band configs
+            // 2. Parametric EQ: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.peqLeftModifiedMask != 0 || params.peqRightModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
-                        for (size_t b = 0; b < 24; ++b) {
-                            if (params.peqLeftModifiedMask & (1u << b)) {
-                                const auto& src = params.peqLeftBands[b];
-                                ParametricEQ::BandConfig cfg;
-                                cfg.frequency = static_cast<double>(src.frequency);
-                                cfg.gainDb = static_cast<double>(src.gainDb);
-                                cfg.Q = static_cast<double>(src.Q);
-                                cfg.type = static_cast<BiquadFilterType>(src.type);
-                                cfg.enabled = (src.enabled != 0);
-                                peqNode->dsp().setLeftBand(b, cfg);
-                            }
-                            if (params.peqRightModifiedMask & (1u << b)) {
-                                const auto& src = params.peqRightBands[b];
-                                ParametricEQ::BandConfig cfg;
-                                cfg.frequency = static_cast<double>(src.frequency);
-                                cfg.gainDb = static_cast<double>(src.gainDb);
-                                cfg.Q = static_cast<double>(src.Q);
-                                cfg.type = static_cast<BiquadFilterType>(src.type);
-                                cfg.enabled = (src.enabled != 0);
-                                peqNode->dsp().setRightBand(b, cfg);
-                            }
-                        }
+                        peqNode->dsp().applyCoefficients(
+                            params.peqLeftCoefficients,
+                            params.peqRightCoefficients,
+                            params.peqLeftEnabled,
+                            params.peqRightEnabled
+                        );
                         break;
                     }
                 }
             }
 
-            // 3. Filter parameters
+            // 3. Filter parameters: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.filterModified) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
-                        filterNode->dsp().setHpfFrequency(static_cast<double>(params.hpfFrequency));
-                        filterNode->dsp().setLpfFrequency(static_cast<double>(params.lpfFrequency));
-                        filterNode->dsp().setHpfSlope(static_cast<HighLowPassFilter::FilterSlope>(params.hpfSlope));
-                        filterNode->dsp().setLpfSlope(static_cast<HighLowPassFilter::FilterSlope>(params.lpfSlope));
-                        filterNode->dsp().setHpfEnabled(params.hpfEnabled != 0);
-                        filterNode->dsp().setLpfEnabled(params.lpfEnabled != 0);
+                        filterNode->dsp().applyCoefficients(params.filterCoefficients);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (listening) {
+            // 4. Listening Correction: O(1) bulk assignment of precalculated coefficients (P0-27)
+            if (params.listeningModified) {
+                for (size_t i = 0; i < listening->nodeCount(); ++i) {
+                    if (auto* listenNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
+                        listenNode->dsp().applyCoefficients(
+                            params.listeningLeftCoefficients,
+                            params.listeningRightCoefficients,
+                            params.listeningLeftEnabled,
+                            params.listeningRightEnabled
+                        );
                         break;
                     }
                 }
@@ -432,6 +417,8 @@ private:
         }
     }
 
+    /// Audio Thread: Lock-free, wait-free Telemetry publication (P0-29).
+    /// Zero locks, zero dynamic allocation, strictly O(1) single atomic exchange.
     void publishTelemetry(AudioChain* master, size_t frames) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);

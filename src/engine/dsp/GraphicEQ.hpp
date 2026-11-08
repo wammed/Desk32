@@ -91,6 +91,24 @@ public:
         }
     }
 
+    /// Fast, real-time safe assignment of precalculated coefficients (Audio Thread, P0-27)
+    inline void applyCoefficients(size_t index, const BiquadCoefficients& c) noexcept
+    {
+        if (index < NUM_BANDS) {
+            m_leftFilters[index].setCoefficients(c);
+            m_rightFilters[index].setCoefficients(c);
+        }
+    }
+
+    /// Fast, real-time safe assignment of all precalculated band coefficients (Audio Thread, P0-27)
+    inline void applyAllCoefficients(const std::array<BiquadCoefficients, NUM_BANDS>& coeffs) noexcept
+    {
+        for (size_t i = 0; i < NUM_BANDS; ++i) {
+            m_leftFilters[i].setCoefficients(coeffs[i]);
+            m_rightFilters[i].setCoefficients(coeffs[i]);
+        }
+    }
+
     /// Calculate combined magnitude response curve for visualization
     void calculateResponseCurve(const std::vector<double>& frequencies, std::vector<double>& outDb) const
     {

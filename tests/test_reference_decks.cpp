@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <cstring>
 #include <execinfo.h>
+#include <latch>
 #include "engine/deck/DeckManager.hpp"
 
 static std::atomic<bool> s_trackAllocations{false};
@@ -100,6 +101,7 @@ private slots:
     void testZeroDynamicAllocationInRenderBlock();
     void testSyntheticTrackOwnershipAndConcurrentSwitching();
     void testDecoderWorkerOpenTimeoutAndStaleRequestCancellation();
+    void testDecoderWorkerDeterministicCommitRaceConditions();
     void cleanupTestCase();
 
 private:
@@ -549,6 +551,232 @@ void TestReferenceDecks::testDecoderWorkerOpenTimeoutAndStaleRequestCancellation
     QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
     QCOMPARE(worker.trackInfo().path, std::string("synthetic://final"));
     QVERIFY(worker.isSynthetic());
+}
+
+void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
+{
+    // P0-26: Deterministic verification of Request ID Commit Synchronization Mechanism (Cases 1 - 6)
+
+    // Case 1: Open Real A, but before commit, Control Thread opens Real B.
+    // Result: A is rejected, B is committed.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker.openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        bool okB = worker.openTrack(m_wav2.toStdString(), 48000.0);
+        t.join();
+        unblockThread.join();
+
+        QVERIFY(okB);
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+        QVERIFY(!worker.isSynthetic());
+    }
+
+    // Case 2: Open Real A, but before commit, Control Thread opens Synthetic C.
+    // Result: A is rejected, Synthetic C is committed.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker.openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        bool okSynth = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case2");
+        t.join();
+        unblockThread.join();
+
+        QVERIFY(okSynth);
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, std::string("synthetic://case2"));
+        QVERIFY(worker.isSynthetic());
+    }
+
+    // Case 3: Open Synthetic A, but before commit, Control Thread opens Real B.
+    // Result: Synthetic A is rejected, Real B is committed.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case3_stale");
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        bool okB = worker.openTrack(m_wav1.toStdString(), 48000.0);
+        t.join();
+        unblockThread.join();
+
+        QVERIFY(okB);
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, m_wav1.toStdString());
+        QVERIFY(!worker.isSynthetic());
+    }
+
+    // Case 4: Open Real A, but before commit, Control Thread calls closeTrack().
+    // Result: A is rejected, Deck remains closed (isOpen == false).
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker.openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        worker.closeTrack();
+        t.join();
+        unblockThread.join();
+
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, std::string(""));
+        QCOMPARE(worker.committedRequestId(), 0u);
+    }
+
+    // Case 5: Open Synthetic A, but before commit, Control Thread calls closeTrack().
+    // Result: Synthetic A is rejected, Deck remains closed (isOpen == false).
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case5_stale");
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        worker.closeTrack();
+        t.join();
+        unblockThread.join();
+
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, std::string(""));
+        QCOMPARE(worker.committedRequestId(), 0u);
+    }
+
+    // Case 6: Open Real A, but before commit, DecoderWorker is destroyed (Shutdown).
+    // Result: Clean shutdown without crash or deadlock.
+    {
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        auto worker = std::make_unique<desk32::engine::decoder::DecoderWorker>();
+        worker->setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread t([&]() {
+            worker->openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        std::thread unblockThread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            releaseHook.store(true, std::memory_order_release);
+        });
+
+        worker.reset();
+        t.join();
+        unblockThread.join();
+    }
 }
 
 void TestReferenceDecks::cleanupTestCase()

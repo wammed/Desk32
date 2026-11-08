@@ -1014,17 +1014,9 @@ QStringList EngineController::availableListeningPresets() {
 }
 
 void EngineController::setListeningPreset(const QString& presetName) {
-    QStringList presets = availableListeningPresets();
-    qsizetype idx = presets.indexOf(presetName);
-    if (idx >= 0 && idx < 5 && m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::ApplyPeqPreset;
-        cmd.index = static_cast<uint8_t>(idx);
-        cmd.subIndex = 1; // 1 = Listening correction
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Listening preset push queue full", "DSPQueue", "ListeningCorrection");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
+    if (m_pipeline) {
+        // P0-27: Precompute preset coefficients on Control Thread and publish atomically via Mailbox
+        m_pipeline->paramMailbox().setListeningPreset(presetName.toStdString());
     }
     bool ok = m_uiListeningCorrection.applyPreset(presetName.toStdString());
     if (ok) {

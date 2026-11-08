@@ -1,5 +1,6 @@
 #include <QTest>
 #include <QObject>
+#include <latch>
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 
@@ -26,6 +27,7 @@ private slots:
     void testTelemetrySnapshotThreadSafety();
     void testEpochReclaimerShutdownConcurrentSafety();
     void testEpochReclaimerWriterShutdownSerialization();
+    void testEpochReclaimerDeterministicShutdownRaces();
     void cleanupTestCase();
 };
 
@@ -766,6 +768,135 @@ void TestAudioPipeline::testEpochReclaimerWriterShutdownSerialization()
     QVERIFY(successfulSwaps.load() > 0);
     QVERIFY(rejectedSwaps.load() > 0);
     QVERIFY(successfulReads.load() > 0);
+}
+
+void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
+{
+    // P0-20, P0-28: Deterministic verification of EpochReclaimer shutdown concurrency (Cases A - D)
+
+    // Case A: Writer swapChain during Shutdown
+    {
+        EpochReclaimer<std::string> reclaimer;
+        reclaimer.swapChain(std::make_unique<std::string>("Initial"));
+
+        std::latch syncPoint(2);
+        std::atomic<bool> swapOutcome{false};
+
+        std::thread writerThread([&]() {
+            syncPoint.arrive_and_wait();
+            swapOutcome.store(reclaimer.swapChain(std::make_unique<std::string>("FromWriter")));
+        });
+
+        std::thread shutdownThread([&]() {
+            syncPoint.arrive_and_wait();
+            reclaimer.drainAll();
+        });
+
+        writerThread.join();
+        shutdownThread.join();
+
+        QVERIFY(reclaimer.isClosing());
+        QCOMPARE(reclaimer.retiredCount(), 0u);
+    }
+
+    // Case B: Reader holds guard during swapChain and drainAll (drainAll blocks until Reader exits)
+    {
+        EpochReclaimer<std::string> reclaimer;
+        reclaimer.swapChain(std::make_unique<std::string>("ReaderActiveChain"));
+
+        std::latch readerHolding(1);
+        std::atomic<bool> readerFinished{false};
+        std::atomic<bool> drainDone{false};
+
+        std::thread readerThread([&]() {
+            auto guard = reclaimer.enterRead();
+            QVERIFY(guard.isValid() && guard.chain != nullptr);
+            QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
+            readerHolding.count_down();
+
+            // Hold guard until Control Thread initiates shutdown
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            // Verify data is still intact (never prematurely freed)
+            QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
+            readerFinished.store(true, std::memory_order_release);
+        });
+
+        readerHolding.wait();
+        // Retire the chain that reader is observing
+        reclaimer.swapChain(std::make_unique<std::string>("NewerChain"));
+
+        // Launch drainAll which MUST block waiting for readerThread to finish
+        std::thread drainThread([&]() {
+            reclaimer.drainAll();
+            drainDone.store(true, std::memory_order_release);
+        });
+
+        // While reader has not finished, drainAll must NOT have completed
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        QVERIFY(!drainDone.load(std::memory_order_acquire));
+
+        readerThread.join();
+        drainThread.join();
+
+        QVERIFY(readerFinished.load());
+        QVERIFY(drainDone.load());
+        QVERIFY(reclaimer.isClosing());
+        QCOMPARE(reclaimer.retiredCount(), 0u);
+    }
+
+    // Case C: Subsequent calls after drainAll completed
+    {
+        EpochReclaimer<std::string> reclaimer;
+        reclaimer.swapChain(std::make_unique<std::string>("Initial"));
+        reclaimer.drainAll();
+        QVERIFY(reclaimer.isClosing());
+
+        // Strictly reject new swaps
+        bool swapOk = reclaimer.swapChain(std::make_unique<std::string>("PostClose"));
+        QVERIFY(!swapOk);
+
+        // Strictly reject new reads
+        auto guard = reclaimer.enterRead();
+        QVERIFY(!guard.isValid());
+        QVERIFY(guard.chain == nullptr);
+    }
+
+    // Case D: Multiple writers (4 writers) at barrier calling swapChain concurrently with drainAll
+    {
+        EpochReclaimer<std::string> reclaimer;
+        reclaimer.swapChain(std::make_unique<std::string>("InitialD"));
+
+        const int numWriters = 4;
+        std::latch syncAll(numWriters + 1);
+
+        std::vector<std::thread> writers;
+        std::atomic<int> successCount{0};
+        std::atomic<int> rejectCount{0};
+
+        for (int i = 0; i < numWriters; ++i) {
+            writers.emplace_back([&, i]() {
+                syncAll.arrive_and_wait();
+                bool ok = reclaimer.swapChain(std::make_unique<std::string>("Chain_D_" + std::to_string(i)));
+                if (ok) {
+                    successCount.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    rejectCount.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+
+        std::thread drainThread([&]() {
+            syncAll.arrive_and_wait();
+            reclaimer.drainAll();
+        });
+
+        for (auto& w : writers) w.join();
+        drainThread.join();
+
+        QVERIFY(reclaimer.isClosing());
+        QCOMPARE(reclaimer.retiredCount(), 0u);
+        QCOMPARE(successCount.load() + rejectCount.load(), numWriters);
+    }
 }
 
 void TestAudioPipeline::cleanupTestCase()

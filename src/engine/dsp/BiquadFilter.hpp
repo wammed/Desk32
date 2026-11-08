@@ -12,19 +12,33 @@ enum class BiquadFilterType {
     Notch
 };
 
+struct BiquadCoefficients {
+    double b0 = 1.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+
+    static constexpr BiquadCoefficients identity() noexcept {
+        return { 1.0, 0.0, 0.0, 0.0, 0.0 };
+    }
+};
+
+namespace desk32::engine::dsp {
+    using BiquadCoefficients = ::BiquadCoefficients;
+    using PreparedBiquadCoefficients = ::BiquadCoefficients;
+}
+
 // 64-bit double precision Direct Form II Transposed Biquad Filter
 class BiquadFilter
 {
 public:
     BiquadFilter() = default;
 
-    void configure(BiquadFilterType type, double sampleRate, double frequency, double Q, double gainDb)
+    /// Calculate filter coefficients strictly outside Audio Thread (Control / Worker Thread, P0-27)
+    static BiquadCoefficients calculateCoefficients(BiquadFilterType type, double sampleRate, double frequency, double Q, double gainDb) noexcept
     {
-        m_sampleRate = sampleRate;
-        m_frequency = frequency;
-        m_Q = Q;
-        m_gainDb = gainDb;
-
+        if (sampleRate <= 0.0) return BiquadCoefficients::identity();
         const double w0 = 2.0 * std::numbers::pi * frequency / sampleRate;
         const double cos_w0 = std::cos(w0);
         const double sin_w0 = std::sin(w0);
@@ -89,11 +103,40 @@ public:
             break;
         }
 
-        m_b0 = b0 / a0;
-        m_b1 = b1 / a0;
-        m_b2 = b2 / a0;
-        m_a1 = a1 / a0;
-        m_a2 = a2 / a0;
+        BiquadCoefficients c;
+        if (std::abs(a0) > 1e-15) {
+            c.b0 = b0 / a0;
+            c.b1 = b1 / a0;
+            c.b2 = b2 / a0;
+            c.a1 = a1 / a0;
+            c.a2 = a2 / a0;
+        }
+        return c;
+    }
+
+    /// Fast, real-time safe assignment of precalculated coefficients (Audio Thread execution, P0-27)
+    /// Zero allocations, zero trigonometric functions, zero locks, bounded O(1) execution.
+    inline void setCoefficients(const BiquadCoefficients& c) noexcept
+    {
+        m_b0 = c.b0;
+        m_b1 = c.b1;
+        m_b2 = c.b2;
+        m_a1 = c.a1;
+        m_a2 = c.a2;
+    }
+
+    [[nodiscard]] BiquadCoefficients coefficients() const noexcept
+    {
+        return { m_b0, m_b1, m_b2, m_a1, m_a2 };
+    }
+
+    void configure(BiquadFilterType type, double sampleRate, double frequency, double Q, double gainDb)
+    {
+        m_sampleRate = sampleRate;
+        m_frequency = frequency;
+        m_Q = Q;
+        m_gainDb = gainDb;
+        setCoefficients(calculateCoefficients(type, sampleRate, frequency, Q, gainDb));
     }
 
     void reset()

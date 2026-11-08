@@ -40,17 +40,16 @@ struct DspCommand {
     float param6 = 0.0f;     // MakeupGainDb (P0-06)
 };
 
-/// Lock-free Single-Producer Single-Consumer Parameter Command Queue (P0-24).
-/// Producer (Control / UI Thread) pushes validated parameter change commands (ordered discrete events).
-/// Consumer (Audio Thread) drains commands at audio block boundaries.
-/// Strictly RT-Safe: zero dynamic allocation, zero locks, non-blocking.
-/// SPSC Ownership Guarantees (Section 7, P0-24):
-/// - SPSC single-ownership strictly maintained: Producer never searches or mutates elements
-///   already enqueued for Consumer consumption (in-place coalescing is completely removed).
-/// - Discrete, ordered events (DSP Enable/Disable, Preset application, Bypass, Mode switches)
-///   preserve strict FIFO sequential ordering.
-/// - Continuous parameters (sliders) are dispatched via DspParameterMailbox (P0-25).
-/// - Overflow tracking records any queue full drops and signals callers for UI notification.
+/// Multi-Producer Single-Consumer (MPSC) Parameter Command Queue (P0-24, P0-25).
+/// - Producers (Control / UI Threads): Thread-safe for multiple concurrent producers via m_producerMutex serialization.
+/// - Consumer (Audio Thread): Strictly single-consumer, completely independent, lock-free, and wait-free.
+/// - Zero dynamic allocations, bounded capacity (512 commands), non-blocking for Consumer.
+/// MPSC Ownership Guarantees (Section 7, P0-24, P0-25):
+/// - Producers serialize writes via m_producerMutex and append at the write tail.
+/// - Consumer drains from read tail without ever taking any locks or blocking.
+/// - In-place coalescing is completely eliminated; FIFO sequential ordering is preserved for discrete events.
+/// - Continuous parameters (sliders) are dispatched via lock-free DspParameterMailbox (P0-25, P0-27).
+/// - Overflow tracking records any queue-full drops and signals callers for UI notification.
 class ParameterCommandQueue {
 public:
     static constexpr size_t CAPACITY = 512;

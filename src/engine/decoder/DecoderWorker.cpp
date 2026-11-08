@@ -52,9 +52,12 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
         return ok;
     }
 
-    // P0-30: Timed out: Invalidate active request ID so late background open is discarded
-    uint64_t expected = reqId;
-    m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    // P0-26: Timed out: Invalidate active request ID under m_trackMutex to serialize with worker commit
+    {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        uint64_t expected = reqId;
+        m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
     m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
@@ -90,16 +93,23 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
         return ok;
     }
 
-    // P0-30: Timed out: Invalidate active request ID
-    uint64_t expected = reqId;
-    m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    // P0-26: Timed out: Invalidate active request ID under m_trackMutex
+    {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        uint64_t expected = reqId;
+        m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
     m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
 
 void DecoderWorker::closeTrack() {
-    // P0-30: Cancel any in-flight open requests immediately
-    m_activeRequestId.store(0, std::memory_order_release);
+    // P0-26: Cancel any in-flight open requests under m_trackMutex
+    {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        m_activeRequestId.store(0, std::memory_order_release);
+        m_committedRequestId.store(0, std::memory_order_release);
+    }
     m_lastOpenStatus.store(OpenStatus::Cancelled, std::memory_order_release);
 
     auto promise = std::make_shared<std::promise<bool>>();
@@ -288,34 +298,41 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         bool openSuccess = false;
         auto dec = std::make_unique<FFmpegAudioDecoder>();
         if (dec->open(cmd.path)) {
-            // P0-30: Re-verify request ID after slow I/O before committing state
-            if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+            // Trigger pre-commit hook if installed (testing synchronization)
+            if (m_preCommitHook) {
+                m_preCommitHook(cmd.requestId);
+            }
+
+            // P0-26: Re-verify request ID and commit state atomically under m_trackMutex
+            bool committed = false;
+            {
+                std::lock_guard<std::mutex> lock(m_trackMutex);
+                if (cmd.requestId != 0 && cmd.requestId == m_activeRequestId.load(std::memory_order_acquire)) {
+                    const auto& info = dec->formatInfo();
+                    m_trackInfo.path = cmd.path;
+                    m_trackInfo.sampleRate = info.sampleRate;
+                    m_trackInfo.channels = info.channels;
+                    m_trackInfo.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, info.totalFrames));
+                    m_metadata = std::make_shared<metadata::TrackMetadata>(dec->metadata());
+                    m_decoder = std::move(dec);
+                    m_resampler.configure(info.sampleRate, cmd.graphRate, info.channels);
+                    m_isSynthetic.store(false, std::memory_order_release);
+                    m_graphRate.store(cmd.graphRate, std::memory_order_release);
+                    m_playhead.store(0, std::memory_order_release);
+                    m_isOpen.store(true, std::memory_order_release);
+                    m_isPlaying.store(false, std::memory_order_release);
+                    m_committedRequestId.store(cmd.requestId, std::memory_order_release);
+                    committed = true;
+                }
+            }
+
+            if (!committed) {
                 dec.reset();
                 if (cmd.openPromise) {
                     try { cmd.openPromise->set_value(false); } catch (...) {}
                 }
                 break;
             }
-
-            const auto& info = dec->formatInfo();
-            WorkerTrackInfo tInfo;
-            tInfo.path = cmd.path;
-            tInfo.sampleRate = info.sampleRate;
-            tInfo.channels = info.channels;
-            tInfo.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, info.totalFrames));
-
-            m_resampler.configure(info.sampleRate, cmd.graphRate, info.channels);
-            {
-                std::lock_guard<std::mutex> lock(m_trackMutex);
-                m_trackInfo = tInfo;
-                m_metadata = std::make_shared<metadata::TrackMetadata>(dec->metadata());
-            }
-            m_decoder = std::move(dec);
-            m_isSynthetic.store(false, std::memory_order_release);
-            m_graphRate.store(cmd.graphRate, std::memory_order_release);
-            m_playhead.store(0, std::memory_order_release);
-            m_isOpen.store(true, std::memory_order_release);
-            m_isPlaying.store(false, std::memory_order_release);
 
             for (int i = 0; i < 4; ++i) {
                 doDecodeChunk();
@@ -365,27 +382,36 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         meta.totalFrames = cmd.totalFrames;
         meta.durationSeconds = (cmd.sampleRate > 0) ? (static_cast<double>(cmd.totalFrames) / cmd.sampleRate) : 0.0;
 
-        m_resampler.configure(cmd.sampleRate, cmd.graphRate, 2);
+        // Trigger pre-commit hook if installed
+        if (m_preCommitHook) {
+            m_preCommitHook(cmd.requestId);
+        }
 
-        // P0-26: Re-verify request ID before committing synthetic track state to prevent stale overwrite
-        if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+        // P0-26: Re-verify request ID and commit state atomically under m_trackMutex
+        bool committed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_trackMutex);
+            if (cmd.requestId != 0 && cmd.requestId == m_activeRequestId.load(std::memory_order_acquire)) {
+                m_decoder.reset(); // Destroy active decoder exclusively on Worker Thread (P0-15)
+                m_resampler.configure(cmd.sampleRate, cmd.graphRate, 2);
+                m_trackInfo = tInfo;
+                m_metadata = std::make_shared<metadata::TrackMetadata>(std::move(meta));
+                m_isSynthetic.store(true, std::memory_order_release);
+                m_graphRate.store(cmd.graphRate, std::memory_order_release);
+                m_playhead.store(0, std::memory_order_release);
+                m_isOpen.store(true, std::memory_order_release);
+                m_isPlaying.store(false, std::memory_order_release);
+                m_committedRequestId.store(cmd.requestId, std::memory_order_release);
+                committed = true;
+            }
+        }
+
+        if (!committed) {
             if (cmd.openPromise) {
                 try { cmd.openPromise->set_value(false); } catch (...) {}
             }
             break;
         }
-
-        {
-            std::lock_guard<std::mutex> lock(m_trackMutex);
-            m_trackInfo = tInfo;
-            m_metadata = std::make_shared<metadata::TrackMetadata>(std::move(meta));
-        }
-
-        m_isSynthetic.store(true, std::memory_order_release);
-        m_graphRate.store(cmd.graphRate, std::memory_order_release);
-        m_playhead.store(0, std::memory_order_release);
-        m_isOpen.store(true, std::memory_order_release);
-        m_isPlaying.store(false, std::memory_order_release);
 
         for (int i = 0; i < 4; ++i) {
             doDecodeChunk();
@@ -398,25 +424,30 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         break;
     }
     case WorkerCommandType::CloseTrack: {
-        m_isOpen.store(false, std::memory_order_release);
-        m_isPlaying.store(false, std::memory_order_release);
-        m_isEof.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(m_trackMutex);
+            m_isOpen.store(false, std::memory_order_release);
+            m_isPlaying.store(false, std::memory_order_release);
+            m_isEof.store(true, std::memory_order_release);
+            m_committedRequestId.store(0, std::memory_order_release);
+            m_trackInfo = WorkerTrackInfo{};
+            m_metadata.reset();
+            m_decoder.reset();
+            m_resampler.reset();
+        }
         m_ringBuffer.resetProducer();
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
-        m_decoder.reset();
-        m_resampler.reset();
-        {
-            std::lock_guard<std::mutex> lock(m_trackMutex);
-            m_trackInfo = WorkerTrackInfo{};
-            m_metadata.reset();
-        }
         if (cmd.openPromise) {
             cmd.openPromise->set_value(true);
         }
         break;
     }
     case WorkerCommandType::Seek: {
+        if (!m_isOpen.load(std::memory_order_acquire)) {
+            m_seekCompleted.store(cmd.sequence, std::memory_order_release);
+            break;
+        }
         m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;

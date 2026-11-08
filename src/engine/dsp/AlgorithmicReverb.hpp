@@ -204,6 +204,42 @@ public:
     [[nodiscard]] bool isTailPreserving() const noexcept { return m_tailPreserving; }
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
 
+    /// Inherit active reverberation tail state from another instance (P0-22).
+    /// Bounded O(1) execution time, zero heap allocations, zero locks.
+    void inheritStateFrom(const AlgorithmicReverb& other) noexcept
+    {
+        m_predelayBuffer = other.m_predelayBuffer;
+        m_predelayWritePos = other.m_predelayWritePos;
+        for (size_t i = 0; i < 4; ++i) {
+            const size_t cLenL = std::min(m_combsLeft[i].size, other.m_combsLeft[i].size);
+            for (size_t s = 0; s < cLenL; ++s) {
+                m_combsLeft[i].buffer[s] = other.m_combsLeft[i].buffer[s];
+            }
+            m_combsLeft[i].index = other.m_combsLeft[i].index % m_combsLeft[i].size;
+            m_combsLeft[i].filterStore = other.m_combsLeft[i].filterStore;
+
+            const size_t cLenR = std::min(m_combsRight[i].size, other.m_combsRight[i].size);
+            for (size_t s = 0; s < cLenR; ++s) {
+                m_combsRight[i].buffer[s] = other.m_combsRight[i].buffer[s];
+            }
+            m_combsRight[i].index = other.m_combsRight[i].index % m_combsRight[i].size;
+            m_combsRight[i].filterStore = other.m_combsRight[i].filterStore;
+        }
+        for (size_t i = 0; i < 2; ++i) {
+            const size_t aLenL = std::min(m_allPassLeft[i].size, other.m_allPassLeft[i].size);
+            for (size_t s = 0; s < aLenL; ++s) {
+                m_allPassLeft[i].buffer[s] = other.m_allPassLeft[i].buffer[s];
+            }
+            m_allPassLeft[i].index = other.m_allPassLeft[i].index % m_allPassLeft[i].size;
+
+            const size_t aLenR = std::min(m_allPassRight[i].size, other.m_allPassRight[i].size);
+            for (size_t s = 0; s < aLenR; ++s) {
+                m_allPassRight[i].buffer[s] = other.m_allPassRight[i].buffer[s];
+            }
+            m_allPassRight[i].index = other.m_allPassRight[i].index % m_allPassRight[i].size;
+        }
+    }
+
     void setRoomSize(double size) { configure(m_sampleRate, size, m_damp, m_wet, m_predelayMs, m_tailPreserving, m_enabled.load(std::memory_order_relaxed)); }
     void setDamping(double d) { configure(m_sampleRate, m_roomSize, d, m_wet, m_predelayMs, m_tailPreserving, m_enabled.load(std::memory_order_relaxed)); }
     void setWetLevel(double w) { configure(m_sampleRate, m_roomSize, m_damp, w, m_predelayMs, m_tailPreserving, m_enabled.load(std::memory_order_relaxed)); }

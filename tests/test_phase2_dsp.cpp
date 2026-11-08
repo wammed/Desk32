@@ -93,6 +93,7 @@ private slots:
     void testParameterCommandQueueCoalescingAndOverflowStats();
     void testDspParameterMailboxMultiProducerAndContinuousUpdates();
     void testDspParameterMailbox3SlotExchangeSnapshotConsistency();
+    void testDspParameterMailboxTornReadDetectionVsTripleBufferSafety();
     void testDspParameterMailboxBatchApis();
     void testSingleThreadDspUnitOperation();
     void testPreparedDspInstanceExchangeSafety();
@@ -781,6 +782,103 @@ void TestPhase2Dsp::testDspParameterMailbox3SlotExchangeSnapshotConsistency()
     QVERIFY(snapshotCheckCount.load() > 10);
 }
 
+void TestPhase2Dsp::testDspParameterMailboxTornReadDetectionVsTripleBufferSafety()
+{
+    // P0-24: Proof of Tear Detection Logic vs Triple Buffer Consistency
+#if !defined(__SANITIZE_THREAD__) && !(defined(__has_feature) && __has_feature(thread_sanitizer))
+    // Part 1: Intentionally unsynchronized shared structure to prove the detection logic works
+    {
+        struct alignas(64) UnsynchronizedBuffer {
+            std::array<float, 32> gains{};
+        } rawShared;
+
+        std::atomic<bool> runRaw{true};
+        std::atomic<uint64_t> rawTearsDetected{0};
+        std::atomic<uint64_t> rawReads{0};
+
+        std::thread rawWriter([&]() {
+            float gen = 1.0f;
+            while (runRaw.load(std::memory_order_relaxed)) {
+                for (size_t b = 0; b < 32; ++b) {
+                    rawShared.gains[b] = gen + static_cast<float>(b) * 0.001f;
+                }
+                gen += 1.0f;
+            }
+        });
+
+        std::thread rawReader([&]() {
+            while (runRaw.load(std::memory_order_relaxed)) {
+                std::array<float, 32> snap = rawShared.gains;
+                float baseGen = std::round(snap[0]);
+                for (size_t b = 0; b < 32; ++b) {
+                    float expected = baseGen + static_cast<float>(b) * 0.001f;
+                    if (std::abs(snap[b] - expected) > 1e-4f) {
+                        rawTearsDetected.fetch_add(1, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+                rawReads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        runRaw.store(false, std::memory_order_relaxed);
+        rawWriter.join();
+        rawReader.join();
+
+        // Proves the tear detection logic detects asynchronous tearing
+        QVERIFY(rawReads.load() > 100);
+        QVERIFY(rawTearsDetected.load() > 0);
+    }
+#endif
+
+    // Part 2: Identical verification on DspParameterMailbox yields strictly 0 tears
+    {
+        DspParameterMailbox mailbox;
+        std::atomic<bool> runMailbox{true};
+        std::atomic<uint64_t> mailboxTearsDetected{0};
+        std::atomic<uint64_t> mailboxReads{0};
+
+        std::thread mailboxWriter([&]() {
+            float gen = 1.0f;
+            while (runMailbox.load(std::memory_order_relaxed)) {
+                std::array<float, 32> gains{};
+                for (size_t b = 0; b < 32; ++b) {
+                    gains[b] = gen + static_cast<float>(b) * 0.001f;
+                }
+                mailbox.setAllGeqBandGains(gains);
+                gen += 1.0f;
+            }
+        });
+
+        std::thread mailboxReader([&]() {
+            ContinuousDspParameters snap;
+            while (runMailbox.load(std::memory_order_relaxed)) {
+                if (mailbox.fetchUpdates(snap)) {
+                    float baseGen = std::round(snap.geqGains[0]);
+                    for (size_t b = 0; b < 32; ++b) {
+                        float expected = baseGen + static_cast<float>(b) * 0.001f;
+                        if (std::abs(snap.geqGains[b] - expected) > 1e-4f) {
+                            mailboxTearsDetected.fetch_add(1, std::memory_order_relaxed);
+                            break;
+                        }
+                    }
+                    mailboxReads.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        runMailbox.store(false, std::memory_order_relaxed);
+        mailboxWriter.join();
+        mailboxReader.join();
+
+        // 100% tear-free guarantee
+        QVERIFY(mailboxReads.load() > 10);
+        QCOMPARE(mailboxTearsDetected.load(), 0u);
+    }
+}
+
 void TestPhase2Dsp::testDspParameterMailboxBatchApis()
 {
     // P0-25, P0-27: Batch Mailbox APIs (resetAllGeqBands, applyPeqPreset, setPeqBandEnabled)
@@ -911,56 +1009,178 @@ void TestPhase2Dsp::testSingleThreadDspUnitOperation()
 
 void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
 {
-    // Test B (P0-21, P0-23): Prepared DSP Instance Exchange via EpochReclaimer
-    // Verifies architectural pattern: Control Thread prepares a new DSP instance, and exchanges it
-    // into the audio path using EpochReclaimer while Audio Thread processes without locks.
-    auto reclaimer = std::make_unique<EpochReclaimer<Compressor>>();
-    auto initialComp = std::make_unique<Compressor>();
-    initialComp->configure(48000.0, -10.0, 2.0, 10.0, 100.0, 0.0, 2.0, true);
-    QVERIFY(reclaimer->swapChain(std::move(initialComp)));
+    // P0-21, P0-22, P0-23: Comprehensive Verification of Prepared DSP Instance Exchange (Cases 1 - 9)
 
-    std::atomic<bool> stopWorkers{false};
-    std::atomic<uint64_t> audioBlocksProcessed{0};
-    std::atomic<uint64_t> instancesExchanged{0};
+    // Case 1: Initial publish
+    {
+        CompressorNode compNode;
+        PeakLimiterNode limNode;
+        ReverbNode revNode;
+        QVERIFY(compNode.dsp().isEnabled());
+        QVERIFY(limNode.dsp().isEnabled());
+        QVERIFY(revNode.dsp().isEnabled());
+    }
 
-    // Audio Thread: Wait-Free lock-free access via enterRead
-    std::thread audioThread([&]() {
-        double left = 0.5, right = 0.5;
-        while (!stopWorkers.load(std::memory_order_relaxed)) {
-            auto guard = reclaimer->enterRead();
-            if (guard.isValid() && guard.chain != nullptr) {
-                guard.chain->process(left, right);
-                audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
-            }
-            std::this_thread::yield();
+    // Case 2: Active exchange at block boundary
+    {
+        CompressorNode compNode;
+        compNode.prepareInstance(48000.0, -18.0, 4.0, 10.0, 100.0, 3.5, 4.0, true);
+        std::vector<double> left(128, 0.5), right(128, 0.5);
+        compNode.process(left.data(), right.data(), 128);
+        QCOMPARE(compNode.dsp().thresholdDb(), -18.0);
+        QCOMPARE(compNode.dsp().makeupGainDb(), 3.5);
+    }
+
+    // Case 3: Old instance retirement & reclaim
+    {
+        CompressorNode compNode;
+        compNode.prepareInstance(48000.0, -15.0, 3.0, 10.0, 100.0, 2.0, 4.0, true);
+        std::vector<double> left(128, 0.5), right(128, 0.5);
+        compNode.process(left.data(), right.data(), 128);
+        // Retired old instance is held until reclaimRetired is invoked on Control Thread
+        compNode.reclaimRetired();
+    }
+
+    // Case 4: Sequential rapid exchanges
+    {
+        PeakLimiterNode limNode;
+        for (int i = 0; i < 20; ++i) {
+            double ceilDb = -0.5 - static_cast<double>(i) * 0.1;
+            limNode.prepareInstance(48000.0, ceilDb, 100.0, 5.0, true);
+            std::vector<double> left(64, 0.5), right(64, 0.5);
+            limNode.process(left.data(), right.data(), 64);
+            limNode.reclaimRetired();
+            QCOMPARE(limNode.dsp().ceilingDb(), ceilDb);
         }
-    });
+    }
 
-    // Control Thread: Rapidly prepares new instances and exchanges them safely
-    std::thread controlThread([&]() {
-        for (int i = 0; i < 50; ++i) {
-            auto prepared = std::make_unique<Compressor>();
-            double thresh = -12.0 - static_cast<double>(i % 10);
-            double makeup = static_cast<double>(i % 5);
-            prepared->configure(48000.0, thresh, 4.0, 10.0, 100.0, makeup, 4.0, true);
+    // Case 5: Overwrite before consumption (unused prepared replacement)
+    {
+        CompressorNode compNode;
+        // Prepare config A
+        compNode.prepareInstance(48000.0, -10.0, 2.0, 10.0, 100.0, 1.0, 4.0, true);
+        // Overwrite with config B without calling process() in between
+        compNode.prepareInstance(48000.0, -22.0, 5.0, 10.0, 100.0, 6.0, 4.0, true);
 
-            if (reclaimer->swapChain(std::move(prepared))) {
-                instancesExchanged.fetch_add(1, std::memory_order_relaxed);
+        std::vector<double> left(128, 0.5), right(128, 0.5);
+        compNode.process(left.data(), right.data(), 128);
+        QCOMPARE(compNode.dsp().thresholdDb(), -22.0);
+        QCOMPARE(compNode.dsp().makeupGainDb(), 6.0);
+        compNode.reclaimRetired();
+    }
+
+    // Case 6: Concurrent Audio Thread processing during rapid exchanges
+    {
+        auto compNode = std::make_unique<CompressorNode>();
+        auto limNode = std::make_unique<PeakLimiterNode>();
+        auto revNode = std::make_unique<ReverbNode>();
+
+        std::atomic<bool> stopAudio{false};
+        std::atomic<uint64_t> blocksProcessed{0};
+
+        std::thread audioThread([&]() {
+            std::vector<double> left(128, 0.4), right(128, 0.4);
+            while (!stopAudio.load(std::memory_order_relaxed)) {
+                compNode->process(left.data(), right.data(), 128);
+                limNode->process(left.data(), right.data(), 128);
+                revNode->process(left.data(), right.data(), 128);
+                blocksProcessed.fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::yield();
             }
-            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        });
+
+        for (int i = 0; i < 30; ++i) {
+            compNode->prepareInstance(48000.0, -10.0 - (i % 8), 3.0, 10.0, 100.0, static_cast<double>(i % 4), 4.0, true);
+            limNode->prepareInstance(48000.0, -0.5 - (i % 5) * 0.2, 50.0 + (i % 10) * 5.0, 5.0, true);
+            revNode->prepareInstance(48000.0, 0.5 + (i % 4) * 0.1, 0.3, 0.3, 10.0, true, true);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
         }
-    });
 
-    controlThread.join();
-    stopWorkers.store(true, std::memory_order_relaxed);
-    audioThread.join();
+        stopAudio.store(true, std::memory_order_relaxed);
+        audioThread.join();
 
-    QVERIFY(audioBlocksProcessed.load() > 50);
-    QVERIFY(instancesExchanged.load() > 10);
+        QVERIFY(blocksProcessed.load() > 20);
+        compNode->reclaimRetired();
+        limNode->reclaimRetired();
+        revNode->reclaimRetired();
+    }
 
-    // Drain and verify zero leak
-    reclaimer->drainAll();
-    QCOMPARE(reclaimer->retiredCount(), 0u);
+    // Case 7 & 8: Shutdown during active exchange and unused instance discard
+    {
+        auto node = std::make_unique<CompressorNode>();
+        node->prepareInstance(48000.0, -14.0, 2.0, 10.0, 100.0, 2.0, 4.0, true);
+        // Destroy without process() (Case 8: unused discard)
+        node.reset();
+
+        auto node2 = std::make_unique<PeakLimiterNode>();
+        node2->prepareInstance(48000.0, -1.0, 100.0, 5.0, true);
+        std::vector<double> left(128, 0.5), right(128, 0.5);
+        node2->process(left.data(), right.data(), 128);
+        node2->prepareInstance(48000.0, -2.0, 100.0, 5.0, true);
+        // Destroy with retired and prepared instances pending (Case 7)
+        node2.reset();
+    }
+
+    // Case 9: State inheritance correctness
+    // 9.1: Compressor envelope inheritance
+    {
+        CompressorNode comp;
+        comp.prepareInstance(48000.0, -20.0, 4.0, 5.0, 500.0, 0.0, 4.0, true);
+        std::vector<double> loudLeft(512, 0.9), loudRight(512, 0.9);
+        comp.process(loudLeft.data(), loudRight.data(), 512);
+        double grBefore = comp.gainReductionDb();
+        QVERIFY(grBefore > 2.0); // Significant gain reduction
+
+        // Prepare new instance with different ratio, state must inherit
+        comp.prepareInstance(48000.0, -20.0, 6.0, 5.0, 500.0, 0.0, 4.0, true);
+        std::vector<double> nextLeft(128, 0.9), nextRight(128, 0.9);
+        comp.process(nextLeft.data(), nextRight.data(), 128);
+        double grAfter = comp.gainReductionDb();
+        // Envelope was inherited: gain reduction should not reset to 0
+        QVERIFY(grAfter > 2.0);
+    }
+
+    // 9.2: PeakLimiter lookahead buffer inheritance
+    {
+        PeakLimiterNode lim;
+        lim.prepareInstance(48000.0, -0.5, 100.0, 5.0, true);
+        std::vector<double> inL(256, 0.8), inR(256, 0.8);
+        lim.process(inL.data(), inR.data(), 256);
+
+        // Prepare new instance, lookahead state must inherit smoothly without discontinuity
+        lim.prepareInstance(48000.0, -1.0, 100.0, 5.0, true);
+        std::vector<double> inL2(128, 0.8), inR2(128, 0.8);
+        lim.process(inL2.data(), inR2.data(), 128);
+        for (double s : inL2) {
+            QVERIFY(!std::isnan(s));
+            QVERIFY(std::abs(s) <= 1.0);
+        }
+    }
+
+    // 9.3: Reverb tail decay preservation
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.8, 0.2, 0.5, 0.0, true, true);
+        // Excite with continuous audio to fill comb and all-pass delay buffers
+        std::vector<double> exciteL(2048), exciteR(2048);
+        for (size_t i = 0; i < 2048; ++i) {
+            exciteL[i] = std::sin(static_cast<double>(i) * 0.1);
+            exciteR[i] = exciteL[i];
+        }
+        rev.process(exciteL.data(), exciteR.data(), 2048);
+
+        // Prepare new reverb instance with different room size
+        rev.prepareInstance(48000.0, 0.9, 0.3, 0.5, 0.0, true, true);
+        std::vector<double> tailL(512, 0.0), tailR(512, 0.0);
+        rev.process(tailL.data(), tailR.data(), 512);
+
+        double tailEnergy = 0.0;
+        for (size_t i = 0; i < 512; ++i) {
+            tailEnergy += tailL[i] * tailL[i] + tailR[i] * tailR[i];
+        }
+        // Tail decay was inherited and preserved across exchange
+        QVERIFY(tailEnergy > 1e-4);
+    }
 }
 
 void TestPhase2Dsp::testContinuousParameterMailboxUpdates()

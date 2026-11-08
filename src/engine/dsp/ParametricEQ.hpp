@@ -139,52 +139,80 @@ public:
         }
     }
 
-    /// Apply built-in Listening Correction profile (Section 5.10)
-    bool applyPreset(const std::string& presetName)
+    /// Fast, real-time safe assignment of precalculated coefficients (Audio Thread, P0-27)
+    inline void applyCoefficients(const std::array<BiquadCoefficients, BANDS_PER_CHANNEL>& leftCoeffs,
+                                  const std::array<BiquadCoefficients, BANDS_PER_CHANNEL>& rightCoeffs,
+                                  const std::array<bool, BANDS_PER_CHANNEL>& leftEnabled,
+                                  const std::array<bool, BANDS_PER_CHANNEL>& rightEnabled) noexcept
     {
+        for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
+            m_leftFilters[i].setCoefficients(leftCoeffs[i]);
+            m_rightFilters[i].setCoefficients(rightCoeffs[i]);
+            m_leftBands[i].enabled = leftEnabled[i];
+            m_rightBands[i].enabled = rightEnabled[i];
+        }
+    }
+
+    /// Extract preset band configurations without modifying DSP state (Control Thread, P0-27)
+    static bool getPresetBandConfigs(const std::string& presetName,
+                                     std::array<BandConfig, BANDS_PER_CHANNEL>& leftBands,
+                                     std::array<BandConfig, BANDS_PER_CHANNEL>& rightBands)
+    {
+        const double defaultFreqs[BANDS_PER_CHANNEL] = {
+            30.0, 60.0, 120.0, 250.0, 500.0, 1000.0,
+            2000.0, 4000.0, 6000.0, 8000.0, 12000.0, 16000.0
+        };
+
+        for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
+            leftBands[i].frequency = defaultFreqs[i];
+            leftBands[i].gainDb = 0.0;
+            leftBands[i].Q = 1.0;
+            leftBands[i].type = (i == 0) ? BiquadFilterType::LowShelf : ((i == BANDS_PER_CHANNEL - 1) ? BiquadFilterType::HighShelf : BiquadFilterType::Peak);
+            leftBands[i].enabled = true;
+
+            rightBands[i] = leftBands[i];
+        }
+
         if (presetName == "Monitor Flat") {
-            for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
-                m_leftBands[i].gainDb = 0.0;
-                m_leftBands[i].enabled = true;
-                m_rightBands[i].gainDb = 0.0;
-                m_rightBands[i].enabled = true;
-            }
+            // Flat defaults
         } else if (presetName == "Acoustic Clarity") {
-            // Low-mid boxiness scoop, gentle presence boost, airy top end
-            applyPreset("Monitor Flat");
-            m_leftBands[3].gainDb = -2.0; // 250 Hz
-            m_leftBands[7].gainDb = 1.5;  // 4 kHz
-            m_leftBands[10].gainDb = 2.5; // 12 kHz
-            m_rightBands[3].gainDb = -2.0;
-            m_rightBands[7].gainDb = 1.5;
-            m_rightBands[10].gainDb = 2.5;
+            leftBands[3].gainDb = -2.0; // 250 Hz
+            leftBands[7].gainDb = 1.5;  // 4 kHz
+            leftBands[10].gainDb = 2.5; // 12 kHz
+            rightBands[3].gainDb = -2.0;
+            rightBands[7].gainDb = 1.5;
+            rightBands[10].gainDb = 2.5;
         } else if (presetName == "Harman Target") {
-            // Sub-bass warmth (+4.0 dB shelf) + pinna ear gain (+2.5 dB peak at 4 kHz)
-            applyPreset("Monitor Flat");
-            m_leftBands[1].gainDb = 4.0;  // 60 Hz shelf/peak
-            m_leftBands[7].gainDb = 2.5;  // 4 kHz
-            m_rightBands[1].gainDb = 4.0;
-            m_rightBands[7].gainDb = 2.5;
+            leftBands[1].gainDb = 4.0;  // 60 Hz shelf/peak
+            leftBands[7].gainDb = 2.5;  // 4 kHz
+            rightBands[1].gainDb = 4.0;
+            rightBands[7].gainDb = 2.5;
         } else if (presetName == "Bass Punch") {
-            applyPreset("Monitor Flat");
-            m_leftBands[1].gainDb = 3.5;  // 60 Hz
-            m_leftBands[2].gainDb = 2.0;  // 120 Hz
-            m_leftBands[3].gainDb = -1.5; // 250 Hz (clean mud)
-            m_rightBands[1].gainDb = 3.5;
-            m_rightBands[2].gainDb = 2.0;
-            m_rightBands[3].gainDb = -1.5;
+            leftBands[1].gainDb = 3.5;  // 60 Hz
+            leftBands[2].gainDb = 2.0;  // 120 Hz
+            leftBands[3].gainDb = -1.5; // 250 Hz (clean mud)
+            rightBands[1].gainDb = 3.5;
+            rightBands[2].gainDb = 2.0;
+            rightBands[3].gainDb = -1.5;
         } else if (presetName == "Vocal Air") {
-            applyPreset("Monitor Flat");
-            m_leftBands[4].gainDb = -1.0; // 500 Hz
-            m_leftBands[6].gainDb = 2.0;  // 2 kHz
-            m_leftBands[9].gainDb = 3.0;  // 8 kHz
-            m_rightBands[4].gainDb = -1.0;
-            m_rightBands[6].gainDb = 2.0;
-            m_rightBands[9].gainDb = 3.0;
+            leftBands[4].gainDb = -1.0; // 500 Hz
+            leftBands[6].gainDb = 2.0;  // 2 kHz
+            leftBands[9].gainDb = 3.0;  // 8 kHz
+            rightBands[4].gainDb = -1.0;
+            rightBands[6].gainDb = 2.0;
+            rightBands[9].gainDb = 3.0;
         } else {
             return false;
         }
+        return true;
+    }
 
+    /// Apply built-in Listening Correction profile (Section 5.10)
+    bool applyPreset(const std::string& presetName)
+    {
+        if (!getPresetBandConfigs(presetName, m_leftBands, m_rightBands)) {
+            return false;
+        }
         configure(m_sampleRate);
         return true;
     }

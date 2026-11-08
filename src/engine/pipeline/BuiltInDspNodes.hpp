@@ -508,8 +508,8 @@ public:
         // 1. Check for prepared instance at block boundary
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
             if (m_active) {
-                // Tail Preservation (P0-22):
-                // If previous active instance was initialized, begin smooth crossfade
+                // Tail Preservation (P0-22): inherit active comb/all-pass state and begin smooth crossfade
+                prepared->inheritStateFrom(*m_active);
                 if (m_fade) {
                     retireInstance(m_fade);
                 }

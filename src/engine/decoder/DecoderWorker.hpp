@@ -9,6 +9,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <future>
+#include <functional>
 #include <cstdint>
 #include <cmath>
 #include "engine/buffer/PcmRingBuffer.hpp"
@@ -91,7 +92,13 @@ public:
     [[nodiscard]] uint64_t underrunCount() const noexcept { return m_underrunCount.load(std::memory_order_relaxed); }
     [[nodiscard]] OpenStatus lastOpenStatus() const noexcept { return m_lastOpenStatus.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t activeRequestId() const noexcept { return m_activeRequestId.load(std::memory_order_acquire); }
+    [[nodiscard]] uint64_t committedRequestId() const noexcept { return m_committedRequestId.load(std::memory_order_acquire); }
     [[nodiscard]] bool isSynthetic() const noexcept { return m_isSynthetic.load(std::memory_order_acquire); }
+
+    void setPreCommitHook(std::function<void(uint64_t)> hook) {
+        std::lock_guard<std::mutex> lock(m_cmdMutex);
+        m_preCommitHook = std::move(hook);
+    }
 
     /// Thread-safe copy of track info (P0-05)
     [[nodiscard]] WorkerTrackInfo trackInfo() const {
@@ -127,6 +134,7 @@ private:
     std::atomic<uint64_t> m_seekCompleted{0};
     std::atomic<uint64_t> m_nextRequestId{1};
     std::atomic<uint64_t> m_activeRequestId{0};
+    std::atomic<uint64_t> m_committedRequestId{0};
     std::atomic<OpenStatus> m_lastOpenStatus{OpenStatus::None};
 
     mutable std::mutex m_trackMutex;
@@ -141,6 +149,7 @@ private:
     std::mutex m_cmdMutex;
     std::condition_variable m_cmdCv;
     std::vector<WorkerCommand> m_pendingCommands;
+    std::function<void(uint64_t)> m_preCommitHook;
 
     // Worker thread local resources (NOT touched by Audio Thread)
     std::unique_ptr<FFmpegAudioDecoder> m_decoder;
