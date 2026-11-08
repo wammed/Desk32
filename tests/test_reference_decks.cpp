@@ -23,7 +23,21 @@ void* operator new(size_t size) {
     return std::malloc(size);
 }
 
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
 void* operator new[](size_t size) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
@@ -555,7 +569,8 @@ void TestReferenceDecks::testDecoderWorkerOpenTimeoutAndStaleRequestCancellation
 
 void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
 {
-    // P0-26: Deterministic verification of Request ID Commit Synchronization Mechanism (Cases 1 - 6)
+    // P0-26: Deterministic verification of Request ID Commit Synchronization Mechanism (Cases 1 - 10)
+    // Strictly zero sleep_for() reliance; all race timings are synchronized via latches / atomic flags.
 
     // Case 1: Open Real A, but before commit, Control Thread opens Real B.
     // Result: A is rejected, B is committed.
@@ -572,7 +587,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker.openTrack(m_wav1.toStdString(), 48000.0);
         });
 
@@ -580,16 +595,25 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        const uint64_t reqA = worker.activeRequestId();
+
+        std::atomic<bool> okB{false};
+        std::thread tB([&]() {
+            okB.store(worker.openTrack(m_wav2.toStdString(), 48000.0));
         });
 
-        bool okB = worker.openTrack(m_wav2.toStdString(), 48000.0);
-        t.join();
-        unblockThread.join();
+        // Deterministically wait until Request B has been issued and published under m_trackMutex
+        while (worker.activeRequestId() <= reqA) {
+            std::this_thread::yield();
+        }
 
-        QVERIFY(okB);
+        // Release Track A worker from hook; it must find its request ID stale and discard A
+        releaseHook.store(true, std::memory_order_release);
+
+        tA.join();
+        tB.join();
+
+        QVERIFY(okB.load());
         QVERIFY(worker.isOpen());
         QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
         QVERIFY(!worker.isSynthetic());
@@ -610,7 +634,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker.openTrack(m_wav1.toStdString(), 48000.0);
         });
 
@@ -618,16 +642,23 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        const uint64_t reqA = worker.activeRequestId();
+
+        std::atomic<bool> okSynth{false};
+        std::thread tSynth([&]() {
+            okSynth.store(worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case2"));
         });
 
-        bool okSynth = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case2");
-        t.join();
-        unblockThread.join();
+        while (worker.activeRequestId() <= reqA) {
+            std::this_thread::yield();
+        }
 
-        QVERIFY(okSynth);
+        releaseHook.store(true, std::memory_order_release);
+
+        tA.join();
+        tSynth.join();
+
+        QVERIFY(okSynth.load());
         QVERIFY(worker.isOpen());
         QCOMPARE(worker.trackInfo().path, std::string("synthetic://case2"));
         QVERIFY(worker.isSynthetic());
@@ -648,7 +679,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case3_stale");
         });
 
@@ -656,16 +687,23 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        const uint64_t reqA = worker.activeRequestId();
+
+        std::atomic<bool> okB{false};
+        std::thread tB([&]() {
+            okB.store(worker.openTrack(m_wav1.toStdString(), 48000.0));
         });
 
-        bool okB = worker.openTrack(m_wav1.toStdString(), 48000.0);
-        t.join();
-        unblockThread.join();
+        while (worker.activeRequestId() <= reqA) {
+            std::this_thread::yield();
+        }
 
-        QVERIFY(okB);
+        releaseHook.store(true, std::memory_order_release);
+
+        tA.join();
+        tB.join();
+
+        QVERIFY(okB.load());
         QVERIFY(worker.isOpen());
         QCOMPARE(worker.trackInfo().path, m_wav1.toStdString());
         QVERIFY(!worker.isSynthetic());
@@ -686,7 +724,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker.openTrack(m_wav1.toStdString(), 48000.0);
         });
 
@@ -694,14 +732,19 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        std::thread tClose([&]() {
+            worker.closeTrack();
         });
 
-        worker.closeTrack();
-        t.join();
-        unblockThread.join();
+        // Deterministically wait until closeTrack sets activeRequestId to 0
+        while (worker.activeRequestId() != 0) {
+            std::this_thread::yield();
+        }
+
+        releaseHook.store(true, std::memory_order_release);
+
+        tA.join();
+        tClose.join();
 
         QVERIFY(!worker.isOpen());
         QCOMPARE(worker.trackInfo().path, std::string(""));
@@ -723,7 +766,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://case5_stale");
         });
 
@@ -731,14 +774,18 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        std::thread tClose([&]() {
+            worker.closeTrack();
         });
 
-        worker.closeTrack();
-        t.join();
-        unblockThread.join();
+        while (worker.activeRequestId() != 0) {
+            std::this_thread::yield();
+        }
+
+        releaseHook.store(true, std::memory_order_release);
+
+        tA.join();
+        tClose.join();
 
         QVERIFY(!worker.isOpen());
         QCOMPARE(worker.trackInfo().path, std::string(""));
@@ -746,7 +793,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
     }
 
     // Case 6: Open Real A, but before commit, DecoderWorker is destroyed (Shutdown).
-    // Result: Clean shutdown without crash or deadlock.
+    // Result: Clean shutdown without crash, UAF, or deadlock.
     {
         std::atomic<bool> hookHit{false};
         std::atomic<bool> releaseHook{false};
@@ -760,7 +807,7 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             }
         });
 
-        std::thread t([&]() {
+        std::thread tA([&]() {
             worker->openTrack(m_wav1.toStdString(), 48000.0);
         });
 
@@ -768,14 +815,114 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
             std::this_thread::yield();
         }
 
-        std::thread unblockThread([&]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            releaseHook.store(true, std::memory_order_release);
+        // Release hook and concurrently trigger shutdown
+        releaseHook.store(true, std::memory_order_release);
+        worker.reset();
+        tA.join();
+    }
+
+    // Case 7: Simultaneous race between Request ID publication and Worker Commit
+    // Worker finishes decode and is just about to commit; Control Thread publishes new Request B.
+    // Result: Stale request A is never committed.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> inHook{false};
+        std::atomic<bool> proceedCommit{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            inHook.store(true, std::memory_order_release);
+            while (!proceedCommit.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
         });
 
-        worker.reset();
-        t.join();
-        unblockThread.join();
+        std::thread tA([&]() {
+            worker.openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!inHook.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        // Issue request B
+        std::atomic<bool> okB{false};
+        std::thread tB([&]() {
+            okB.store(worker.openTrack(m_wav2.toStdString(), 48000.0));
+        });
+
+        // Let Worker A proceed to commit; since Request B has superseded it, A must fail commit
+        proceedCommit.store(true, std::memory_order_release);
+
+        tA.join();
+        tB.join();
+
+        QVERIFY(okB.load());
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+    }
+
+    // Case 8: Rapid successive requests (burst of requests)
+    // Only the final request must be valid and committed.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        const int numBursts = 5;
+        std::vector<std::thread> threads;
+        threads.reserve(numBursts);
+
+        for (int i = 0; i < numBursts; ++i) {
+            threads.emplace_back([&, i]() {
+                if (i % 2 == 0) {
+                    worker.openTrack(m_wav1.toStdString(), 48000.0);
+                } else {
+                    worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://burst_" + std::to_string(i));
+                }
+            });
+        }
+
+        for (auto& th : threads) {
+            th.join();
+        }
+
+        QVERIFY(worker.isOpen());
+        QVERIFY(worker.committedRequestId() > 0);
+        QCOMPARE(worker.committedRequestId(), worker.activeRequestId());
+    }
+
+    // Case 9: Close -> Open -> Close sequential operations
+    // Final state must strictly match the last close operation.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        worker.openTrack(m_wav1.toStdString(), 48000.0);
+        QVERIFY(worker.isOpen());
+
+        worker.closeTrack();
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.committedRequestId(), 0u);
+
+        bool okSynth = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://seq");
+        QVERIFY(okSynth);
+        QVERIFY(worker.isOpen());
+
+        worker.closeTrack();
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.committedRequestId(), 0u);
+        QCOMPARE(worker.activeRequestId(), 0u);
+    }
+
+    // Case 10: Duplicate / concurrent completion paths for the same request
+    // Multiple close / open attempts must never trigger double promise resolution exceptions.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::thread t1([&]() { worker.closeTrack(); });
+        std::thread t2([&]() { worker.closeTrack(); });
+        std::thread t3([&]() { worker.openTrack(m_wav1.toStdString(), 48000.0); });
+
+        t1.join();
+        t2.join();
+        t3.join();
+
+        // No unhandled exceptions or crashes
+        (void)worker.activeRequestId();
+        QVERIFY(true);
     }
 }
 

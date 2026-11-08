@@ -508,8 +508,9 @@ public:
         // 1. Check for prepared instance at block boundary
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
             if (m_active) {
-                // Tail Preservation (P0-22): inherit active comb/all-pass state and begin smooth crossfade
-                prepared->inheritStateFrom(*m_active);
+                // Tail Preservation (P0-22, v1.6): No buffer copying on Audio Thread!
+                // Instead, m_fade naturally continues rendering existing reverberation tail,
+                // while m_active renders incoming audio with new parameters, crossfaded smoothly over CROSSFADE_FRAMES.
                 if (m_fade) {
                     retireInstance(m_fade);
                 }

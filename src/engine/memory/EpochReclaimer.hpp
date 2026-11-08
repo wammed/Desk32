@@ -254,6 +254,10 @@ public:
         return m_closing.load(std::memory_order_seq_cst);
     }
 
+    [[nodiscard]] bool isWaitingForReaders() const noexcept {
+        return m_waitingForReaders.load(std::memory_order_acquire);
+    }
+
     /// Wait for active readers and drain all chains (destructor cleanup, P0-20, P0-28).
     /// Serialized with swapChain() via m_writerMutex to eliminate writer-shutdown race conditions.
     void drainAll()
@@ -267,6 +271,7 @@ public:
         T* current = m_activeChain.exchange(nullptr, std::memory_order_seq_cst);
 
         // 3. Wait for all existing active readers to exit
+        m_waitingForReaders.store(true, std::memory_order_release);
         for (;;) {
             bool anyActive = false;
             for (size_t i = 0; i < MAX_READERS; ++i) {
@@ -280,6 +285,7 @@ public:
             }
             std::this_thread::yield();
         }
+        m_waitingForReaders.store(false, std::memory_order_release);
 
         // 4. Safely free retired chains and current active chain outside Audio Thread
         std::lock_guard<std::mutex> lock(m_retiredMutex);
@@ -299,6 +305,7 @@ private:
     };
 
     alignas(64) std::atomic<bool> m_closing{false};
+    alignas(64) std::atomic<bool> m_waitingForReaders{false};
     std::atomic<T*> m_activeChain{nullptr};
     std::atomic<uint64_t> m_globalEpoch{1};
     mutable std::atomic<uint64_t> m_slotExhaustionCount{0};

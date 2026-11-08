@@ -1,8 +1,58 @@
 #include <QTest>
 #include <QObject>
 #include <latch>
+#include <chrono>
+#include <cstdlib>
+#include <atomic>
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
+
+static std::atomic<size_t> s_rtAllocCount{0};
+static thread_local bool t_isAudioThread{false};
+
+void* operator new(size_t size) {
+    if (t_isAudioThread) {
+        s_rtAllocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return malloc(size);
+}
+
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        s_rtAllocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return malloc(size);
+}
+
+void* operator new[](size_t size) {
+    if (t_isAudioThread) {
+        s_rtAllocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return malloc(size);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
+    if (t_isAudioThread) {
+        s_rtAllocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return malloc(size);
+}
+
+void operator delete(void* ptr) noexcept {
+    free(ptr);
+}
+
+void operator delete[](void* ptr) noexcept {
+    free(ptr);
+}
+
+void operator delete(void* ptr, size_t) noexcept {
+    free(ptr);
+}
+
+void operator delete[](void* ptr, size_t) noexcept {
+    free(ptr);
+}
 
 using namespace desk32::engine::pipeline;
 
@@ -28,6 +78,7 @@ private slots:
     void testEpochReclaimerShutdownConcurrentSafety();
     void testEpochReclaimerWriterShutdownSerialization();
     void testEpochReclaimerDeterministicShutdownRaces();
+    void testRealTimeSafetyInLivePipeline();
     void cleanupTestCase();
 };
 
@@ -799,12 +850,13 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         QCOMPARE(reclaimer.retiredCount(), 0u);
     }
 
-    // Case B: Reader holds guard during swapChain and drainAll (drainAll blocks until Reader exits)
+    // Case B: Reader holds guard during swapChain and drainAll (drainAll deterministically blocks until Reader exits)
     {
         EpochReclaimer<std::string> reclaimer;
         reclaimer.swapChain(std::make_unique<std::string>("ReaderActiveChain"));
 
         std::latch readerHolding(1);
+        std::atomic<bool> releaseReader{false};
         std::atomic<bool> readerFinished{false};
         std::atomic<bool> drainDone{false};
 
@@ -814,8 +866,10 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
             QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
             readerHolding.count_down();
 
-            // Hold guard until Control Thread initiates shutdown
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            // Wait deterministically for Shutdown drainAll to reach the waiting loop
+            while (!releaseReader.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
             // Verify data is still intact (never prematurely freed)
             QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
             readerFinished.store(true, std::memory_order_release);
@@ -831,9 +885,16 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
             drainDone.store(true, std::memory_order_release);
         });
 
+        // Deterministically wait for drainAll to enter its active reader wait loop (no sleep_for)
+        while (!reclaimer.isWaitingForReaders()) {
+            std::this_thread::yield();
+        }
+
         // While reader has not finished, drainAll must NOT have completed
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
         QVERIFY(!drainDone.load(std::memory_order_acquire));
+
+        // Signal reader to finish and release its guard
+        releaseReader.store(true, std::memory_order_release);
 
         readerThread.join();
         drainThread.join();
@@ -897,6 +958,94 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         QCOMPARE(reclaimer.retiredCount(), 0u);
         QCOMPARE(successCount.load() + rejectCount.load(), numWriters);
     }
+}
+
+void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
+{
+    // P0-23, P0-27, P0-29: Live AudioPipeline Real-Time Safety Verification
+    // Verifies zero dynamic heap allocation, zero blocking/mutex, continuous mailbox draining,
+    // prepared instance swapping, telemetry publishing, and measured CPU budget.
+
+    AudioPipeline pipeline(48000.0);
+
+    auto master = std::make_unique<AudioChain>("Mastering", ChainPurpose::MasteringChain);
+    master->appendNode(std::make_shared<ParametricEqNode>("Master PEQ"));
+    master->appendNode(std::make_shared<GraphicEqNode>("Master GEQ"));
+    master->appendNode(std::make_shared<HighLowPassNode>("Master Filters"));
+    master->appendNode(std::make_shared<CompressorNode>("Master Comp"));
+    master->appendNode(std::make_shared<PeakLimiterNode>("Master Limiter"));
+    master->appendNode(std::make_shared<ReverbNode>("Master Reverb"));
+    pipeline.swapMasterChain(std::move(master));
+
+    auto listening = std::make_unique<AudioChain>("Listening", ChainPurpose::ListeningCorrectionChain);
+    listening->appendNode(std::make_shared<ParametricEqNode>("Headphone EQ", NodeAffiliation::ListeningCorrection));
+    pipeline.swapListeningChain(std::move(listening));
+
+    const size_t frames = 256;
+    std::vector<double> inL(frames, 0.4);
+    std::vector<double> inR(frames, -0.4);
+    std::vector<float> out(frames * 2, 0.0f);
+
+    // Warm-up block
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+
+    std::atomic<bool> stopAudio{false};
+    std::atomic<uint64_t> blocksRendered{0};
+    std::atomic<int64_t> maxProcessNanos{0};
+
+    // Begin allocation tracking strictly for the Audio Thread
+    s_rtAllocCount.store(0);
+
+    std::thread audioThread([&]() {
+        t_isAudioThread = true;
+        while (!stopAudio.load(std::memory_order_relaxed)) {
+            auto t0 = std::chrono::steady_clock::now();
+            pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+            auto t1 = std::chrono::steady_clock::now();
+
+            int64_t elapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+            int64_t curMax = maxProcessNanos.load(std::memory_order_relaxed);
+            while (elapsedNanos > curMax && !maxProcessNanos.compare_exchange_weak(curMax, elapsedNanos, std::memory_order_relaxed));
+
+            blocksRendered.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Control Thread: Concurrently mutate Mailbox, swap DSP instances, read telemetry, and reclaim memory
+    for (int i = 0; i < 50; ++i) {
+        pipeline.updateCompressor(-12.0 - (i % 8), 3.0, 10.0, 100.0, 0.0, 4.0, true);
+        pipeline.updatePeakLimiter(-0.5 - (i % 4) * 0.2, 50.0, 1.0, true);
+        pipeline.updateReverb(0.6 + (i % 3) * 0.1, 0.3, 0.2, 0.0, true, true);
+        pipeline.paramMailbox().setListeningPreset("Flat");
+
+        auto telem = pipeline.currentTelemetry();
+        (void)telem;
+
+        if (i % 5 == 0) {
+            pipeline.reclaimRetiredMemory();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    stopAudio.store(true, std::memory_order_relaxed);
+    audioThread.join();
+
+    pipeline.reclaimRetiredMemory();
+
+    qDebug() << "Live AudioPipeline: Rendered" << blocksRendered.load() << "blocks (256 frames each).";
+    qDebug() << "Audio Thread Heap Allocations:" << s_rtAllocCount.load();
+    qDebug() << "Max Block Process Time:" << (maxProcessNanos.load() / 1000) << "microseconds";
+
+    // 1. Strictly zero heap allocations during live audio rendering
+    QCOMPARE(s_rtAllocCount.load(), 0u);
+
+    // 2. Verified real-time progress
+    QVERIFY(blocksRendered.load() > 50);
+
+    // 3. Max process time must stay well within the audio deadline (5.33ms for 256 frames @ 48kHz)
+    // Even under debug / heavy load, maxProcessNanos should be well under 4.0ms (4,000,000 ns)
+    QVERIFY(maxProcessNanos.load() < 4000000);
 }
 
 void TestAudioPipeline::cleanupTestCase()

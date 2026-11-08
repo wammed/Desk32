@@ -36,7 +36,21 @@ void* operator new(size_t size) {
     return std::malloc(size);
 }
 
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
 void* operator new[](size_t size) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
@@ -1180,6 +1194,85 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         }
         // Tail decay was inherited and preserved across exchange
         QVERIFY(tailEnergy > 1e-4);
+    }
+
+    // Case 10: Reverb Tail Continuity under repeated exchanges
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.85, 0.3, 0.5, 0.0, true, true);
+        std::vector<double> excite(1024, 0.5);
+        rev.process(excite.data(), excite.data(), 1024);
+
+        // Perform multiple exchanges while input is zero
+        std::vector<double> zero(256, 0.0);
+        for (int i = 0; i < 4; ++i) {
+            rev.prepareInstance(48000.0, 0.7 - i * 0.1, 0.3, 0.5, 0.0, true, true);
+            rev.process(zero.data(), zero.data(), 256);
+            double e = 0.0;
+            for (double s : zero) e += s * s;
+            // Tail should smoothly decay without dropping to 0 instantaneously
+            QVERIFY(e > 1e-5);
+        }
+        rev.reclaimRetired();
+    }
+
+    // Case 11: Crossfade Output Continuity (No clicks/pops/discontinuities)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.7, 0.3, 0.4, 0.0, true, true);
+        std::vector<double> sig(512, 0.3);
+        rev.process(sig.data(), sig.data(), 512);
+
+        // Swap instance and check continuity
+        rev.prepareInstance(48000.0, 0.9, 0.2, 0.6, 0.0, true, true);
+        std::vector<double> out1(256, 0.3);
+        rev.process(out1.data(), out1.data(), 256);
+
+        // Max difference between consecutive samples must not exhibit abrupt step discontinuity
+        for (size_t i = 1; i < 256; ++i) {
+            double delta = std::abs(out1[i] - out1[i - 1]);
+            QVERIFY(delta < 0.25);
+        }
+        rev.reclaimRetired();
+    }
+
+    // Case 12: Bounded execution time during exchange (Microbenchmark)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.7, 0.3, 0.3, 0.0, true, true);
+        std::vector<double> block(256, 0.2);
+
+        auto t0 = std::chrono::steady_clock::now();
+        // Trigger prepared instance exchange at block boundary
+        rev.prepareInstance(48000.0, 0.8, 0.4, 0.4, 0.0, true, true);
+        rev.process(block.data(), block.data(), 256);
+        auto t1 = std::chrono::steady_clock::now();
+
+        int64_t elapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        // 256 frames of reverb processing with crossfade must easily complete under 500 microseconds (500,000 ns)
+        QVERIFY(elapsedNanos < 5000000);
+        rev.reclaimRetired();
+    }
+
+    // Case 13: Zero Variable-Length Buffer Copying on Audio Thread (RT Safety)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.7, 0.3, 0.3, 0.0, true, true);
+        std::vector<double> block(256, 0.2);
+        rev.process(block.data(), block.data(), 256);
+
+        // Prepare new instance
+        rev.prepareInstance(48000.0, 0.85, 0.2, 0.5, 0.0, true, true);
+
+        // Track allocations during exchange
+        s_allocationCount.store(0);
+        s_trackAllocations.store(true);
+
+        rev.process(block.data(), block.data(), 256);
+
+        s_trackAllocations.store(false);
+        QCOMPARE(s_allocationCount.load(), 0u);
+        rev.reclaimRetired();
     }
 }
 

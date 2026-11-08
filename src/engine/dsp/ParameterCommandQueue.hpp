@@ -40,16 +40,18 @@ struct DspCommand {
     float param6 = 0.0f;     // MakeupGainDb (P0-06)
 };
 
-/// Multi-Producer Single-Consumer (MPSC) Parameter Command Queue (P0-24, P0-25).
+/// Mutex-Serialized MPSC / Single Consumer Parameter Command Queue (P0-24, P0-25).
+/// Design Contract (v1.6):
 /// - Producers (Control / UI Threads): Thread-safe for multiple concurrent producers via m_producerMutex serialization.
-/// - Consumer (Audio Thread): Strictly single-consumer, completely independent, lock-free, and wait-free.
-/// - Zero dynamic allocations, bounded capacity (512 commands), non-blocking for Consumer.
-/// MPSC Ownership Guarantees (Section 7, P0-24, P0-25):
+///   Detects Queue Full condition, records overflow count, and returns false to caller.
+/// - Consumer (Audio Thread): Strictly single-consumer, non-blocking, lock-free, zero mutex acquisition, strictly bounded execution time.
+/// - Zero dynamic allocations, bounded fixed capacity (512 commands).
+/// MPSC Ownership Guarantees:
 /// - Producers serialize writes via m_producerMutex and append at the write tail.
 /// - Consumer drains from read tail without ever taking any locks or blocking.
-/// - In-place coalescing is completely eliminated; FIFO sequential ordering is preserved for discrete events.
-/// - Continuous parameters (sliders) are dispatched via lock-free DspParameterMailbox (P0-25, P0-27).
-/// - Overflow tracking records any queue-full drops and signals callers for UI notification.
+/// - In-place coalescing is eliminated; FIFO sequential ordering is preserved for discrete commands.
+/// - Continuous parameters (sliders) are dispatched via lock-free DspParameterMailbox (P0-24, P0-27).
+/// - Queue Full drops increment m_overflowCount and return false to the caller for error handling.
 class ParameterCommandQueue {
 public:
     static constexpr size_t CAPACITY = 512;

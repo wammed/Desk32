@@ -96,7 +96,7 @@ public:
     [[nodiscard]] bool isSynthetic() const noexcept { return m_isSynthetic.load(std::memory_order_acquire); }
 
     void setPreCommitHook(std::function<void(uint64_t)> hook) {
-        std::lock_guard<std::mutex> lock(m_cmdMutex);
+        std::lock_guard<std::mutex> lock(m_trackMutex);
         m_preCommitHook = std::move(hook);
     }
 

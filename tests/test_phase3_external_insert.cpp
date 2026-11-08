@@ -30,7 +30,21 @@ void* operator new(size_t size) {
     return std::malloc(size);
 }
 
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
 void* operator new[](size_t size) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return std::malloc(size);
+}
+
+void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }

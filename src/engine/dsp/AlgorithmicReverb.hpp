@@ -205,7 +205,8 @@ public:
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
 
     /// Inherit active reverberation tail state from another instance (P0-22).
-    /// Bounded O(1) execution time, zero heap allocations, zero locks.
+    /// STRICTLY Non-RT / Control Thread only: Never call on Audio Thread (v1.6).
+    /// Bounded execution time, zero heap allocations, zero locks.
     void inheritStateFrom(const AlgorithmicReverb& other) noexcept
     {
         m_predelayBuffer = other.m_predelayBuffer;

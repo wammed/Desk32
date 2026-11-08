@@ -9,8 +9,12 @@ DecoderWorker::DecoderWorker() {
 
 DecoderWorker::~DecoderWorker() {
     {
-        std::lock_guard<std::mutex> lock(m_cmdMutex);
+        std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        m_activeRequestId.store(0, std::memory_order_release);
         m_running.store(false, std::memory_order_release);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_cmdMutex);
         for (auto& cmd : m_pendingCommands) {
             if (cmd.openPromise) {
                 try { cmd.openPromise->set_value(false); } catch (...) {}
@@ -28,9 +32,15 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     uint64_t seq = 0;
-    uint64_t reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
-    m_activeRequestId.store(reqId, std::memory_order_release);
-    m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+    uint64_t reqId = 0;
+
+    // Linearization Point: Request ID issuance and publication strictly synchronized under m_trackMutex
+    {
+        std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
+        m_activeRequestId.store(reqId, std::memory_order_release);
+        m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
@@ -66,9 +76,15 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     uint64_t seq = 0;
-    uint64_t reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
-    m_activeRequestId.store(reqId, std::memory_order_release);
-    m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+    uint64_t reqId = 0;
+
+    // Linearization Point: Request ID issuance and publication strictly synchronized under m_trackMutex
+    {
+        std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
+        m_activeRequestId.store(reqId, std::memory_order_release);
+        m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
@@ -299,8 +315,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         auto dec = std::make_unique<FFmpegAudioDecoder>();
         if (dec->open(cmd.path)) {
             // Trigger pre-commit hook if installed (testing synchronization)
-            if (m_preCommitHook) {
-                m_preCommitHook(cmd.requestId);
+            std::function<void(uint64_t)> hookCopy;
+            {
+                std::lock_guard<std::mutex> lock(m_trackMutex);
+                hookCopy = m_preCommitHook;
+            }
+            if (hookCopy) {
+                hookCopy(cmd.requestId);
             }
 
             // P0-26: Re-verify request ID and commit state atomically under m_trackMutex
@@ -383,8 +404,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         meta.durationSeconds = (cmd.sampleRate > 0) ? (static_cast<double>(cmd.totalFrames) / cmd.sampleRate) : 0.0;
 
         // Trigger pre-commit hook if installed
-        if (m_preCommitHook) {
-            m_preCommitHook(cmd.requestId);
+        std::function<void(uint64_t)> hookCopy;
+        {
+            std::lock_guard<std::mutex> lock(m_trackMutex);
+            hookCopy = m_preCommitHook;
+        }
+        if (hookCopy) {
+            hookCopy(cmd.requestId);
         }
 
         // P0-26: Re-verify request ID and commit state atomically under m_trackMutex

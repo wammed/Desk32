@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  normal-build-and-test:
-    name: Normal Build & Test (Release)
+  release-build-and-test:
+    name: Release Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -39,7 +39,7 @@ jobs:
             libavutil-dev \
             libswresample-dev
 
-      - name: Configure CMake
+      - name: Configure CMake (Release)
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -53,8 +53,8 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure
 
-  asan-ubsan-build-and-test:
-    name: ASan & UBSan Sanitizer Verification
+  debug-build-and-test:
+    name: Debug Build & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -85,20 +85,113 @@ jobs:
             libavutil-dev \
             libswresample-dev
 
-      - name: Configure CMake with ASan & UBSan
+      - name: Configure CMake (Debug)
+        run: |
+          cmake -B build_debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_STANDARD=20
+
+      - name: Build Desk32 and Tests
+        run: |
+          cmake --build build_debug
+
+      - name: Run Unit Tests
+        run: |
+          ctest --test-dir build_debug --output-on-failure
+
+  asan-build-and-test:
+    name: ASan & LSan Sanitizer Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qt6-tools-dev \
+            qt6-l10n-tools \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            pipewire \
+            libpipewire-0.3-dev \
+            libjack-jackd2-dev \
+            libsoxr-dev \
+            libsqlite3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev
+
+      - name: Configure CMake with ASan
         run: |
           cmake -B build_asan -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
             -DCMAKE_CXX_STANDARD=20
 
-      - name: Build Tests with ASan & UBSan
+      - name: Build Tests with ASan
         run: |
           cmake --build build_asan
 
-      - name: Run Tests under ASan & UBSan
+      - name: Run Tests under ASan & LSan
         run: |
-          ASAN_OPTIONS="alloc_dealloc_mismatch=0:detect_leaks=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" ctest --test-dir build_asan --output-on-failure
+          ASAN_OPTIONS="detect_leaks=1" ctest --test-dir build_asan --output-on-failure
+
+  ubsan-build-and-test:
+    name: UBSan Sanitizer Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qt6-tools-dev \
+            qt6-l10n-tools \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            pipewire \
+            libpipewire-0.3-dev \
+            libjack-jackd2-dev \
+            libsoxr-dev \
+            libsqlite3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev
+
+      - name: Configure CMake with UBSan
+        run: |
+          cmake -B build_ubsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_STANDARD=20
+
+      - name: Build Tests with UBSan
+        run: |
+          cmake --build build_ubsan
+
+      - name: Run Tests under UBSan
+        run: |
+          UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" ctest --test-dir build_ubsan --output-on-failure
 
   tsan-build-and-test:
     name: TSan Data Race Sanitizer Verification
@@ -146,5 +239,3 @@ jobs:
       - name: Run Tests under TSan
         run: |
           TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/tsan.supp:second_deadlock_stack=1" ctest --test-dir build_tsan --output-on-failure
-
-
