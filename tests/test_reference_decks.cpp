@@ -525,6 +525,30 @@ void TestReferenceDecks::testDecoderWorkerOpenTimeoutAndStaleRequestCancellation
     QVERIFY(worker.activeRequestId() >= latestReq);
     QCOMPARE(worker.trackInfo().path, std::string("synthetic://latest"));
     QCOMPARE(worker.trackInfo().totalFrames, 48000u);
+
+    // 5. P0-26: Rapid interleaved requests between real audio file and synthetic track
+    for (int i = 0; i < 5; ++i) {
+        worker.openTrack(m_wav1.toStdString(), 48000.0);
+        worker.openSyntheticTrack(96000, 48000.0, 48000.0, "synthetic://interleaved_" + std::to_string(i));
+    }
+    bool finalRealOk = worker.openTrack(m_wav1.toStdString(), 48000.0);
+    QVERIFY(finalRealOk);
+    QVERIFY(worker.isOpen());
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
+    QCOMPARE(worker.trackInfo().path, m_wav1.toStdString());
+    QVERIFY(!worker.isSynthetic());
+
+    // Rapid real file track requests followed immediately by final synthetic track
+    for (int i = 0; i < 5; ++i) {
+        worker.openSyntheticTrack(96000, 48000.0, 48000.0, "synthetic://stale_" + std::to_string(i));
+        worker.openTrack(m_wav1.toStdString(), 48000.0);
+    }
+    bool finalSynthOk = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://final");
+    QVERIFY(finalSynthOk);
+    QVERIFY(worker.isOpen());
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
+    QCOMPARE(worker.trackInfo().path, std::string("synthetic://final"));
+    QVERIFY(worker.isSynthetic());
 }
 
 void TestReferenceDecks::cleanupTestCase()

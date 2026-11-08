@@ -7,7 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  build-and-test:
+  normal-build-and-test:
+    name: Normal Build & Test (Release)
     runs-on: ubuntu-latest
 
     steps:
@@ -51,4 +52,99 @@ jobs:
       - name: Run Unit Tests
         run: |
           ctest --test-dir build --output-on-failure
+
+  asan-ubsan-build-and-test:
+    name: ASan & UBSan Sanitizer Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qt6-tools-dev \
+            qt6-l10n-tools \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            pipewire \
+            libpipewire-0.3-dev \
+            libjack-jackd2-dev \
+            libsoxr-dev \
+            libsqlite3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev
+
+      - name: Configure CMake with ASan & UBSan
+        run: |
+          cmake -B build_asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_STANDARD=20
+
+      - name: Build Tests with ASan & UBSan
+        run: |
+          cmake --build build_asan
+
+      - name: Run Tests under ASan & UBSan
+        run: |
+          ASAN_OPTIONS="alloc_dealloc_mismatch=0:detect_leaks=1" UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" ctest --test-dir build_asan --output-on-failure
+
+  tsan-build-and-test:
+    name: TSan Data Race Sanitizer Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            qt6-base-dev \
+            qt6-declarative-dev \
+            qt6-tools-dev \
+            qt6-l10n-tools \
+            libgl1-mesa-dev \
+            libasound2-dev \
+            pipewire \
+            libpipewire-0.3-dev \
+            libjack-jackd2-dev \
+            libsoxr-dev \
+            libsqlite3-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libswresample-dev
+
+      - name: Configure CMake with TSan
+        run: |
+          cmake -B build_tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_STANDARD=20
+
+      - name: Build Tests with TSan
+        run: |
+          cmake --build build_tsan
+
+      - name: Run Tests under TSan
+        run: |
+          TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/tsan.supp:second_deadlock_stack=1" ctest --test-dir build_tsan --output-on-failure
+
 

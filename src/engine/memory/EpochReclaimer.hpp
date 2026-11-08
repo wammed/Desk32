@@ -174,13 +174,23 @@ public:
         return fn(guard.get());
     }
 
-    /// Called by Control / Non-RT Thread to swap active chain.
+    /// Called by Control / Non-RT Thread to swap active chain (P0-20).
+    /// Serialized with drainAll() via m_writerMutex to guarantee atomic lifecycle management.
     /// Retires the old chain tagged with the epoch during which it was retired.
-    void swapChain(std::unique_ptr<T> newChain)
+    /// Returns true if swapped successfully, false if rejected due to shutdown.
+    bool swapChain(std::unique_ptr<T> newChain)
     {
-        if (m_closing.load(std::memory_order_seq_cst)) {
-            return;
+        if (!newChain) {
+            return false;
         }
+
+        std::lock_guard<std::mutex> writerLock(m_writerMutex);
+        if (m_closing.load(std::memory_order_seq_cst)) {
+            // P0-20: If closing or already drained, strictly reject new chain registration.
+            // newChain is safely deleted via unique_ptr without leaking or corrupting state.
+            return false;
+        }
+
         T* rawNew = newChain.release();
         T* oldPtr = m_activeChain.exchange(rawNew, std::memory_order_seq_cst);
 
@@ -192,6 +202,7 @@ public:
         }
 
         reclaimRetired();
+        return true;
     }
 
     /// Non-RT reclamation: Destroys retired chains whose epoch has been vacated by all readers.
@@ -243,9 +254,12 @@ public:
         return m_closing.load(std::memory_order_seq_cst);
     }
 
-    /// Wait for active readers and drain all chains (destructor cleanup, P0-28)
+    /// Wait for active readers and drain all chains (destructor cleanup, P0-20, P0-28).
+    /// Serialized with swapChain() via m_writerMutex to eliminate writer-shutdown race conditions.
     void drainAll()
     {
+        std::lock_guard<std::mutex> writerLock(m_writerMutex);
+
         // 1. Prohibit new reader registrations
         m_closing.store(true, std::memory_order_seq_cst);
 
@@ -293,6 +307,7 @@ private:
     alignas(64) mutable std::array<ReaderSlot, MAX_READERS> m_slots{};
 
     // Non-RT memory management structures
+    mutable std::mutex m_writerMutex;
     mutable std::mutex m_retiredMutex;
     std::vector<RetiredEntry> m_retiredChains;
 };

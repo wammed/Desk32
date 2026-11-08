@@ -82,6 +82,15 @@ public:
         publishStaging();
     }
 
+    // Set all 32 GEQ band gains in a single atomic snapshot (Thread-safe, P0-24, P0-25)
+    void setAllGeqBandGains(const std::array<float, 32>& gains) {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        m_staging.geqGains = gains;
+        m_staging.geqModifiedMask = 0xFFFFFFFF;
+        publishStaging();
+    }
+
     // Set a PEQ band (Thread-safe for multiple Control Threads)
     void setPeqBand(size_t band, size_t channel, float freq, float gainDb, float Q, uint8_t type, bool enabled) {
         if (band >= 24) return;
@@ -165,6 +174,10 @@ public:
 
     [[nodiscard]] uint64_t updateCount() const noexcept {
         return m_updateCounter.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool isLockFree() const noexcept {
+        return m_sharedState.is_lock_free();
     }
 
     /// Thread-safe read of current staged parameters for Control Thread / UI display (P0-26)

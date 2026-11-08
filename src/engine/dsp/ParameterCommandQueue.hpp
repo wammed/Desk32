@@ -5,6 +5,7 @@
 #include <array>
 #include <algorithm>
 #include <string>
+#include <mutex>
 
 namespace desk32::engine::dsp {
 
@@ -65,9 +66,12 @@ public:
     ParameterCommandQueue(const ParameterCommandQueue&) = delete;
     ParameterCommandQueue& operator=(const ParameterCommandQueue&) = delete;
 
-    /// Control Thread: Push command into queue.
+    /// Multi-Producer (Control / UI Threads): Push command into queue.
+    /// Thread-safe for multiple concurrent producers via m_producerMutex.
+    /// Consumer (Audio Thread) is completely independent and lock-free/wait-free.
     /// Strictly appends at the write tail. If full, increments overflow counter and returns false.
     bool push(const DspCommand& cmd) noexcept {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
         size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
         size_t readIdx = m_readIndex.load(std::memory_order_acquire);
 
@@ -112,6 +116,7 @@ public:
     }
 
 private:
+    mutable std::mutex m_producerMutex;
     std::array<DspCommand, CAPACITY> m_buffer{};
     alignas(64) std::atomic<size_t> m_writeIndex{0};
     alignas(64) std::atomic<size_t> m_readIndex{0};

@@ -20,6 +20,7 @@
 #include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
+#include "engine/memory/EpochReclaimer.hpp"
 
 using namespace desk32::engine::dsp;
 using namespace desk32::engine::pipeline;
@@ -93,7 +94,10 @@ private slots:
     void testDspParameterMailboxMultiProducerAndContinuousUpdates();
     void testDspParameterMailbox3SlotExchangeSnapshotConsistency();
     void testDspParameterMailboxBatchApis();
-    void testDspContinuousParameterUpdateRtSafety();
+    void testSingleThreadDspUnitOperation();
+    void testPreparedDspInstanceExchangeSafety();
+    void testContinuousParameterMailboxUpdates();
+    void testRtSafetyAllocationDuringProcess();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -566,6 +570,51 @@ void TestPhase2Dsp::testParameterCommandQueueSPSCAndCapacity()
     QVERIFY(queue.empty());
     DspCommand emptyCmd;
     QVERIFY(!queue.pop(emptyCmd));
+
+    // 3. Multi-Producer (MPSC) Concurrency Verification (P0-25)
+    std::atomic<bool> startProducers{false};
+    std::atomic<uint64_t> totalPushed{0};
+    std::atomic<uint64_t> totalPopped{0};
+    std::atomic<bool> stopConsumer{false};
+
+    std::vector<std::thread> producers;
+    for (int p = 0; p < 4; ++p) {
+        producers.emplace_back([&, p]() {
+            while (!startProducers.load(std::memory_order_relaxed)) {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < 50; ++i) {
+                DspCommand c;
+                c.type = DspCommandType::SetNodeBypass;
+                c.index = static_cast<uint8_t>(p);
+                c.param1 = static_cast<float>(i);
+                while (!queue.push(c)) {
+                    std::this_thread::yield();
+                }
+                totalPushed.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::thread consumer([&]() {
+        DspCommand popped;
+        while (!stopConsumer.load(std::memory_order_relaxed) || !queue.empty()) {
+            if (queue.pop(popped)) {
+                totalPopped.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    startProducers.store(true, std::memory_order_release);
+    for (auto& pr : producers) pr.join();
+    stopConsumer.store(true, std::memory_order_release);
+    consumer.join();
+
+    QCOMPARE(totalPushed.load(), 200u);
+    QCOMPARE(totalPopped.load(), 200u);
+    QVERIFY(queue.empty());
 }
 
 void TestPhase2Dsp::testParameterCommandQueueCoalescingAndOverflowStats()
@@ -680,21 +729,24 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
 
 void TestPhase2Dsp::testDspParameterMailbox3SlotExchangeSnapshotConsistency()
 {
-    // P0-25: 3-Slot Exchange tear-free snapshot consistency verification
+    // P0-24, P0-25: 3-Slot Exchange tear-free snapshot consistency verification
     // Ensures that Consumer receives internally consistent parameter snapshots without partial updates
     DspParameterMailbox mailbox;
+    QVERIFY(mailbox.isLockFree());
 
     std::atomic<bool> running{true};
     std::atomic<uint64_t> snapshotCheckCount{0};
     std::atomic<bool> inconsistencyDetected{false};
 
-    // Producer Thread: Writes monotonically increasing generation values across all 32 bands
+    // Producer Thread: Writes monotonically increasing generation values across all 32 bands atomically
     std::thread producerThread([&]() {
         float gen = 1.0f;
         while (running.load(std::memory_order_relaxed)) {
+            std::array<float, 32> gains{};
             for (size_t b = 0; b < 32; ++b) {
-                mailbox.setGeqBandGain(b, gen + static_cast<float>(b) * 0.001f);
+                gains[b] = gen + static_cast<float>(b) * 0.001f;
             }
+            mailbox.setAllGeqBandGains(gains);
             gen += 1.0f;
             std::this_thread::yield();
         }
@@ -705,7 +757,14 @@ void TestPhase2Dsp::testDspParameterMailbox3SlotExchangeSnapshotConsistency()
         ContinuousDspParameters p;
         while (running.load(std::memory_order_relaxed)) {
             if (mailbox.fetchUpdates(p)) {
-                // Check if all modified bands correspond to valid generation
+                // Check if all 32 bands correspond to the exact same generation
+                float baseGen = std::round(p.geqGains[0]);
+                for (size_t b = 0; b < 32; ++b) {
+                    float expected = baseGen + static_cast<float>(b) * 0.001f;
+                    if (std::abs(p.geqGains[b] - expected) > 1e-4f) {
+                        inconsistencyDetected.store(true, std::memory_order_release);
+                    }
+                }
                 snapshotCheckCount.fetch_add(1, std::memory_order_relaxed);
             }
             std::this_thread::yield();
@@ -774,68 +833,206 @@ void TestPhase2Dsp::testDspParameterMailboxBatchApis()
     QCOMPARE(p.peqRightBands[0].gainDb, 2.0f);
 }
 
-void TestPhase2Dsp::testDspContinuousParameterUpdateRtSafety()
+void TestPhase2Dsp::testSingleThreadDspUnitOperation()
 {
-    // P0-14 & P0-17: Continuous DSP reconfiguration on Control Thread while Audio Thread processes
-    // Verifies zero heap allocations in Audio Thread, makeup gain retention, and smooth state updates
+    // Test A (P0-23): Single-thread unit operations for all DSP processors
+    // Verifies configure, process, reset, and parameter retention on a single thread.
+
+    // 1. Compressor
     Compressor comp;
-    comp.configure(48000.0, -12.0, 4.0, 10.0, 100.0, 3.0, 4.0, true);
-    QCOMPARE(comp.makeupGainDb(), 3.0);
+    comp.configure(48000.0, -12.0, 4.0, 10.0, 100.0, 3.5, 4.0, true);
+    QCOMPARE(comp.makeupGainDb(), 3.5);
+    QCOMPARE(comp.thresholdDb(), -12.0);
+    QCOMPARE(comp.ratio(), 4.0);
+    QVERIFY(comp.isEnabled());
 
+    double cL = 0.8, cR = 0.8;
+    for (int i = 0; i < 100; ++i) {
+        comp.process(cL, cR);
+    }
+    QVERIFY(comp.gainReductionDb() >= 0.0);
+    comp.reset();
+
+    // 2. PeakLimiter
     PeakLimiter limiter;
-    limiter.configure(48000.0, -0.5, 40.0, 1.5, true);
+    limiter.configure(48000.0, -0.5, 40.0, 1.0, true);
     QCOMPARE(limiter.ceilingDb(), -0.5);
+    QCOMPARE(limiter.releaseMs(), 40.0);
+    QCOMPARE(limiter.lookaheadMs(), 1.0);
+    QVERIFY(limiter.isEnabled());
+    QVERIFY(limiter.latencyFrames() > 0);
 
+    double hotL = 2.0, hotR = 2.0;
+    for (int i = 0; i < 200; ++i) {
+        limiter.process(hotL, hotR);
+    }
+    double maxCeilingLinear = std::pow(10.0, -0.5 / 20.0);
+    QVERIFY(std::abs(hotL) <= maxCeilingLinear + 1e-4);
+    QVERIFY(std::abs(hotR) <= maxCeilingLinear + 1e-4);
+    limiter.reset();
+
+    // 3. AlgorithmicReverb
     AlgorithmicReverb reverb;
     reverb.configure(48000.0, 0.8, 0.4, 0.3, 10.0, true, true);
     QCOMPARE(reverb.roomSize(), 0.8);
+    QCOMPARE(reverb.wetLevel(), 0.3);
+    QVERIFY(reverb.isTailPreserving());
+    QVERIFY(reverb.isEnabled());
 
-    std::atomic<bool> stopAudio{false};
+    double rL = 0.5, rR = 0.5;
+    for (int i = 0; i < 100; ++i) {
+        reverb.process(rL, rR);
+    }
+    reverb.reset();
+
+    // 4. ParametricEQ, GraphicEQ, HighLowPassFilter
+    ParametricEQ peq;
+    peq.configure(48000.0);
+    peq.setEnabled(true);
+    double pL = 0.5, pR = 0.5;
+    peq.process(pL, pR);
+    peq.reset();
+
+    GraphicEQ geq;
+    geq.configure(48000.0);
+    geq.setEnabled(true);
+    double gL = 0.5, gR = 0.5;
+    geq.process(gL, gR);
+    geq.reset();
+
+    HighLowPassFilter flt;
+    flt.configure(48000.0);
+    flt.setHpfEnabled(true);
+    flt.setLpfEnabled(true);
+    double fL = 0.5, fR = 0.5;
+    flt.process(fL, fR);
+    flt.reset();
+}
+
+void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
+{
+    // Test B (P0-21, P0-23): Prepared DSP Instance Exchange via EpochReclaimer
+    // Verifies architectural pattern: Control Thread prepares a new DSP instance, and exchanges it
+    // into the audio path using EpochReclaimer while Audio Thread processes without locks.
+    auto reclaimer = std::make_unique<EpochReclaimer<Compressor>>();
+    auto initialComp = std::make_unique<Compressor>();
+    initialComp->configure(48000.0, -10.0, 2.0, 10.0, 100.0, 0.0, 2.0, true);
+    QVERIFY(reclaimer->swapChain(std::move(initialComp)));
+
+    std::atomic<bool> stopWorkers{false};
     std::atomic<uint64_t> audioBlocksProcessed{0};
+    std::atomic<uint64_t> instancesExchanged{0};
 
-    // Audio thread
+    // Audio Thread: Wait-Free lock-free access via enterRead
     std::thread audioThread([&]() {
-        double left = 0.4, right = 0.4;
-        while (!stopAudio.load(std::memory_order_relaxed)) {
-            comp.process(left, right);
-            limiter.process(left, right);
-            reverb.process(left, right);
-            audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
+        double left = 0.5, right = 0.5;
+        while (!stopWorkers.load(std::memory_order_relaxed)) {
+            auto guard = reclaimer->enterRead();
+            if (guard.isValid() && guard.chain != nullptr) {
+                guard.chain->process(left, right);
+                audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
+            }
             std::this_thread::yield();
         }
     });
 
-    // Control thread rapidly changes parameters
-    for (int i = 0; i < 100; ++i) {
-        double threshold = -10.0 - (i % 20);
-        double ratio = 2.0 + (i % 6);
-        comp.configure(48000.0, threshold, ratio, 10.0, 100.0, 4.5, 4.0, true);
+    // Control Thread: Rapidly prepares new instances and exchanges them safely
+    std::thread controlThread([&]() {
+        for (int i = 0; i < 50; ++i) {
+            auto prepared = std::make_unique<Compressor>();
+            double thresh = -12.0 - static_cast<double>(i % 10);
+            double makeup = static_cast<double>(i % 5);
+            prepared->configure(48000.0, thresh, 4.0, 10.0, 100.0, makeup, 4.0, true);
 
-        double ceiling = -0.1 - (i % 5) * 0.2;
-        double lookahead = 0.5 + (i % 4) * 0.5;
-        limiter.configure(48000.0, ceiling, 50.0, lookahead, true);
+            if (reclaimer->swapChain(std::move(prepared))) {
+                instancesExchanged.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(300));
+        }
+    });
 
-        double room = 0.5 + (i % 40) * 0.01;
-        reverb.configure(48000.0, room, 0.3, 0.25, 5.0, true, true);
-
-        std::this_thread::sleep_for(std::chrono::microseconds(200));
-    }
-
-    stopAudio.store(true, std::memory_order_relaxed);
+    controlThread.join();
+    stopWorkers.store(true, std::memory_order_relaxed);
     audioThread.join();
 
-    QVERIFY(audioBlocksProcessed.load() > 100);
-    QCOMPARE(comp.makeupGainDb(), 4.5); // Makeup gain maintained!
+    QVERIFY(audioBlocksProcessed.load() > 50);
+    QVERIFY(instancesExchanged.load() > 10);
 
-    // Verify ZERO heap allocations during process() under active reconfiguration
+    // Drain and verify zero leak
+    reclaimer->drainAll();
+    QCOMPARE(reclaimer->retiredCount(), 0u);
+}
+
+void TestPhase2Dsp::testContinuousParameterMailboxUpdates()
+{
+    // Test C (P0-23, P0-25): Rapid continuous parameter updates via Mailbox
+    // Audio Thread fetches parameter snapshots and applies them without locks.
+    DspParameterMailbox mailbox;
+    std::atomic<bool> stopWorkers{false};
+    std::atomic<uint64_t> fetchesCompleted{0};
+
+    // Audio Thread
+    std::thread audioThread([&]() {
+        ContinuousDspParameters p;
+        while (!stopWorkers.load(std::memory_order_relaxed)) {
+            if (mailbox.fetchUpdates(p)) {
+                fetchesCompleted.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // Control Thread: Continuous slider adjustments
+    for (int i = 0; i < 100; ++i) {
+        float gain = -12.0f + static_cast<float>(i % 24);
+        mailbox.setGeqBandGain(static_cast<size_t>(i % 32), gain);
+        mailbox.setFilterParams(30.0f + static_cast<float>(i * 5), 18000.0f, 1, 1, true, true);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+
+    stopWorkers.store(true, std::memory_order_relaxed);
+    audioThread.join();
+
+    QVERIFY(fetchesCompleted.load() > 5);
+    QVERIFY(mailbox.updateCount() >= 100);
+}
+
+void TestPhase2Dsp::testRtSafetyAllocationDuringProcess()
+{
+    // Test D (P0-23): Real-Time Safety - Zero dynamic allocations during Audio process() loop
+    Compressor comp;
+    comp.configure(48000.0, -12.0, 4.0, 10.0, 100.0, 3.0, 4.0, true);
+
+    PeakLimiter limiter;
+    limiter.configure(48000.0, -0.5, 40.0, 1.0, true);
+
+    AlgorithmicReverb reverb;
+    reverb.configure(48000.0, 0.7, 0.3, 0.2, 5.0, true, true);
+
+    ParametricEQ peq;
+    peq.configure(48000.0);
+    peq.setEnabled(true);
+
+    GraphicEQ geq;
+    geq.configure(48000.0);
+    geq.setEnabled(true);
+
+    HighLowPassFilter flt;
+    flt.configure(48000.0);
+    flt.setHpfEnabled(true);
+    flt.setLpfEnabled(true);
+
     s_allocationCount.store(0);
     s_trackAllocations.store(true);
 
     double left = 0.5, right = 0.5;
-    for (int i = 0; i < 5000; ++i) {
+    for (int i = 0; i < 10000; ++i) {
         comp.process(left, right);
         limiter.process(left, right);
         reverb.process(left, right);
+        peq.process(left, right);
+        geq.process(left, right);
+        flt.process(left, right);
     }
 
     s_trackAllocations.store(false);

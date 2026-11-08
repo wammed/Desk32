@@ -366,6 +366,15 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         meta.durationSeconds = (cmd.sampleRate > 0) ? (static_cast<double>(cmd.totalFrames) / cmd.sampleRate) : 0.0;
 
         m_resampler.configure(cmd.sampleRate, cmd.graphRate, 2);
+
+        // P0-26: Re-verify request ID before committing synthetic track state to prevent stale overwrite
+        if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+            if (cmd.openPromise) {
+                try { cmd.openPromise->set_value(false); } catch (...) {}
+            }
+            break;
+        }
+
         {
             std::lock_guard<std::mutex> lock(m_trackMutex);
             m_trackInfo = tInfo;

@@ -25,6 +25,7 @@ private slots:
     void testLimiterLookaheadChangeSampleContinuity();
     void testTelemetrySnapshotThreadSafety();
     void testEpochReclaimerShutdownConcurrentSafety();
+    void testEpochReclaimerWriterShutdownSerialization();
     void cleanupTestCase();
 };
 
@@ -693,6 +694,78 @@ void TestAudioPipeline::testEpochReclaimerShutdownConcurrentSafety()
 
     QVERIFY(successfulReads.load() > 0);
     QVERIFY(rejectedReads.load() > 0);
+}
+
+void TestAudioPipeline::testEpochReclaimerWriterShutdownSerialization()
+{
+    // P0-20: Atomic serialization of swapChain() with drainAll()
+    auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
+    QVERIFY(reclaimer->swapChain(std::make_unique<std::string>("InitialChain")));
+
+    std::atomic<bool> stopWorkers{false};
+    std::atomic<uint64_t> successfulSwaps{0};
+    std::atomic<uint64_t> rejectedSwaps{0};
+    std::atomic<uint64_t> successfulReads{0};
+
+    // 2 Concurrent Reader threads
+    std::vector<std::thread> readers;
+    for (int i = 0; i < 2; ++i) {
+        readers.emplace_back([&]() {
+            while (!stopWorkers.load(std::memory_order_relaxed)) {
+                auto guard = reclaimer->enterRead();
+                if (guard.isValid() && guard.chain != nullptr) {
+                    successfulReads.fetch_add(1, std::memory_order_relaxed);
+                    volatile size_t len = guard.chain->length();
+                    (void)len;
+                }
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    // 2 Concurrent Writer threads attempting continuous swapChain
+    std::vector<std::thread> writers;
+    for (int i = 0; i < 2; ++i) {
+        writers.emplace_back([&, i]() {
+            uint64_t count = 0;
+            while (!stopWorkers.load(std::memory_order_relaxed)) {
+                auto chain = std::make_unique<std::string>("Chain_" + std::to_string(i) + "_" + std::to_string(count++));
+                if (reclaimer->swapChain(std::move(chain))) {
+                    successfulSwaps.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    rejectedSwaps.fetch_add(1, std::memory_order_relaxed);
+                }
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Shutdown while writers and readers are actively working
+    reclaimer->drainAll();
+    QVERIFY(reclaimer->isClosing());
+
+    // Subsequent swapChain MUST be rejected
+    auto lateChain = std::make_unique<std::string>("LateChain");
+    bool swapResult = reclaimer->swapChain(std::move(lateChain));
+    QVERIFY(!swapResult);
+
+    // All retired objects MUST be cleaned up
+    QCOMPARE(reclaimer->retiredCount(), 0u);
+
+    // Subsequent enterRead() MUST return nullptr
+    auto postGuard = reclaimer->enterRead();
+    QVERIFY(!postGuard.isValid());
+    QVERIFY(postGuard.chain == nullptr);
+
+    stopWorkers.store(true, std::memory_order_relaxed);
+    for (auto& w : writers) w.join();
+    for (auto& r : readers) r.join();
+
+    QVERIFY(successfulSwaps.load() > 0);
+    QVERIFY(rejectedSwaps.load() > 0);
+    QVERIFY(successfulReads.load() > 0);
 }
 
 void TestAudioPipeline::cleanupTestCase()

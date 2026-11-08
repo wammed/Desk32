@@ -34,65 +34,55 @@ bool EngineController::initialize() {
     // 1. Initialize 4-Deck Manager
     m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
 
-    // 2. Initialize DSP Nodes (Default to OFF per Specification v3.5 & Technical Debt Instructions)
-    m_peqNode = std::make_shared<engine::pipeline::ParametricEqNode>("Master PEQ", engine::pipeline::NodeAffiliation::RenderCommon);
-    m_peqNode->setBypassed(true);
-    m_peqNode->dsp().setEnabled(false);
-    m_peqNode->dsp().configure(48000.0);
+    // 2. Initialize Control Thread DSP Parameter Snapshots (P0-21)
+    m_uiPeq.configure(48000.0);
+    m_uiPeq.setEnabled(false);
 
-    m_geqNode = std::make_shared<engine::pipeline::GraphicEqNode>("Graphic EQ");
-    m_geqNode->setBypassed(true);
-    m_geqNode->dsp().setEnabled(false);
-    m_geqNode->dsp().configure(48000.0);
+    m_uiGeq.configure(48000.0);
+    m_uiGeq.setEnabled(false);
 
-    m_filterNode = std::make_shared<engine::pipeline::HighLowPassNode>("HPF / LPF");
-    m_filterNode->setBypassed(true);
-    m_filterNode->dsp().setHpfEnabled(false);
-    m_filterNode->dsp().setLpfEnabled(false);
-    m_filterNode->dsp().configure(48000.0);
+    m_uiFilter.configure(48000.0);
+    m_uiFilter.setHpfEnabled(false);
+    m_uiFilter.setLpfEnabled(false);
 
-    m_compNode = std::make_shared<engine::pipeline::CompressorNode>("Compressor");
-    m_compNode->setBypassed(true);
-    m_compNode->dsp().setEnabled(false);
-    m_compNode->dsp().configure(48000.0);
+    m_uiComp.configure(48000.0);
+    m_uiComp.setEnabled(false);
 
-    m_limiterNode = std::make_shared<engine::pipeline::PeakLimiterNode>("Peak Limiter");
-    m_limiterNode->setBypassed(true);
-    m_limiterNode->dsp().setEnabled(false);
-    m_limiterNode->dsp().configure(48000.0);
+    m_uiLimiter.configure(48000.0);
+    m_uiLimiter.setEnabled(false);
 
-    m_reverbNode = std::make_shared<engine::pipeline::ReverbNode>("Reverb");
-    m_reverbNode->setBypassed(true);
-    m_reverbNode->dsp().setEnabled(false);
-    m_reverbNode->dsp().configure(48000.0);
+    m_uiReverb.configure(48000.0);
+    m_uiReverb.setEnabled(false);
+
+    m_uiListeningCorrection.configure(48000.0);
+    m_uiListeningCorrection.setEnabled(true);
+    m_uiListeningCorrection.applyPreset("Monitor Flat");
 
     // Phase 3: External Insert Node (Default to OFF / Bypassed)
     m_insertNode = std::make_shared<engine::insert::ExternalInsertNode>("External Insert", engine::pipeline::NodeAffiliation::RenderCommon);
     m_insertNode->setBypassed(true);
 
-    // Listening Correction PEQ Node (downstream of Logical Render Tap, Section 5.10)
-    m_listeningCorrectionNode = std::make_shared<engine::pipeline::ParametricEqNode>(
-        "Listening Correction", engine::pipeline::NodeAffiliation::ListeningCorrection
-    );
-    m_listeningCorrectionNode->setBypassed(false);
-    m_listeningCorrectionNode->dsp().setEnabled(true);
-    m_listeningCorrectionNode->dsp().configure(48000.0);
-    m_listeningCorrectionNode->dsp().applyPreset("Monitor Flat");
-
-    // 3. Construct Master and Listening Chains with cloned DSP nodes (P0-08: Audio Thread isolated ownership)
+    // 3. Construct Master and Listening Chains with isolated DSP nodes (P0-08, P0-21)
     // Section 5.1: Mastering DSP belongs in Master Chain (upstream of Render Tap)
     auto masterChain = std::make_unique<engine::pipeline::AudioChain>("Master Chain", engine::pipeline::ChainPurpose::MasteringChain);
-    masterChain->appendNode(m_peqNode->clone());
-    masterChain->appendNode(m_geqNode->clone());
-    masterChain->appendNode(m_filterNode->clone());
-    masterChain->appendNode(m_compNode->clone());
+    masterChain->appendNode(std::make_shared<engine::pipeline::ParametricEqNode>("Master PEQ", engine::pipeline::NodeAffiliation::RenderCommon));
+    masterChain->appendNode(std::make_shared<engine::pipeline::GraphicEqNode>("Graphic EQ"));
+    masterChain->appendNode(std::make_shared<engine::pipeline::HighLowPassNode>("HPF / LPF"));
+    masterChain->appendNode(std::make_shared<engine::pipeline::CompressorNode>("Compressor"));
     masterChain->appendNode(m_insertNode->clone());
-    masterChain->appendNode(m_reverbNode->clone());
-    masterChain->appendNode(m_limiterNode->clone());
+    masterChain->appendNode(std::make_shared<engine::pipeline::ReverbNode>("Reverb"));
+    masterChain->appendNode(std::make_shared<engine::pipeline::PeakLimiterNode>("Peak Limiter"));
 
     // Listening Correction Chain strictly contains Listening Correction ONLY
     auto listeningChain = std::make_unique<engine::pipeline::AudioChain>("Listening Chain", engine::pipeline::ChainPurpose::ListeningCorrectionChain);
-    listeningChain->appendNode(m_listeningCorrectionNode->clone());
+    auto listenNode = std::make_shared<engine::pipeline::ParametricEqNode>(
+        "Listening Correction", engine::pipeline::NodeAffiliation::ListeningCorrection
+    );
+    listenNode->setBypassed(false);
+    listenNode->dsp().setEnabled(true);
+    listenNode->dsp().configure(48000.0);
+    listenNode->dsp().applyPreset("Monitor Flat");
+    listeningChain->appendNode(std::move(listenNode));
 
     // 4. Initialize Audio Pipeline with Logical Render Tap
     m_pipeline = std::make_shared<engine::pipeline::AudioPipeline>(48000.0);
@@ -331,7 +321,7 @@ QString EngineController::listeningPresetName() const {
 bool EngineController::listeningCorrectionActive() const {
     if (m_outputRoutingMode.load(std::memory_order_relaxed) != 0) return false;
     if (m_globalDspBypass.load(std::memory_order_relaxed)) return false;
-    return m_listeningCorrectionNode && !m_listeningCorrectionNode->isBypassed();
+    return !m_listeningCorrectionBypassed.load(std::memory_order_relaxed);
 }
 
 int EngineController::externalInsertState() const {
@@ -475,14 +465,15 @@ void EngineController::setGlobalDspBypass(bool bypass) {
                 emit dspQueueOverflowWarning(static_cast<int>(cmdListen.type));
             }
         }
-        if (m_peqNode) m_peqNode->setBypassed(bypass);
-        if (m_geqNode) m_geqNode->setBypassed(bypass);
-        if (m_filterNode) m_filterNode->setBypassed(bypass);
-        if (m_compNode) m_compNode->setBypassed(bypass);
+        m_peqBypassed.store(bypass, std::memory_order_relaxed);
+        m_geqBypassed.store(bypass, std::memory_order_relaxed);
+        m_filterBypassed.store(bypass, std::memory_order_relaxed);
+        m_compBypassed.store(bypass, std::memory_order_relaxed);
+        m_insertBypassed.store(bypass, std::memory_order_relaxed);
+        m_limiterBypassed.store(bypass, std::memory_order_relaxed);
+        m_reverbBypassed.store(bypass, std::memory_order_relaxed);
+        m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
         if (m_insertNode) m_insertNode->setBypassed(bypass);
-        if (m_limiterNode) m_limiterNode->setBypassed(bypass);
-        if (m_reverbNode) m_reverbNode->setBypassed(bypass);
-        if (m_listeningCorrectionNode) m_listeningCorrectionNode->setBypassed(bypass);
         emit globalDspBypassChanged(bypass);
         emit externalInsertStatusChanged();
         emit peqParametersChanged();
@@ -729,34 +720,31 @@ bool EngineController::retreatFolderPrevious(const QString& deckId) {
 
 void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
     if (m_pipeline) {
-        // P0-25, P0-27: Continuous slider parameter update via lock-free DspParameterMailbox
+        // P0-21: Continuous slider parameter update exclusively via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setGeqBandGain(static_cast<size_t>(bandIndex), static_cast<float>(gainDb));
     }
-    if (m_geqNode) {
-        m_geqNode->dsp().setBandGain(static_cast<size_t>(bandIndex), gainDb);
-        emit geqParametersChanged();
-    }
+    // Update Control Thread local UI Snapshot
+    m_uiGeq.setBandGain(static_cast<size_t>(bandIndex), gainDb);
+    emit geqParametersChanged();
 }
 
 double EngineController::getGeqBandGain(int bandIndex) {
-    return m_geqNode ? m_geqNode->dsp().bandGain(static_cast<size_t>(bandIndex)) : 0.0;
+    return (bandIndex >= 0 && bandIndex < 32) ? m_uiGeq.bandGain(static_cast<size_t>(bandIndex)) : 0.0;
 }
 
 void EngineController::resetAllGeqBands() {
     if (m_pipeline) {
-        // P0-25, P0-27: Atomic batch reset via DspParameterMailbox
+        // P0-21: Atomic batch reset exclusively via DspParameterMailbox
         m_pipeline->paramMailbox().resetAllGeqBands();
     }
-    if (m_geqNode) {
-        m_geqNode->dsp().resetAllBands();
-        emit geqParametersChanged();
-        log::LogService::instance().log("DSP", "ResetGEQ", "Success", "Reset all 32 GEQ bands to 0 dB", "DSPNode", "GEQ");
-    }
+    m_uiGeq.resetAllBands();
+    emit geqParametersChanged();
+    log::LogService::instance().log("DSP", "ResetGEQ", "Success", "Reset all 32 GEQ bands to 0 dB", "DSPNode", "GEQ");
 }
 
 QVariantList EngineController::getGeqCurve(int numPoints) {
     QVariantList list;
-    if (!m_geqNode || numPoints < 2) return list;
+    if (numPoints < 2) return list;
 
     std::vector<double> freqs;
     freqs.reserve(static_cast<size_t>(numPoints) + GraphicEQ::NUM_BANDS);
@@ -768,7 +756,7 @@ QVariantList EngineController::getGeqCurve(int numPoints) {
     }
     // Explicitly add exact center frequencies of all bands so each peak is perfectly represented
     for (size_t b = 0; b < GraphicEQ::NUM_BANDS; ++b) {
-        freqs.push_back(m_geqNode->dsp().bandFrequency(b));
+        freqs.push_back(m_uiGeq.bandFrequency(b));
     }
     std::sort(freqs.begin(), freqs.end());
     freqs.erase(std::unique(freqs.begin(), freqs.end(), [](double a, double b) {
@@ -776,7 +764,7 @@ QVariantList EngineController::getGeqCurve(int numPoints) {
     }), freqs.end());
 
     std::vector<double> outDb;
-    m_geqNode->dsp().calculateResponseCurve(freqs, outDb);
+    m_uiGeq.calculateResponseCurve(freqs, outDb);
 
     for (size_t i = 0; i < freqs.size(); ++i) {
         QVariantMap pt;
@@ -789,10 +777,10 @@ QVariantList EngineController::getGeqCurve(int numPoints) {
 
 QVariantMap EngineController::getPeqBand(bool isRightChannel, int bandIndex) {
     QVariantMap map;
-    if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return map;
+    if (bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return map;
 
-    const auto& band = isRightChannel ? m_peqNode->dsp().rightBand(static_cast<size_t>(bandIndex))
-                                      : m_peqNode->dsp().leftBand(static_cast<size_t>(bandIndex));
+    const auto& band = isRightChannel ? m_uiPeq.rightBand(static_cast<size_t>(bandIndex))
+                                      : m_uiPeq.leftBand(static_cast<size_t>(bandIndex));
     map["index"] = bandIndex;
     map["channel"] = isRightChannel ? "Right" : "Left";
     map["enabled"] = band.enabled;
@@ -804,10 +792,10 @@ QVariantMap EngineController::getPeqBand(bool isRightChannel, int bandIndex) {
 }
 
 void EngineController::setPeqBand(bool isRightChannel, int bandIndex, double frequency, double gainDb, double q, int filterType, bool enabled) {
-    if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
+    if (bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
 
     if (m_pipeline) {
-        // P0-25, P0-27: Continuous parameter update via lock-free DspParameterMailbox
+        // P0-21: Continuous parameter update exclusively via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setPeqBand(static_cast<size_t>(bandIndex), isRightChannel ? 1 : 0,
                                               static_cast<float>(frequency), static_cast<float>(gainDb),
                                               static_cast<float>(q), static_cast<uint8_t>(filterType), enabled);
@@ -821,35 +809,35 @@ void EngineController::setPeqBand(bool isRightChannel, int bandIndex, double fre
     cfg.enabled = enabled;
 
     if (isRightChannel) {
-        m_peqNode->dsp().setRightBand(static_cast<size_t>(bandIndex), cfg);
+        m_uiPeq.setRightBand(static_cast<size_t>(bandIndex), cfg);
     } else {
-        m_peqNode->dsp().setLeftBand(static_cast<size_t>(bandIndex), cfg);
+        m_uiPeq.setLeftBand(static_cast<size_t>(bandIndex), cfg);
     }
     emit peqParametersChanged();
 }
 
 void EngineController::setPeqBandEnabled(bool isRightChannel, int bandIndex, bool enabled) {
-    if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
+    if (bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
 
     if (m_pipeline) {
-        // P0-25, P0-27: Update band enable status via DspParameterMailbox
+        // P0-21: Update band enable status exclusively via DspParameterMailbox
         m_pipeline->paramMailbox().setPeqBandEnabled(static_cast<size_t>(bandIndex), isRightChannel ? 1 : 0, enabled);
     }
 
-    auto cfg = isRightChannel ? m_peqNode->dsp().rightBand(static_cast<size_t>(bandIndex))
-                              : m_peqNode->dsp().leftBand(static_cast<size_t>(bandIndex));
+    auto cfg = isRightChannel ? m_uiPeq.rightBand(static_cast<size_t>(bandIndex))
+                              : m_uiPeq.leftBand(static_cast<size_t>(bandIndex));
     cfg.enabled = enabled;
     if (isRightChannel) {
-        m_peqNode->dsp().setRightBand(static_cast<size_t>(bandIndex), cfg);
+        m_uiPeq.setRightBand(static_cast<size_t>(bandIndex), cfg);
     } else {
-        m_peqNode->dsp().setLeftBand(static_cast<size_t>(bandIndex), cfg);
+        m_uiPeq.setLeftBand(static_cast<size_t>(bandIndex), cfg);
     }
     emit peqParametersChanged();
 }
 
 QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
     QVariantList list;
-    if (!m_peqNode || numPoints < 2) return list;
+    if (numPoints < 2) return list;
 
     std::vector<double> freqs(static_cast<size_t>(numPoints));
     for (int i = 0; i < numPoints; ++i) {
@@ -857,7 +845,7 @@ QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
     }
 
     std::vector<double> leftDb, rightDb;
-    m_peqNode->dsp().calculateCompositeResponse(freqs, leftDb, rightDb);
+    m_uiPeq.calculateCompositeResponse(freqs, leftDb, rightDb);
 
     const auto& target = isRightChannel ? rightDb : leftDb;
     for (int i = 0; i < numPoints; ++i) {
@@ -870,73 +858,68 @@ QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
 }
 
 void EngineController::applyPeqPreset(const QString& presetName) {
-    if (m_peqNode) {
-        bool ok = m_peqNode->dsp().applyPreset(presetName.toStdString());
-        if (ok) {
-            if (m_pipeline) {
-                // P0-25, P0-27: Publish entire 24-band PEQ configuration atomically via Mailbox
-                std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> leftBands{};
-                std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> rightBands{};
-                for (size_t b = 0; b < 24; ++b) {
-                    const auto& l = m_peqNode->dsp().leftBand(b);
-                    leftBands[b].frequency = static_cast<float>(l.frequency);
-                    leftBands[b].gainDb = static_cast<float>(l.gainDb);
-                    leftBands[b].Q = static_cast<float>(l.Q);
-                    leftBands[b].type = static_cast<uint8_t>(l.type);
-                    leftBands[b].enabled = l.enabled ? 1 : 0;
-                    leftBands[b].modified = 1;
+    bool ok = m_uiPeq.applyPreset(presetName.toStdString());
+    if (ok) {
+        if (m_pipeline) {
+            // P0-21: Publish entire 24-band PEQ configuration atomically via Mailbox
+            std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> leftBands{};
+            std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> rightBands{};
+            for (size_t b = 0; b < 24; ++b) {
+                const auto& l = m_uiPeq.leftBand(b);
+                leftBands[b].frequency = static_cast<float>(l.frequency);
+                leftBands[b].gainDb = static_cast<float>(l.gainDb);
+                leftBands[b].Q = static_cast<float>(l.Q);
+                leftBands[b].type = static_cast<uint8_t>(l.type);
+                leftBands[b].enabled = l.enabled ? 1 : 0;
+                leftBands[b].modified = 1;
 
-                    const auto& r = m_peqNode->dsp().rightBand(b);
-                    rightBands[b].frequency = static_cast<float>(r.frequency);
-                    rightBands[b].gainDb = static_cast<float>(r.gainDb);
-                    rightBands[b].Q = static_cast<float>(r.Q);
-                    rightBands[b].type = static_cast<uint8_t>(r.type);
-                    rightBands[b].enabled = r.enabled ? 1 : 0;
-                    rightBands[b].modified = 1;
-                }
-                m_pipeline->paramMailbox().applyPeqPreset(leftBands, rightBands);
+                const auto& r = m_uiPeq.rightBand(b);
+                rightBands[b].frequency = static_cast<float>(r.frequency);
+                rightBands[b].gainDb = static_cast<float>(r.gainDb);
+                rightBands[b].Q = static_cast<float>(r.Q);
+                rightBands[b].type = static_cast<uint8_t>(r.type);
+                rightBands[b].enabled = r.enabled ? 1 : 0;
+                rightBands[b].modified = 1;
             }
-            emit peqParametersChanged();
-            log::LogService::instance().log("DSP", "ApplyPEQPreset", "Success", "Applied PEQ Preset: " + presetName, "DSPNode", "PEQ");
+            m_pipeline->paramMailbox().applyPeqPreset(leftBands, rightBands);
         }
+        emit peqParametersChanged();
+        log::LogService::instance().log("DSP", "ApplyPEQPreset", "Success", "Applied PEQ Preset: " + presetName, "DSPNode", "PEQ");
     }
 }
 
 void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope) {
     if (m_pipeline) {
-        // P0-25, P0-27: Continuous parameter update via lock-free DspParameterMailbox
+        // P0-21: Continuous parameter update exclusively via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setFilterParams(static_cast<float>(hpfFreq), static_cast<float>(lpfFreq),
                                                    static_cast<uint8_t>(hpfSlope), static_cast<uint8_t>(lpfSlope),
                                                    hpfOn, lpfOn);
     }
-    if (m_filterNode) {
-        m_filterNode->dsp().setHpfFrequency(hpfFreq);
-        m_filterNode->dsp().setHpfEnabled(hpfOn);
-        m_filterNode->dsp().setHpfSlope(hpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB);
+    m_uiFilter.setHpfFrequency(hpfFreq);
+    m_uiFilter.setHpfEnabled(hpfOn);
+    m_uiFilter.setHpfSlope(hpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB);
 
-        m_filterNode->dsp().setLpfFrequency(lpfFreq);
-        m_filterNode->dsp().setLpfEnabled(lpfOn);
-        m_filterNode->dsp().setLpfSlope(lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB);
+    m_uiFilter.setLpfFrequency(lpfFreq);
+    m_uiFilter.setLpfEnabled(lpfOn);
+    m_uiFilter.setLpfSlope(lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB);
 
-        emit filterParametersChanged();
-    }
+    emit filterParametersChanged();
 }
 
 QVariantMap EngineController::getFilterParams() {
     QVariantMap map;
-    if (!m_filterNode) return map;
-    map["hpfFrequency"] = m_filterNode->dsp().hpfFrequency();
-    map["hpfEnabled"] = m_filterNode->dsp().isHpfEnabled();
-    map["hpfSlope"] = m_filterNode->dsp().hpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1 : 0;
-    map["lpfFrequency"] = m_filterNode->dsp().lpfFrequency();
-    map["lpfEnabled"] = m_filterNode->dsp().isLpfEnabled();
-    map["lpfSlope"] = m_filterNode->dsp().lpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1 : 0;
+    map["hpfFrequency"] = m_uiFilter.hpfFrequency();
+    map["hpfEnabled"] = m_uiFilter.isHpfEnabled();
+    map["hpfSlope"] = m_uiFilter.hpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1 : 0;
+    map["lpfFrequency"] = m_uiFilter.lpfFrequency();
+    map["lpfEnabled"] = m_uiFilter.isLpfEnabled();
+    map["lpfSlope"] = m_uiFilter.lpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1 : 0;
     return map;
 }
 
 QVariantList EngineController::getFilterCurve(int numPoints) {
     QVariantList list;
-    if (!m_filterNode || numPoints < 2) return list;
+    if (numPoints < 2) return list;
 
     std::vector<double> freqs(static_cast<size_t>(numPoints));
     for (int i = 0; i < numPoints; ++i) {
@@ -944,7 +927,7 @@ QVariantList EngineController::getFilterCurve(int numPoints) {
     }
 
     std::vector<double> outDb;
-    m_filterNode->dsp().calculateResponseCurve(freqs, outDb);
+    m_uiFilter.calculateResponseCurve(freqs, outDb);
 
     for (int i = 0; i < numPoints; ++i) {
         QVariantMap pt;
@@ -956,12 +939,11 @@ QVariantList EngineController::getFilterCurve(int numPoints) {
 }
 
 void EngineController::setCompressorParams(double thresholdDb, double ratio, double attackMs, double releaseMs, double makeupDb, double kneeDb) {
-    bool enabled = (m_compNode && !m_compNode->isBypassed());
-    if (m_compNode) {
-        m_compNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                    thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
-        emit compressorParametersChanged();
-    }
+    bool enabled = !m_compBypassed.load(std::memory_order_relaxed);
+    double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
+    m_uiComp.configure(sRate, thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
+    emit compressorParametersChanged();
+
     if (m_pipeline) {
         // P0-14, P0-21: Configure executed on Control Thread and published lock-free via EpochReclaimer
         m_pipeline->updateCompressor(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
@@ -970,25 +952,23 @@ void EngineController::setCompressorParams(double thresholdDb, double ratio, dou
 
 QVariantMap EngineController::getCompressorParams() {
     QVariantMap map;
-    if (!m_compNode) return map;
-    map["thresholdDb"] = m_compNode->thresholdDb();
-    map["ratio"] = m_compNode->ratio();
-    map["attackMs"] = m_compNode->attackMs();
-    map["releaseMs"] = m_compNode->releaseMs();
-    map["makeupGainDb"] = m_compNode->makeupGainDb();
-    map["kneeDb"] = m_compNode->kneeDb();
-    map["enabled"] = m_compNode->isEnabled();
+    map["thresholdDb"] = m_uiComp.thresholdDb();
+    map["ratio"] = m_uiComp.ratio();
+    map["attackMs"] = m_uiComp.attackMs();
+    map["releaseMs"] = m_uiComp.releaseMs();
+    map["makeupGainDb"] = m_uiComp.makeupGainDb();
+    map["kneeDb"] = m_uiComp.kneeDb();
+    map["enabled"] = m_uiComp.isEnabled();
     map["gainReductionDb"] = m_pipeline ? m_pipeline->compressorGainReductionDb() : 0.0;
     return map;
 }
 
 void EngineController::setLimiterParams(double ceilingDb, double releaseMs, double lookaheadMs) {
-    bool enabled = (m_limiterNode && !m_limiterNode->isBypassed());
-    if (m_limiterNode) {
-        m_limiterNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                       ceilingDb, releaseMs, lookaheadMs, enabled);
-        emit limiterParametersChanged();
-    }
+    bool enabled = !m_limiterBypassed.load(std::memory_order_relaxed);
+    double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
+    m_uiLimiter.configure(sRate, ceilingDb, releaseMs, lookaheadMs, enabled);
+    emit limiterParametersChanged();
+
     if (m_pipeline) {
         // P0-14, P0-21: Configure and instance preparation executed on Control Thread
         m_pipeline->updatePeakLimiter(ceilingDb, releaseMs, lookaheadMs, enabled);
@@ -997,23 +977,21 @@ void EngineController::setLimiterParams(double ceilingDb, double releaseMs, doub
 
 QVariantMap EngineController::getLimiterParams() {
     QVariantMap map;
-    if (!m_limiterNode) return map;
-    map["ceilingDb"] = m_limiterNode->ceilingDb();
-    map["releaseMs"] = m_limiterNode->releaseMs();
-    map["lookaheadMs"] = m_limiterNode->lookaheadMs();
-    map["latencyFrames"] = m_pipeline ? m_pipeline->limiterLatencyFrames() : static_cast<int>(m_limiterNode->latencyFrames());
-    map["enabled"] = m_limiterNode->isEnabled();
+    map["ceilingDb"] = m_uiLimiter.ceilingDb();
+    map["releaseMs"] = m_uiLimiter.releaseMs();
+    map["lookaheadMs"] = m_uiLimiter.lookaheadMs();
+    map["latencyFrames"] = m_pipeline ? m_pipeline->limiterLatencyFrames() : static_cast<int>(m_uiLimiter.latencyFrames());
+    map["enabled"] = m_uiLimiter.isEnabled();
     map["gainReductionDb"] = m_pipeline ? m_pipeline->limiterGainReductionDb() : 0.0;
     return map;
 }
 
 void EngineController::setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving) {
-    bool enabled = (m_reverbNode && !m_reverbNode->isBypassed());
-    if (m_reverbNode) {
-        m_reverbNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                      roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
-        emit reverbParametersChanged();
-    }
+    bool enabled = !m_reverbBypassed.load(std::memory_order_relaxed);
+    double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
+    m_uiReverb.configure(sRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
+    emit reverbParametersChanged();
+
     if (m_pipeline) {
         // P0-14, P0-21: Configure and instance preparation executed on Control Thread
         m_pipeline->updateReverb(roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
@@ -1022,13 +1000,12 @@ void EngineController::setReverbParams(double roomSize, double damping, double w
 
 QVariantMap EngineController::getReverbParams() {
     QVariantMap map;
-    if (!m_reverbNode) return map;
-    map["roomSize"] = m_reverbNode->roomSize();
-    map["damping"] = m_reverbNode->damping();
-    map["wetLevel"] = m_pipeline ? m_pipeline->currentTelemetry().reverbWetLevel : m_reverbNode->wetLevel();
-    map["predelayMs"] = m_reverbNode->predelayMs();
-    map["tailPreserving"] = m_reverbNode->isTailPreserving();
-    map["enabled"] = m_reverbNode->isEnabled();
+    map["roomSize"] = m_uiReverb.roomSize();
+    map["damping"] = m_uiReverb.damping();
+    map["wetLevel"] = m_pipeline ? m_pipeline->currentTelemetry().reverbWetLevel : m_uiReverb.wetLevel();
+    map["predelayMs"] = m_uiReverb.predelayMs();
+    map["tailPreserving"] = m_uiReverb.isTailPreserving();
+    map["enabled"] = m_uiReverb.isEnabled();
     return map;
 }
 
@@ -1049,21 +1026,19 @@ void EngineController::setListeningPreset(const QString& presetName) {
             emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
         }
     }
-    if (m_listeningCorrectionNode) {
-        bool ok = m_listeningCorrectionNode->dsp().applyPreset(presetName.toStdString());
-        if (ok) {
-            m_listeningPresetName = presetName;
-            emit listeningPresetChanged(presetName);
-            emit peqParametersChanged();
-            log::LogService::instance().log(
-                "ListeningCorrection",
-                "ApplyPreset",
-                "Success",
-                "Applied Listening Correction preset: " + presetName,
-                "Preset",
-                presetName
-            );
-        }
+    bool ok = m_uiListeningCorrection.applyPreset(presetName.toStdString());
+    if (ok) {
+        m_listeningPresetName = presetName;
+        emit listeningPresetChanged(presetName);
+        emit peqParametersChanged();
+        log::LogService::instance().log(
+            "ListeningCorrection",
+            "ApplyPreset",
+            "Success",
+            "Applied Listening Correction preset: " + presetName,
+            "Preset",
+            presetName
+        );
     }
 }
 
@@ -1074,60 +1049,47 @@ void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
 
     if (nodeName == "PEQ") {
         targetChain = 0; nodeIndex = 0; found = true;
-        if (m_peqNode) {
-            m_peqNode->setBypassed(bypass);
-            m_peqNode->dsp().setEnabled(!bypass);
-            emit peqParametersChanged();
-        }
+        m_peqBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiPeq.setEnabled(!bypass);
+        emit peqParametersChanged();
     } else if (nodeName == "GEQ") {
         targetChain = 0; nodeIndex = 1; found = true;
-        if (m_geqNode) {
-            m_geqNode->setBypassed(bypass);
-            m_geqNode->dsp().setEnabled(!bypass);
-            emit geqParametersChanged();
-        }
+        m_geqBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiGeq.setEnabled(!bypass);
+        emit geqParametersChanged();
     } else if (nodeName == "Filter") {
         targetChain = 0; nodeIndex = 2; found = true;
-        if (m_filterNode) {
-            m_filterNode->setBypassed(bypass);
-            m_filterNode->dsp().setHpfEnabled(!bypass);
-            m_filterNode->dsp().setLpfEnabled(!bypass);
-            emit filterParametersChanged();
-        }
+        m_filterBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiFilter.setHpfEnabled(!bypass);
+        m_uiFilter.setLpfEnabled(!bypass);
+        emit filterParametersChanged();
     } else if (nodeName == "Compressor") {
         targetChain = 0; nodeIndex = 3; found = true;
-        if (m_compNode) {
-            m_compNode->setBypassed(bypass);
-            m_compNode->dsp().setEnabled(!bypass);
-            emit compressorParametersChanged();
-        }
+        m_compBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiComp.setEnabled(!bypass);
+        emit compressorParametersChanged();
     } else if (nodeName == "ExternalInsert" || nodeName == "Insert") {
         targetChain = 0; nodeIndex = 4; found = true;
+        m_insertBypassed.store(bypass, std::memory_order_relaxed);
         if (m_insertNode) {
             m_insertNode->setBypassed(bypass);
-            emit externalInsertStatusChanged();
         }
+        emit externalInsertStatusChanged();
     } else if (nodeName == "Reverb") {
         targetChain = 0; nodeIndex = 5; found = true;
-        if (m_reverbNode) {
-            m_reverbNode->setBypassed(bypass);
-            m_reverbNode->dsp().setEnabled(!bypass);
-            emit reverbParametersChanged();
-        }
+        m_reverbBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiReverb.setEnabled(!bypass);
+        emit reverbParametersChanged();
     } else if (nodeName == "Limiter") {
         targetChain = 0; nodeIndex = 6; found = true;
-        if (m_limiterNode) {
-            m_limiterNode->setBypassed(bypass);
-            m_limiterNode->dsp().setEnabled(!bypass);
-            emit limiterParametersChanged();
-        }
+        m_limiterBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiLimiter.setEnabled(!bypass);
+        emit limiterParametersChanged();
     } else if (nodeName == "ListeningCorrection") {
         targetChain = 1; nodeIndex = 0; found = true;
-        if (m_listeningCorrectionNode) {
-            m_listeningCorrectionNode->setBypassed(bypass);
-            m_listeningCorrectionNode->dsp().setEnabled(!bypass);
-            emit outputRoutingModeChanged(m_outputRoutingMode.load(std::memory_order_relaxed));
-        }
+        m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiListeningCorrection.setEnabled(!bypass);
+        emit outputRoutingModeChanged(m_outputRoutingMode.load(std::memory_order_relaxed));
     }
 
     if (found && m_pipeline) {
@@ -1144,14 +1106,14 @@ void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
 }
 
 bool EngineController::isDspNodeBypassed(const QString& nodeName) {
-    if (nodeName == "PEQ" && m_peqNode) return m_peqNode->isBypassed();
-    if (nodeName == "GEQ" && m_geqNode) return m_geqNode->isBypassed();
-    if (nodeName == "Filter" && m_filterNode) return m_filterNode->isBypassed();
-    if (nodeName == "Compressor" && m_compNode) return m_compNode->isBypassed();
-    if ((nodeName == "ExternalInsert" || nodeName == "Insert") && m_insertNode) return m_insertNode->isBypassed();
-    if (nodeName == "Limiter" && m_limiterNode) return m_limiterNode->isBypassed();
-    if (nodeName == "Reverb" && m_reverbNode) return m_reverbNode->isBypassed();
-    if (nodeName == "ListeningCorrection" && m_listeningCorrectionNode) return m_listeningCorrectionNode->isBypassed();
+    if (nodeName == "PEQ") return m_peqBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "GEQ") return m_geqBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "Filter") return m_filterBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "Compressor") return m_compBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "ExternalInsert" || nodeName == "Insert") return m_insertBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "Limiter") return m_limiterBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "Reverb") return m_reverbBypassed.load(std::memory_order_relaxed);
+    if (nodeName == "ListeningCorrection") return m_listeningCorrectionBypassed.load(std::memory_order_relaxed);
     return false;
 }
 
@@ -1498,7 +1460,7 @@ bool EngineController::applyPresetProfile(const QString& category, const QString
     }
 
     if (category == engine::preset::PresetCategories::MasterDsp) {
-        if (obj.contains("compressor") && m_compNode) {
+        if (obj.contains("compressor")) {
             QJsonObject comp = obj["compressor"].toObject();
             setCompressorParams(
                 comp["threshold_db"].toDouble(-12.0),
@@ -1512,7 +1474,7 @@ bool EngineController::applyPresetProfile(const QString& category, const QString
                 setDspNodeBypass("Compressor", !comp["enabled"].toBool());
             }
         }
-        if (obj.contains("limiter") && m_limiterNode) {
+        if (obj.contains("limiter")) {
             QJsonObject lim = obj["limiter"].toObject();
             setLimiterParams(
                 lim["ceiling_db"].toDouble(-0.1),
@@ -1523,7 +1485,7 @@ bool EngineController::applyPresetProfile(const QString& category, const QString
                 setDspNodeBypass("Limiter", !lim["enabled"].toBool());
             }
         }
-        if (obj.contains("filter") && m_filterNode) {
+        if (obj.contains("filter")) {
             QJsonObject flt = obj["filter"].toObject();
             setFilterParams(
                 flt["hpf_frequency"].toDouble(20.0),
@@ -1554,21 +1516,19 @@ QVariantMap EngineController::captureCurrentStateAsPreset(const QString& categor
     obj["category"] = category;
 
     if (category == engine::preset::PresetCategories::ListeningCorrection) {
-        if (m_listeningCorrectionNode) {
-            QJsonArray bands;
-            for (size_t i = 0; i < 12; ++i) {
-                const auto& b = m_listeningCorrectionNode->dsp().leftBand(i);
-                QJsonObject bo;
-                bo["index"] = static_cast<int>(i);
-                bo["frequency"] = b.frequency;
-                bo["gain_db"] = b.gainDb;
-                bo["q"] = b.Q;
-                bo["type"] = static_cast<int>(b.type);
-                bo["enabled"] = b.enabled;
-                bands.append(bo);
-            }
-            obj["bands"] = bands;
+        QJsonArray bands;
+        for (size_t i = 0; i < 12; ++i) {
+            const auto& b = m_uiListeningCorrection.leftBand(i);
+            QJsonObject bo;
+            bo["index"] = static_cast<int>(i);
+            bo["frequency"] = b.frequency;
+            bo["gain_db"] = b.gainDb;
+            bo["q"] = b.Q;
+            bo["type"] = static_cast<int>(b.type);
+            bo["enabled"] = b.enabled;
+            bands.append(bo);
         }
+        obj["bands"] = bands;
     } else if (category == engine::preset::PresetCategories::ExternalInsert) {
         if (m_insertNode) {
             const auto& cfg = m_insertNode->bridge().config();
@@ -1597,16 +1557,14 @@ QVariantMap EngineController::captureCurrentStateAsPreset(const QString& categor
 // =========================================================================
 
 void EngineController::syncMasterDspToRenderEngine() {
-    if (m_peqNode && m_geqNode && m_filterNode && m_compNode && m_reverbNode && m_limiterNode) {
-        m_renderEngine.templateChain().copyParametersFrom(
-            m_peqNode->dsp(),
-            m_geqNode->dsp(),
-            m_filterNode->dsp(),
-            m_compNode->dsp(),
-            m_reverbNode->dsp(),
-            m_limiterNode->dsp()
-        );
-    }
+    m_renderEngine.templateChain().copyParametersFrom(
+        m_uiPeq,
+        m_uiGeq,
+        m_uiFilter,
+        m_uiComp,
+        m_uiReverb,
+        m_uiLimiter
+    );
 }
 
 QString EngineController::startTrackRender(const QString& deckId, int bitDepth, int rateMode, double customRate, bool applyDither, bool enableDsp) {

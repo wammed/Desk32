@@ -91,6 +91,7 @@ public:
     [[nodiscard]] uint64_t underrunCount() const noexcept { return m_underrunCount.load(std::memory_order_relaxed); }
     [[nodiscard]] OpenStatus lastOpenStatus() const noexcept { return m_lastOpenStatus.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t activeRequestId() const noexcept { return m_activeRequestId.load(std::memory_order_acquire); }
+    [[nodiscard]] bool isSynthetic() const noexcept { return m_isSynthetic.load(std::memory_order_acquire); }
 
     /// Thread-safe copy of track info (P0-05)
     [[nodiscard]] WorkerTrackInfo trackInfo() const {

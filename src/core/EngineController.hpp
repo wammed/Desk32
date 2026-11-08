@@ -11,6 +11,12 @@
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
+#include "engine/dsp/ParametricEQ.hpp"
+#include "engine/dsp/GraphicEQ.hpp"
+#include "engine/dsp/HighLowPassFilter.hpp"
+#include "engine/dsp/Compressor.hpp"
+#include "engine/dsp/PeakLimiter.hpp"
+#include "engine/dsp/AlgorithmicReverb.hpp"
 #include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/preset/PresetManager.hpp"
 #include "engine/render/RenderEngine.hpp"
@@ -250,13 +256,26 @@ private:
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
     std::unique_ptr<engine::backend::PipeWireAudioOutput> m_audioOutput;
 
-    // DSP Nodes
-    std::shared_ptr<engine::pipeline::ParametricEqNode> m_peqNode;
-    std::shared_ptr<engine::pipeline::GraphicEqNode> m_geqNode;
-    std::shared_ptr<engine::pipeline::HighLowPassNode> m_filterNode;
-    std::shared_ptr<engine::pipeline::CompressorNode> m_compNode;
-    std::shared_ptr<engine::pipeline::PeakLimiterNode> m_limiterNode;
-    std::shared_ptr<engine::pipeline::ReverbNode> m_reverbNode;
+    // Control Thread UI Parameter Snapshots & Response Curve Calculators (P0-21)
+    // Strictly owned by Control Thread and completely separated from running AudioChain DSP nodes.
+    ParametricEQ m_uiPeq;
+    GraphicEQ m_uiGeq;
+    HighLowPassFilter m_uiFilter;
+    Compressor m_uiComp;
+    PeakLimiter m_uiLimiter;
+    AlgorithmicReverb m_uiReverb;
+    ParametricEQ m_uiListeningCorrection;
+    QString m_listeningPresetName{"Monitor Flat"};
+
+    // Node bypass state tracking for Control Thread / UI display
+    std::atomic<bool> m_peqBypassed{true};
+    std::atomic<bool> m_geqBypassed{true};
+    std::atomic<bool> m_filterBypassed{true};
+    std::atomic<bool> m_compBypassed{true};
+    std::atomic<bool> m_insertBypassed{true};
+    std::atomic<bool> m_limiterBypassed{true};
+    std::atomic<bool> m_reverbBypassed{true};
+    std::atomic<bool> m_listeningCorrectionBypassed{false};
 
     // Phase 3: External Insert Node
     std::shared_ptr<engine::insert::ExternalInsertNode> m_insertNode;
@@ -266,10 +285,6 @@ private:
 
     // Phase 4: Export & Render Engine
     engine::render::RenderEngine& m_renderEngine;
-
-    // Listening Correction PEQ Node (downstream of Logical Render Tap, Section 5.10 & 5.11)
-    std::shared_ptr<engine::pipeline::ParametricEqNode> m_listeningCorrectionNode;
-    QString m_listeningPresetName{"Monitor Flat"};
 
     std::atomic<int> m_switchingMode{0}; // 0 = Normal, 1 = Comparative
     std::atomic<int> m_outputRoutingMode{0}; // 0 = Listening, 1 = RenderMonitor
