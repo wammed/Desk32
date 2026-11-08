@@ -28,6 +28,8 @@ struct WorkerTrackInfo {
 enum class WorkerCommandType : uint8_t {
     None = 0,
     Open,
+    OpenSynthetic,
+    CloseTrack,
     Seek,
     Play,
     Pause,
@@ -38,7 +40,9 @@ enum class WorkerCommandType : uint8_t {
 struct WorkerCommand {
     WorkerCommandType type = WorkerCommandType::None;
     std::string path;
+    double sampleRate = 44100.0;
     double graphRate = 48000.0;
+    uint64_t totalFrames = 0;
     int64_t targetFrame = 0;
     uint64_t sequence = 0;
     bool isSynthetic = false;
@@ -61,6 +65,7 @@ public:
     // Control Thread APIs
     bool openTrack(const std::string& filePath, double graphSampleRate);
     bool openSyntheticTrack(uint64_t totalFrames, double sampleRate, double graphSampleRate, const std::string& path = "synthetic://sine");
+    void closeTrack();
     void play() noexcept;
     void pause() noexcept;
     void stop() noexcept;

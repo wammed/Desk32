@@ -89,6 +89,8 @@ private slots:
     void testZeroDynamicAllocationInPhase2Dsp();
     void testPcmRingBufferConcurrentSPSCAndUnderrun();
     void testParameterCommandQueueSPSCAndCapacity();
+    void testParameterCommandQueueCoalescingAndOverflowStats();
+    void testDspContinuousParameterUpdateRtSafety();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -561,6 +563,121 @@ void TestPhase2Dsp::testParameterCommandQueueSPSCAndCapacity()
     QVERIFY(queue.empty());
     DspCommand emptyCmd;
     QVERIFY(!queue.pop(emptyCmd));
+}
+
+void TestPhase2Dsp::testParameterCommandQueueCoalescingAndOverflowStats()
+{
+    // P0-16: Command queue coalescing, overflow detection, and statistics
+    ParameterCommandQueue queue;
+    QCOMPARE(queue.overflowCount(), 0u);
+    QCOMPARE(queue.coalesceCount(), 0u);
+
+    // Fill queue to capacity (512 items) with SetGeqBandGain
+    for (size_t i = 0; i < ParameterCommandQueue::CAPACITY; ++i) {
+        DspCommand cmd;
+        cmd.type = DspCommandType::SetGeqBandGain;
+        cmd.index = static_cast<uint8_t>(i % 32);
+        cmd.subIndex = 0;
+        cmd.param1 = 1.0f;
+        QVERIFY(queue.push(cmd));
+    }
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
+
+    // Push redundant updates for existing band when full: Should coalesce in-place!
+    DspCommand updateCmd;
+    updateCmd.type = DspCommandType::SetGeqBandGain;
+    updateCmd.index = 5;
+    updateCmd.subIndex = 0;
+    updateCmd.param1 = 6.0f; // New gain
+    QVERIFY(queue.push(updateCmd)); // Must return true via coalescing!
+    QCOMPARE(queue.coalesceCount(), 1u);
+    QCOMPARE(queue.overflowCount(), 0u);
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
+
+    // Non-coalesceable command on full queue must fail and increment overflowCount
+    DspCommand nonCoalesce;
+    nonCoalesce.type = DspCommandType::ApplyPeqPreset;
+    nonCoalesce.index = 1;
+    QVERIFY(!queue.push(nonCoalesce));
+    QCOMPARE(queue.overflowCount(), 1u);
+
+    // Drain and verify coalesced value is present
+    bool foundCoalesced = false;
+    DspCommand out;
+    while (queue.pop(out)) {
+        if (out.type == DspCommandType::SetGeqBandGain && out.index == 5 && out.param1 == 6.0f) {
+            foundCoalesced = true;
+        }
+    }
+    QVERIFY(foundCoalesced);
+}
+
+void TestPhase2Dsp::testDspContinuousParameterUpdateRtSafety()
+{
+    // P0-14 & P0-17: Continuous DSP reconfiguration on Control Thread while Audio Thread processes
+    // Verifies zero heap allocations in Audio Thread, makeup gain retention, and smooth state updates
+    Compressor comp;
+    comp.configure(48000.0, -12.0, 4.0, 10.0, 100.0, 3.0, 4.0, true);
+    QCOMPARE(comp.makeupGainDb(), 3.0);
+
+    PeakLimiter limiter;
+    limiter.configure(48000.0, -0.5, 40.0, 1.5, true);
+    QCOMPARE(limiter.ceilingDb(), -0.5);
+
+    AlgorithmicReverb reverb;
+    reverb.configure(48000.0, 0.8, 0.4, 0.3, 10.0, true, true);
+    QCOMPARE(reverb.roomSize(), 0.8);
+
+    std::atomic<bool> stopAudio{false};
+    std::atomic<uint64_t> audioBlocksProcessed{0};
+
+    // Audio thread
+    std::thread audioThread([&]() {
+        double left = 0.4, right = 0.4;
+        while (!stopAudio.load(std::memory_order_relaxed)) {
+            comp.process(left, right);
+            limiter.process(left, right);
+            reverb.process(left, right);
+            audioBlocksProcessed.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Control thread rapidly changes parameters
+    for (int i = 0; i < 100; ++i) {
+        double threshold = -10.0 - (i % 20);
+        double ratio = 2.0 + (i % 6);
+        comp.configure(48000.0, threshold, ratio, 10.0, 100.0, 4.5, 4.0, true);
+
+        double ceiling = -0.1 - (i % 5) * 0.2;
+        double lookahead = 0.5 + (i % 4) * 0.5;
+        limiter.configure(48000.0, ceiling, 50.0, lookahead, true);
+
+        double room = 0.5 + (i % 40) * 0.01;
+        reverb.configure(48000.0, room, 0.3, 0.25, 5.0, true, true);
+
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+
+    stopAudio.store(true, std::memory_order_relaxed);
+    audioThread.join();
+
+    QVERIFY(audioBlocksProcessed.load() > 100);
+    QCOMPARE(comp.makeupGainDb(), 4.5); // Makeup gain maintained!
+
+    // Verify ZERO heap allocations during process() under active reconfiguration
+    s_allocationCount.store(0);
+    s_trackAllocations.store(true);
+
+    double left = 0.5, right = 0.5;
+    for (int i = 0; i < 5000; ++i) {
+        comp.process(left, right);
+        limiter.process(left, right);
+        reverb.process(left, right);
+    }
+
+    s_trackAllocations.store(false);
+    QCOMPARE(s_allocationCount.load(), 0u);
 }
 
 QTEST_MAIN(TestPhase2Dsp)

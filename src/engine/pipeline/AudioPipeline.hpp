@@ -41,22 +41,32 @@ public:
     [[nodiscard]] double graphSampleRate() const noexcept { return m_graphSampleRate.load(std::memory_order_relaxed); }
 
     /// Reconfigure graph sample rate safely without mutating live running chains in-place.
-    /// Builds fresh chains with deep-cloned nodes configured at the new rate, atomically swaps via EpochReclaimer (P0-08).
+    /// Builds fresh chains with deep-cloned nodes configured at the new rate, atomically swaps via EpochReclaimer (P0-08, P0-13).
     void setGraphSampleRate(double sampleRate) {
         m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
 
-        // Safely reconfigure Master Chain via atomic swap with cloned nodes
-        auto* currentMaster = m_masterReclaimer.current();
-        if (currentMaster) {
-            auto newMaster = currentMaster->clone();
+        // Safely deep-clone Master Chain under ReadGuard protection, then configure and swap
+        std::unique_ptr<AudioChain> newMaster;
+        {
+            auto guard = m_masterReclaimer.enterRead();
+            if (guard) {
+                newMaster = guard->clone();
+            }
+        }
+        if (newMaster) {
             newMaster->configure(sampleRate);
             m_masterReclaimer.swapChain(std::move(newMaster));
         }
 
-        // Safely reconfigure Listening Chain via atomic swap with cloned nodes
-        auto* currentListening = m_listeningReclaimer.current();
-        if (currentListening) {
-            auto newListening = currentListening->clone();
+        // Safely deep-clone Listening Chain under ReadGuard protection, then configure and swap
+        std::unique_ptr<AudioChain> newListening;
+        {
+            auto guard = m_listeningReclaimer.enterRead();
+            if (guard) {
+                newListening = guard->clone();
+            }
+        }
+        if (newListening) {
             newListening->configure(sampleRate);
             m_listeningReclaimer.swapChain(std::move(newListening));
         }
@@ -72,10 +82,10 @@ public:
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
     [[nodiscard]] double compressorGainReductionDb() const noexcept {
-        auto* master = m_masterReclaimer.current();
-        if (!master || master->isBypassed()) return 0.0;
-        for (size_t i = 0; i < master->nodeCount(); ++i) {
-            if (auto* comp = dynamic_cast<CompressorNode*>(master->node(i))) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (!guard || guard->isBypassed()) return 0.0;
+        for (size_t i = 0; i < guard->nodeCount(); ++i) {
+            if (auto* comp = dynamic_cast<CompressorNode*>(guard->node(i))) {
                 return comp->isBypassed() ? 0.0 : comp->dsp().gainReductionDb();
             }
         }
@@ -83,10 +93,10 @@ public:
     }
 
     [[nodiscard]] double limiterGainReductionDb() const noexcept {
-        auto* master = m_masterReclaimer.current();
-        if (!master || master->isBypassed()) return 0.0;
-        for (size_t i = 0; i < master->nodeCount(); ++i) {
-            if (auto* lim = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (!guard || guard->isBypassed()) return 0.0;
+        for (size_t i = 0; i < guard->nodeCount(); ++i) {
+            if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
                 return lim->isBypassed() ? 0.0 : lim->dsp().gainReductionDb();
             }
         }
@@ -94,10 +104,10 @@ public:
     }
 
     [[nodiscard]] int limiterLatencyFrames() const noexcept {
-        auto* master = m_masterReclaimer.current();
-        if (!master || master->isBypassed()) return 0;
-        for (size_t i = 0; i < master->nodeCount(); ++i) {
-            if (auto* lim = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (!guard || guard->isBypassed()) return 0;
+        for (size_t i = 0; i < guard->nodeCount(); ++i) {
+            if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
                 return lim->isBypassed() ? 0 : static_cast<int>(lim->latencyFrames());
             }
         }
@@ -119,6 +129,49 @@ public:
         if (!newChain || newChain->purpose() != ChainPurpose::ListeningCorrectionChain) return;
         newChain->configure(m_graphSampleRate.load(std::memory_order_relaxed));
         m_listeningReclaimer.swapChain(std::move(newChain));
+    }
+
+    /// Control Thread DSP configuration methods (P0-14):
+    /// Calculations, exponentiation, buffer sizing, and state publication occur strictly on Control Thread.
+    void updateCompressor(double thresholdDb, double ratio, double attackMs, double releaseMs,
+                          double makeupDb, double kneeDb, bool enabled) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (guard) {
+            for (size_t i = 0; i < guard->nodeCount(); ++i) {
+                if (auto* comp = dynamic_cast<CompressorNode*>(guard->node(i))) {
+                    comp->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                          thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
+                    break;
+                }
+            }
+        }
+    }
+
+    void updatePeakLimiter(double ceilingDb, double releaseMs, double lookaheadMs, bool enabled) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (guard) {
+            for (size_t i = 0; i < guard->nodeCount(); ++i) {
+                if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
+                    lim->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                         ceilingDb, releaseMs, lookaheadMs, enabled);
+                    break;
+                }
+            }
+        }
+    }
+
+    void updateReverb(double roomSize, double damping, double wetLevel, double predelayMs,
+                      bool tailPreserving, bool enabled) {
+        auto guard = m_masterReclaimer.enterRead();
+        if (guard) {
+            for (size_t i = 0; i < guard->nodeCount(); ++i) {
+                if (auto* rev = dynamic_cast<ReverbNode*>(guard->node(i))) {
+                    rev->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                                         roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
+                    break;
+                }
+            }
+        }
     }
 
     /// Trigger periodic epoch reclamation outside Audio Thread (Control / Worker Thread)
@@ -294,16 +347,11 @@ private:
             }
             break;
         case dsp::DspCommandType::SetCompressorParams:
+            // P0-14: Structural and mathematical configure is handled exclusively on Control Thread
+            // via updateCompressor() to maintain strict Audio Thread real-time safety.
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* compNode = dynamic_cast<CompressorNode*>(master->node(i))) {
-                        compNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
-                                                  static_cast<double>(cmd.param1),
-                                                  static_cast<double>(cmd.param2),
-                                                  static_cast<double>(cmd.param3),
-                                                  static_cast<double>(cmd.param4),
-                                                  static_cast<double>(cmd.param6),
-                                                  static_cast<double>(cmd.param5));
                         compNode->dsp().setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
@@ -311,13 +359,10 @@ private:
             }
             break;
         case dsp::DspCommandType::SetLimiterParams:
+            // P0-14: Lookahead buffer and ceiling configure handled on Control Thread via updatePeakLimiter()
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* limiterNode = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
-                        limiterNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
-                                                     static_cast<double>(cmd.param1),
-                                                     static_cast<double>(cmd.param2),
-                                                     static_cast<double>(cmd.param3));
                         limiterNode->dsp().setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
@@ -325,15 +370,10 @@ private:
             }
             break;
         case dsp::DspCommandType::SetReverbParams:
+            // P0-14: Reverb comb filter & delay buffer configure handled on Control Thread via updateReverb()
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* reverbNode = dynamic_cast<ReverbNode*>(master->node(i))) {
-                        reverbNode->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
-                                                    static_cast<double>(cmd.param1),
-                                                    static_cast<double>(cmd.param2),
-                                                    static_cast<double>(cmd.param3),
-                                                    static_cast<double>(cmd.param4),
-                                                    cmd.boolFlag2 != 0);
                         reverbNode->dsp().setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
@@ -374,8 +414,8 @@ private:
 
     dsp::ParameterCommandQueue m_paramQueue;
 
-    EpochReclaimer<AudioChain> m_masterReclaimer;
-    EpochReclaimer<AudioChain> m_listeningReclaimer;
+    mutable EpochReclaimer<AudioChain> m_masterReclaimer;
+    mutable EpochReclaimer<AudioChain> m_listeningReclaimer;
 };
 
 } // namespace desk32::engine::pipeline

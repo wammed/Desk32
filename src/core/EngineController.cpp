@@ -461,13 +461,19 @@ void EngineController::setGlobalDspBypass(bool bypass) {
             cmdMaster.type = engine::dsp::DspCommandType::SetGlobalBypass;
             cmdMaster.subIndex = 0; // Master
             cmdMaster.boolFlag1 = bypass ? 1 : 0;
-            m_pipeline->paramQueue().push(cmdMaster);
+            if (!m_pipeline->paramQueue().push(cmdMaster)) {
+                log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Master global bypass push queue full", "DSPQueue", "Pipeline");
+                emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
+            }
 
             engine::dsp::DspCommand cmdListen;
             cmdListen.type = engine::dsp::DspCommandType::SetGlobalBypass;
             cmdListen.subIndex = 1; // Listening
             cmdListen.boolFlag1 = bypass ? 1 : 0;
-            m_pipeline->paramQueue().push(cmdListen);
+            if (!m_pipeline->paramQueue().push(cmdListen)) {
+                log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Listen global bypass push queue full", "DSPQueue", "Pipeline");
+                emit dspQueueOverflowWarning(static_cast<int>(cmdListen.type));
+            }
         }
         if (m_peqNode) m_peqNode->setBypassed(bypass);
         if (m_geqNode) m_geqNode->setBypassed(bypass);
@@ -727,7 +733,10 @@ void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
         cmd.type = engine::dsp::DspCommandType::SetGeqBandGain;
         cmd.index = static_cast<uint8_t>(bandIndex);
         cmd.param1 = static_cast<float>(gainDb);
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "GEQ band gain push queue full", "DSPQueue", "GEQ");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
     if (m_geqNode) {
         m_geqNode->dsp().setBandGain(static_cast<size_t>(bandIndex), gainDb);
@@ -743,7 +752,10 @@ void EngineController::resetAllGeqBands() {
     if (m_pipeline) {
         engine::dsp::DspCommand cmd;
         cmd.type = engine::dsp::DspCommandType::ResetAllGeqBands;
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Reset all GEQ bands push queue full", "DSPQueue", "GEQ");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
     if (m_geqNode) {
         m_geqNode->dsp().resetAllBands();
@@ -814,7 +826,10 @@ void EngineController::setPeqBand(bool isRightChannel, int bandIndex, double fre
         cmd.param1 = static_cast<float>(frequency);
         cmd.param2 = static_cast<float>(gainDb);
         cmd.param3 = static_cast<float>(q);
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "PEQ band push queue full", "DSPQueue", "PEQ");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
 
     ParametricEQ::BandConfig cfg;
@@ -841,7 +856,10 @@ void EngineController::setPeqBandEnabled(bool isRightChannel, int bandIndex, boo
         cmd.index = static_cast<uint8_t>(bandIndex);
         cmd.subIndex = isRightChannel ? 1 : 0;
         cmd.boolFlag1 = enabled ? 1 : 0;
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "PEQ band enable push queue full", "DSPQueue", "PEQ");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
 
     auto cfg = isRightChannel ? m_peqNode->dsp().rightBand(static_cast<size_t>(bandIndex))
@@ -885,7 +903,10 @@ void EngineController::applyPeqPreset(const QString& presetName) {
         cmd.type = engine::dsp::DspCommandType::ApplyPeqPreset;
         cmd.index = static_cast<uint8_t>(idx);
         cmd.subIndex = 0; // 0 = Master PEQ
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Apply PEQ preset push queue full", "DSPQueue", "PEQ");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
     if (m_peqNode) {
         bool ok = m_peqNode->dsp().applyPreset(presetName.toStdString());
@@ -906,7 +927,10 @@ void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope,
         cmd.intParam2 = (lpfSlope == 1) ? 1 : 0;
         cmd.param1 = static_cast<float>(hpfFreq);
         cmd.param2 = static_cast<float>(lpfFreq);
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Filter params push queue full", "DSPQueue", "Filter");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
     if (m_filterNode) {
         m_filterNode->dsp().setHpfFrequency(hpfFreq);
@@ -955,22 +979,15 @@ QVariantList EngineController::getFilterCurve(int numPoints) {
 }
 
 void EngineController::setCompressorParams(double thresholdDb, double ratio, double attackMs, double releaseMs, double makeupDb, double kneeDb) {
-    if (m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetCompressorParams;
-        cmd.boolFlag1 = (m_compNode && !m_compNode->isBypassed()) ? 1 : 0;
-        cmd.param1 = static_cast<float>(thresholdDb);
-        cmd.param2 = static_cast<float>(ratio);
-        cmd.param3 = static_cast<float>(attackMs);
-        cmd.param4 = static_cast<float>(releaseMs);
-        cmd.param5 = static_cast<float>(kneeDb);
-        cmd.param6 = static_cast<float>(makeupDb);
-        m_pipeline->paramQueue().push(cmd);
-    }
+    bool enabled = (m_compNode && !m_compNode->isBypassed());
     if (m_compNode) {
         m_compNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                    thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb);
+                                    thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
         emit compressorParametersChanged();
+    }
+    if (m_pipeline) {
+        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        m_pipeline->updateCompressor(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
     }
 }
 
@@ -989,19 +1006,15 @@ QVariantMap EngineController::getCompressorParams() {
 }
 
 void EngineController::setLimiterParams(double ceilingDb, double releaseMs, double lookaheadMs) {
-    if (m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetLimiterParams;
-        cmd.boolFlag1 = (m_limiterNode && !m_limiterNode->isBypassed()) ? 1 : 0;
-        cmd.param1 = static_cast<float>(ceilingDb);
-        cmd.param2 = static_cast<float>(releaseMs);
-        cmd.param3 = static_cast<float>(lookaheadMs);
-        m_pipeline->paramQueue().push(cmd);
-    }
+    bool enabled = (m_limiterNode && !m_limiterNode->isBypassed());
     if (m_limiterNode) {
         m_limiterNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                      ceilingDb, releaseMs, lookaheadMs);
+                                      ceilingDb, releaseMs, lookaheadMs, enabled);
         emit limiterParametersChanged();
+    }
+    if (m_pipeline) {
+        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        m_pipeline->updatePeakLimiter(ceilingDb, releaseMs, lookaheadMs, enabled);
     }
 }
 
@@ -1018,21 +1031,15 @@ QVariantMap EngineController::getLimiterParams() {
 }
 
 void EngineController::setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving) {
-    if (m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetReverbParams;
-        cmd.boolFlag1 = (m_reverbNode && !m_reverbNode->isBypassed()) ? 1 : 0;
-        cmd.boolFlag2 = tailPreserving ? 1 : 0;
-        cmd.param1 = static_cast<float>(roomSize);
-        cmd.param2 = static_cast<float>(damping);
-        cmd.param3 = static_cast<float>(wetLevel);
-        cmd.param4 = static_cast<float>(predelayMs);
-        m_pipeline->paramQueue().push(cmd);
-    }
+    bool enabled = (m_reverbNode && !m_reverbNode->isBypassed());
     if (m_reverbNode) {
         m_reverbNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                      roomSize, damping, wetLevel, predelayMs, tailPreserving);
+                                      roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
         emit reverbParametersChanged();
+    }
+    if (m_pipeline) {
+        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        m_pipeline->updateReverb(roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
     }
 }
 
@@ -1060,7 +1067,10 @@ void EngineController::setListeningPreset(const QString& presetName) {
         cmd.type = engine::dsp::DspCommandType::ApplyPeqPreset;
         cmd.index = static_cast<uint8_t>(idx);
         cmd.subIndex = 1; // 1 = Listening correction
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Listening preset push queue full", "DSPQueue", "ListeningCorrection");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
     if (m_listeningCorrectionNode) {
         bool ok = m_listeningCorrectionNode->dsp().applyPreset(presetName.toStdString());
@@ -1149,7 +1159,10 @@ void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
         cmd.index = nodeIndex;
         cmd.subIndex = targetChain;
         cmd.boolFlag1 = bypass ? 1 : 0;
-        m_pipeline->paramQueue().push(cmd);
+        if (!m_pipeline->paramQueue().push(cmd)) {
+            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Set node bypass push queue full", "DSPQueue", "Pipeline");
+            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+        }
     }
 }
 

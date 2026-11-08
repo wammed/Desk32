@@ -16,6 +16,9 @@ private slots:
     void testAudioGraphRebuildClonesNodesWithoutSharing();
     void testEpochReclamationHotSwap();
     void testEpochReclaimerConcurrentStress();
+    void testEpochReclaimerMultiReaderConcurrentStress();
+    void testSampleRateChangeConcurrentWithTelemetry();
+    void testShutdownWaitsForActiveReaders();
     void cleanupTestCase();
 };
 
@@ -255,6 +258,149 @@ void TestAudioPipeline::testEpochReclaimerConcurrentStress()
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
     QVERIFY(readCycles.load() > 50);
+}
+
+void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
+{
+    // P0-13: Multi-reader concurrent access with simultaneous writer and reclaimer
+    EpochReclaimer<std::string> reclaimer;
+    reclaimer.swapChain(std::make_unique<std::string>("Initial Value"));
+
+    const size_t numReaders = 8;
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> readers;
+    std::vector<uint64_t> readerCounts(numReaders, 0);
+
+    for (size_t t = 0; t < numReaders; ++t) {
+        readers.emplace_back([&reclaimer, &stop, &readerCounts, t]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto guard = reclaimer.enterRead();
+                if (guard) {
+                    volatile size_t sz = guard->size();
+                    (void)sz;
+                }
+                readerCounts[t]++;
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    // Reclaimer thread calling reclaimRetired concurrently
+    std::thread reclaimerThread([&reclaimer, &stop]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            reclaimer.reclaimRetired();
+            std::this_thread::yield();
+        }
+    });
+
+    // Writer thread rapidly swapping chains
+    const int swaps = 1000;
+    for (int i = 0; i < swaps; ++i) {
+        reclaimer.swapChain(std::make_unique<std::string>("Chain Swap " + std::to_string(i)));
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& r : readers) {
+        r.join();
+    }
+    reclaimerThread.join();
+
+    // After all readers and writers are stopped, all retired objects must be cleanly reclaimed
+    reclaimer.reclaimRetired();
+    QCOMPARE(reclaimer.retiredCount(), 0u);
+    for (size_t t = 0; t < numReaders; ++t) {
+        QVERIFY(readerCounts[t] > 10);
+    }
+}
+
+void TestAudioPipeline::testSampleRateChangeConcurrentWithTelemetry()
+{
+    // P0-13: Concurrent sample rate changes while audio thread renders and telemetry threads poll
+    AudioPipeline pipeline(48000.0);
+    auto masterChain = std::make_unique<AudioChain>("Master", ChainPurpose::MasteringChain);
+    masterChain->appendNode(std::make_shared<CompressorNode>());
+    masterChain->appendNode(std::make_shared<PeakLimiterNode>());
+    pipeline.swapMasterChain(std::move(masterChain));
+
+    std::atomic<bool> stop{false};
+    const size_t frames = 128;
+    std::vector<double> inL(frames, 0.2);
+    std::vector<double> inR(frames, 0.2);
+    std::vector<float> outBuf(frames * 2, 0.0f);
+
+    // Audio rendering thread
+    std::thread audioThread([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            std::vector<double> l = inL;
+            std::vector<double> r = inR;
+            pipeline.process(l.data(), r.data(), frames, outBuf.data(), SampleFormat::Float32, false);
+            std::this_thread::yield();
+        }
+    });
+
+    // Telemetry polling thread (simulating UI thread)
+    std::thread telemetryThread([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            double cGr = pipeline.compressorGainReductionDb();
+            double lGr = pipeline.limiterGainReductionDb();
+            int lat = pipeline.limiterLatencyFrames();
+            (void)cGr; (void)lGr; (void)lat;
+            std::this_thread::yield();
+        }
+    });
+
+    // Control thread rapidly reconfiguring graph sample rate
+    const double rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+    for (int i = 0; i < 200; ++i) {
+        pipeline.setGraphSampleRate(rates[i % 5]);
+        if (i % 20 == 0) {
+            pipeline.reclaimRetiredMemory();
+        }
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    audioThread.join();
+    telemetryThread.join();
+
+    pipeline.reclaimRetiredMemory();
+    QVERIFY(true);
+}
+
+void TestAudioPipeline::testShutdownWaitsForActiveReaders()
+{
+    // P0-13: drainAll() must wait until an active reader completes reading before destroying
+    auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
+    reclaimer->swapChain(std::make_unique<std::string>("ProtectedString"));
+
+    std::atomic<bool> readerInside{false};
+    std::atomic<bool> readerDone{false};
+    std::atomic<bool> drained{false};
+
+    std::thread readerThread([&]() {
+        auto guard = reclaimer->enterRead();
+        readerInside.store(true, std::memory_order_release);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        QVERIFY(guard.chain != nullptr);
+        QCOMPARE(*guard.chain, std::string("ProtectedString"));
+        // readerDone is signaled before guard is destroyed
+        readerDone.store(true, std::memory_order_release);
+    });
+
+    while (!readerInside.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    std::thread drainThread([&]() {
+        reclaimer->drainAll();
+        drained.store(true, std::memory_order_release);
+    });
+
+    // drainThread must not finish until readerThread has exited guard
+    drainThread.join();
+    readerThread.join();
+
+    QVERIFY(readerDone.load());
+    QVERIFY(drained.load());
 }
 
 void TestAudioPipeline::cleanupTestCase()

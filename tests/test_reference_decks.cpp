@@ -96,7 +96,9 @@ private slots:
     void testFolderSessionIndexZeroAndReadAhead();
     void testDirectModeSwitchPreservesRealFileTrack();
     void testFolderSessionNeedsAdvanceAndLockDiscard();
+    void testFolderSessionErrorHandlingAndFinalTrackEof();
     void testZeroDynamicAllocationInRenderBlock();
+    void testSyntheticTrackOwnershipAndConcurrentSwitching();
     void cleanupTestCase();
 
 private:
@@ -349,6 +351,38 @@ void TestReferenceDecks::testFolderSessionNeedsAdvanceAndLockDiscard()
     QVERIFY(!deck.folderSession().isActive());
 }
 
+void TestReferenceDecks::testFolderSessionErrorHandlingAndFinalTrackEof()
+{
+    // P0-19: Folder session boundary verification - final track EOF, missing file error handling, audio thread non-blocking
+    ReferenceDeck deck('B');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_99_missing.wav"
+    };
+
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    QVERIFY(deck.folderSession().isActive());
+    deck.play();
+
+    // Render audio to EOF of first track
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QVERIFY(deck.needsFolderAdvance());
+
+    // Advancing to missing file: Worker fails to open, session must safely terminate without audio thread hang
+    bool advanced = deck.advanceFolderNext();
+    QVERIFY(!advanced);
+    QVERIFY(!deck.folderSession().isActive());
+    QCOMPARE(deck.state(), TransportState::Stopped);
+
+    // Audio rendering after failed advance must produce silence cleanly without blocking
+    deck.renderBlock(outL.data(), outR.data(), 512);
+    QCOMPARE(outL[0], 0.0);
+    QCOMPARE(outR[0], 0.0);
+}
+
 void TestReferenceDecks::testZeroDynamicAllocationInRenderBlock()
 {
     DeckManager manager(48000.0);
@@ -375,6 +409,86 @@ void TestReferenceDecks::testZeroDynamicAllocationInRenderBlock()
 
     qDebug() << "Total dynamic heap allocations during renderActiveBlock:" << s_allocationCount.load();
     QCOMPARE(s_allocationCount.load(), 0u);
+}
+
+void TestReferenceDecks::testSyntheticTrackOwnershipAndConcurrentSwitching()
+{
+    // P0-15: Synthetic track worker ownership, lifecycle transitions, and concurrent metadata snapshots
+    ReferenceDeck deck('D');
+
+    // 1. Synthetic Track creation via Worker
+    TrackInfo synthInfo;
+    synthInfo.path = "synthetic://sine_440";
+    synthInfo.sampleRate = 48000.0;
+    synthInfo.channels = 2;
+    synthInfo.totalFrames = 48000; // 1 second
+
+    QVERIFY(deck.loadTrack(synthInfo, 48000.0));
+    QVERIFY(deck.isOpen());
+    QCOMPARE(deck.trackInfo().path, std::string("synthetic://sine_440"));
+    auto meta = deck.metadata();
+    QVERIFY(meta != nullptr);
+    QCOMPARE(meta->title, "Synthetic Reference Signal");
+    QCOMPARE(meta->artist, "Desk32 DSP Test Engine");
+
+    // 2. Switch from Synthetic to Real file
+    QVERIFY(deck.loadTrack(m_wav1.toStdString(), 48000.0));
+    QCOMPARE(deck.trackInfo().path, m_wav1.toStdString());
+    auto realMeta = deck.metadata();
+    QVERIFY(realMeta != nullptr);
+    QCOMPARE(realMeta->channels, 2u);
+
+    // 3. Switch back from Real file to Synthetic Track
+    QVERIFY(deck.loadTrack(synthInfo, 48000.0));
+    QCOMPARE(deck.trackInfo().path, std::string("synthetic://sine_440"));
+
+    // 4. Switching tracks during active playback with concurrent rendering and metadata access
+    deck.play();
+    QVERIFY(deck.isPlaying());
+
+    std::atomic<bool> stop{false};
+    std::vector<double> outL(256), outR(256);
+
+    // Audio thread rendering
+    std::thread audioThread([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            deck.renderBlock(outL.data(), outR.data(), 256);
+            std::this_thread::yield();
+        }
+    });
+
+    // Concurrent telemetry polling metadata and track info (P0-15 value snapshot safety)
+    std::thread metaThread([&]() {
+        while (!stop.load(std::memory_order_relaxed)) {
+            auto m = deck.metadata();
+            auto info = deck.trackInfo();
+            if (m) {
+                volatile size_t len = m->title.length();
+                (void)len;
+            }
+            volatile size_t pathLen = info.path.length();
+            (void)pathLen;
+            std::this_thread::yield();
+        }
+    });
+
+    // Control thread rapidly switches between synthetic and real track
+    for (int i = 0; i < 20; ++i) {
+        if (i % 2 == 0) {
+            deck.loadTrack(m_wav1.toStdString(), 48000.0);
+        } else {
+            deck.loadTrack(synthInfo, 48000.0);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    audioThread.join();
+    metaThread.join();
+
+    // 5. Open while closing / rapid shutdown
+    deck.closeTrack();
+    QVERIFY(!deck.isOpen());
 }
 
 void TestReferenceDecks::cleanupTestCase()

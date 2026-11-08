@@ -238,6 +238,7 @@ signals:
     void limiterParametersChanged();
     void reverbParametersChanged();
     void externalInsertStatusChanged();
+    void dspQueueOverflowWarning(int commandType);
     void presetManagementChanged();
     void renderStateChanged();
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);

@@ -149,8 +149,7 @@ public:
         node->setBypassed(isBypassed());
         node->dsp().configure(m_comp.sampleRate(), m_comp.thresholdDb(), m_comp.ratio(),
                               m_comp.attackMs(), m_comp.releaseMs(), m_comp.makeupGainDb(),
-                              m_comp.kneeDb());
-        node->dsp().setEnabled(m_comp.isEnabled());
+                              m_comp.kneeDb(), m_comp.isEnabled());
         return node;
     }
 
@@ -190,8 +189,8 @@ public:
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
         auto node = std::make_shared<PeakLimiterNode>(m_name);
         node->setBypassed(isBypassed());
-        node->dsp().configure(m_limiter.sampleRate(), m_limiter.ceilingDb(), m_limiter.releaseMs(), m_limiter.lookaheadMs());
-        node->dsp().setEnabled(m_limiter.isEnabled());
+        node->dsp().configure(m_limiter.sampleRate(), m_limiter.ceilingDb(), m_limiter.releaseMs(),
+                              m_limiter.lookaheadMs(), m_limiter.isEnabled());
         return node;
     }
 
@@ -228,8 +227,8 @@ public:
         auto node = std::make_shared<ReverbNode>(m_name);
         node->setBypassed(isBypassed());
         node->dsp().configure(m_reverb.sampleRate(), m_reverb.roomSize(), m_reverb.damping(),
-                              m_reverb.wetLevel(), m_reverb.predelayMs(), m_reverb.isTailPreserving());
-        node->dsp().setEnabled(m_reverb.isEnabled());
+                              m_reverb.wetLevel(), m_reverb.predelayMs(), m_reverb.isTailPreserving(),
+                              m_reverb.isEnabled());
         return node;
     }
 

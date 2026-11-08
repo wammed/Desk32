@@ -196,6 +196,16 @@ public:
         m_worker.stop();
     }
 
+    void closeTrack() noexcept {
+        m_folderSession.stopSession();
+        m_worker.stop();
+        m_worker.closeTrack();
+        m_state.store(TransportState::Stopped, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isOpen() const noexcept { return m_worker.isOpen(); }
+    [[nodiscard]] bool isPlaying() const noexcept { return m_state.load(std::memory_order_acquire) == TransportState::Playing; }
+
     void seek(int64_t targetFrame) noexcept {
         m_worker.seek(targetFrame);
     }

@@ -1,0 +1,9 @@
+race:libQt6Core.so
+race:libQt6Test.so
+race:libpipewire-0.3.so
+race:libasound.so
+race:QTest
+thread:libQt6Core.so
+thread:QThread
+mutex:libpipewire-0.3.so
+mutex:libpipewire

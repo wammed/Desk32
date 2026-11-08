@@ -39,10 +39,14 @@ struct DspCommand {
     float param6 = 0.0f;     // MakeupGainDb (P0-06)
 };
 
-/// Lock-free Single-Producer Single-Consumer Parameter Command Queue.
+/// Lock-free Single-Producer Single-Consumer Parameter Command Queue (P0-16).
 /// Producer (Control / UI Thread) pushes validated parameter change commands.
 /// Consumer (Audio Thread) drains commands at audio block boundaries.
 /// Strictly RT-Safe: zero dynamic allocation, zero locks, non-blocking.
+/// Capacity & Coalescing Guarantees:
+/// - Producer-side coalescing merges rapid redundant continuous updates (e.g., slider drags)
+///   when the queue approaches capacity, preventing unneeded queue overflow without losing the latest state.
+/// - Overflow tracking records any dropped commands and signals callers for UI notification.
 class ParameterCommandQueue {
 public:
     static constexpr size_t CAPACITY = 512;
@@ -58,16 +62,44 @@ public:
     ParameterCommandQueue(const ParameterCommandQueue&) = delete;
     ParameterCommandQueue& operator=(const ParameterCommandQueue&) = delete;
 
-    /// Control Thread: Push command into queue. Returns true if queued, false if full.
+    /// Checks if a command type represents continuous idempotent state that can safely be coalesced
+    static constexpr bool isCoalesceable(DspCommandType type) noexcept {
+        return type == DspCommandType::SetGeqBandGain ||
+               type == DspCommandType::SetPeqBand ||
+               type == DspCommandType::SetFilterParams ||
+               type == DspCommandType::SetNodeBypass;
+    }
+
+    /// Control Thread: Push command into queue.
+    /// If full, attempts to coalesce with existing unread matching command.
+    /// If full and cannot coalesce, records overflow and returns false.
     bool push(const DspCommand& cmd) noexcept {
         size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
         size_t readIdx = m_readIndex.load(std::memory_order_acquire);
-        if (writeIdx - readIdx >= CAPACITY) {
-            return false; // Queue full
+
+        // Standard case: queue has room
+        if (writeIdx - readIdx < CAPACITY) {
+            m_buffer[writeIdx & MASK] = cmd;
+            m_writeIndex.store(writeIdx + 1, std::memory_order_release);
+            return true;
         }
-        m_buffer[writeIdx & MASK] = cmd;
-        m_writeIndex.store(writeIdx + 1, std::memory_order_release);
-        return true;
+
+        // Queue full: Attempt coalescing into newest unread matching command
+        if (isCoalesceable(cmd.type)) {
+            for (size_t i = writeIdx; i > readIdx; --i) {
+                size_t idx = (i - 1) & MASK;
+                if (m_buffer[idx].type == cmd.type &&
+                    m_buffer[idx].index == cmd.index &&
+                    m_buffer[idx].subIndex == cmd.subIndex) {
+                    m_buffer[idx] = cmd;
+                    m_coalesceCount.fetch_add(1, std::memory_order_relaxed);
+                    return true;
+                }
+            }
+        }
+
+        m_overflowCount.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     /// Audio Thread: Pop single command. Returns true if command retrieved, false if empty.
@@ -75,7 +107,7 @@ public:
         size_t readIdx = m_readIndex.load(std::memory_order_relaxed);
         size_t writeIdx = m_writeIndex.load(std::memory_order_acquire);
         if (readIdx == writeIdx) {
-            return false; // Queue empty
+            return false;
         }
         outCmd = m_buffer[readIdx & MASK];
         m_readIndex.store(readIdx + 1, std::memory_order_release);
@@ -92,11 +124,26 @@ public:
         return m_writeIndex.load(std::memory_order_acquire) == m_readIndex.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] uint64_t overflowCount() const noexcept {
+        return m_overflowCount.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t coalesceCount() const noexcept {
+        return m_coalesceCount.load(std::memory_order_relaxed);
+    }
+
+    void resetStatistics() noexcept {
+        m_overflowCount.store(0, std::memory_order_relaxed);
+        m_coalesceCount.store(0, std::memory_order_relaxed);
+    }
+
 private:
     std::array<DspCommand, CAPACITY> m_buffer{};
     alignas(64) std::atomic<size_t> m_writeIndex{0};
     alignas(64) std::atomic<size_t> m_readIndex{0};
+
+    alignas(64) std::atomic<uint64_t> m_overflowCount{0};
+    alignas(64) std::atomic<uint64_t> m_coalesceCount{0};
 };
 
 } // namespace desk32::engine::dsp
-
