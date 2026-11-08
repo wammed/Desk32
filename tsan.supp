@@ -1,7 +1,12 @@
 # External library suppressions for ThreadSanitizer (P0-28 audited minimal set)
-# 1. Qt6 QTest Watchdog thread internal stack variable race during QTest::qExec teardown
+# 1. System libQt6Core.so is compiled without TSan instrumentation; its internal atomic refcounting
+#    (QArrayData/QString COW) and futex-based QBasicMutex/QWaitCondition are invisible to TSan.
+#    Note: Desk32's audio engine (pipeline, DSP, mailbox, SPSC queue, reclaimer, decoder, decks)
+#    uses pure C++20 stdtypes and passes TSan with this rule removed.
+race:libQt6Core.so
+# 2. Qt6 QTest Watchdog thread internal stack variable race during QTest::qExec teardown
 race:libQt6Test
-# 2. Qt6 QTest Watchdog QThread leak at process exit (Desk32 uses std::thread exclusively and never calls QThread::start)
+# 3. Qt6 QTest Watchdog QThread leak at process exit (Desk32 uses std::thread exclusively)
 thread:QThread::start
-# 3. PipeWire pw_thread_loop internal mutex unlock across loop/control threads
+# 4. PipeWire pw_thread_loop internal mutex unlock across loop/control threads
 mutex:libpipewire-0.3.so

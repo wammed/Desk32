@@ -496,6 +496,10 @@ void TestPhase4ExportRender::testEngineControllerRenderIntegration()
 
     // Test cancelRender
     controller.cancelRender();
+    while (RenderEngine::instance().queuedTasksCount() > 0 || RenderEngine::instance().isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
 
     // Test auditionRenderedFile into deck B
     QVERIFY(controller.auditionRenderedFile("B", trackPath));

@@ -222,7 +222,16 @@ void RenderEngine::workerLoop() {
         bool wasCancelRequested = m_cancelRequested.exchange(false, std::memory_order_acq_rel);
         m_isRendering.store(true, std::memory_order_release);
 
-        emit renderTaskStarted(task.taskId, task.sourcePath, task.totalTracks);
+        {
+            const std::string startedId = task.taskId.toStdString();
+            const std::string startedSource = task.sourcePath.toStdString();
+            const int startedTotal = task.totalTracks;
+            QMetaObject::invokeMethod(this, [this, startedId, startedSource, startedTotal]() {
+                emit renderTaskStarted(QString::fromStdString(startedId),
+                                       QString::fromStdString(startedSource),
+                                       startedTotal);
+            }, Qt::QueuedConnection);
+        }
 
         if (wasCancelRequested) {
             task.status = RenderStatus::Cancelled;
@@ -241,8 +250,18 @@ void RenderEngine::workerLoop() {
 
         m_isRendering.store(false, std::memory_order_release);
 
-        emit renderTaskFinished(task.taskId, static_cast<int>(task.status),
-                                task.finalOutputDir, task.errorMessage);
+        {
+            const std::string finishedId = task.taskId.toStdString();
+            const int finishedStatus = static_cast<int>(task.status);
+            const std::string finishedOutDir = task.finalOutputDir.toStdString();
+            const std::string finishedErr = task.errorMessage.toStdString();
+            QMetaObject::invokeMethod(this, [this, finishedId, finishedStatus, finishedOutDir, finishedErr]() {
+                emit renderTaskFinished(QString::fromStdString(finishedId),
+                                        finishedStatus,
+                                        QString::fromStdString(finishedOutDir),
+                                        QString::fromStdString(finishedErr));
+            }, Qt::QueuedConnection);
+        }
     }
 
     workerSeqMgr.close();
@@ -369,8 +388,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         double trackFraction = 0.0;
         QString trackError;
 
-        emit renderProgressUpdated(task.taskId, static_cast<double>(i) / task.totalTracks,
-                                   i + 1, task.totalTracks, trackFile);
+        {
+            const std::string progId = task.taskId.toStdString();
+            const double progVal = static_cast<double>(i) / task.totalTracks;
+            const int progIdx = i + 1;
+            const int progTotal = task.totalTracks;
+            const std::string progFile = trackFile.toStdString();
+            QMetaObject::invokeMethod(this, [this, progId, progVal, progIdx, progTotal, progFile]() {
+                emit renderProgressUpdated(QString::fromStdString(progId),
+                                           progVal, progIdx, progTotal,
+                                           QString::fromStdString(progFile));
+            }, Qt::QueuedConnection);
+        }
 
         bool ok = renderSingleFile(inputFilePath, outputFilePath, task.settings,
                                    task.dspSnapshot, m_cancelRequested, trackFraction, trackError);
@@ -392,8 +421,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             break;
         }
 
-        emit renderProgressUpdated(task.taskId, static_cast<double>(i + 1) / task.totalTracks,
-                                   i + 1, task.totalTracks, trackFile);
+        {
+            const std::string progId = task.taskId.toStdString();
+            const double progVal = static_cast<double>(i + 1) / task.totalTracks;
+            const int progIdx = i + 1;
+            const int progTotal = task.totalTracks;
+            const std::string progFile = trackFile.toStdString();
+            QMetaObject::invokeMethod(this, [this, progId, progVal, progIdx, progTotal, progFile]() {
+                emit renderProgressUpdated(QString::fromStdString(progId),
+                                           progVal, progIdx, progTotal,
+                                           QString::fromStdString(progFile));
+            }, Qt::QueuedConnection);
+        }
     }
 
     // 4. Transaction Resolution: Rollback vs Commit (P0-12)
