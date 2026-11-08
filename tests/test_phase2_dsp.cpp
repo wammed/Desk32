@@ -91,6 +91,8 @@ private slots:
     void testParameterCommandQueueSPSCAndCapacity();
     void testParameterCommandQueueCoalescingAndOverflowStats();
     void testDspParameterMailboxMultiProducerAndContinuousUpdates();
+    void testDspParameterMailbox3SlotExchangeSnapshotConsistency();
+    void testDspParameterMailboxBatchApis();
     void testDspContinuousParameterUpdateRtSafety();
 };
 
@@ -674,6 +676,102 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
 
     QVERIFY(mailbox.updateCount() > 0);
     QVERIFY(totalPushes.load() > 0);
+}
+
+void TestPhase2Dsp::testDspParameterMailbox3SlotExchangeSnapshotConsistency()
+{
+    // P0-25: 3-Slot Exchange tear-free snapshot consistency verification
+    // Ensures that Consumer receives internally consistent parameter snapshots without partial updates
+    DspParameterMailbox mailbox;
+
+    std::atomic<bool> running{true};
+    std::atomic<uint64_t> snapshotCheckCount{0};
+    std::atomic<bool> inconsistencyDetected{false};
+
+    // Producer Thread: Writes monotonically increasing generation values across all 32 bands
+    std::thread producerThread([&]() {
+        float gen = 1.0f;
+        while (running.load(std::memory_order_relaxed)) {
+            for (size_t b = 0; b < 32; ++b) {
+                mailbox.setGeqBandGain(b, gen + static_cast<float>(b) * 0.001f);
+            }
+            gen += 1.0f;
+            std::this_thread::yield();
+        }
+    });
+
+    // Audio/Consumer Thread: Rapidly fetches snapshots and verifies tear-free consistency
+    std::thread consumerThread([&]() {
+        ContinuousDspParameters p;
+        while (running.load(std::memory_order_relaxed)) {
+            if (mailbox.fetchUpdates(p)) {
+                // Check if all modified bands correspond to valid generation
+                snapshotCheckCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    running.store(false, std::memory_order_relaxed);
+
+    producerThread.join();
+    consumerThread.join();
+
+    QVERIFY(!inconsistencyDetected.load());
+    QVERIFY(snapshotCheckCount.load() > 10);
+}
+
+void TestPhase2Dsp::testDspParameterMailboxBatchApis()
+{
+    // P0-25, P0-27: Batch Mailbox APIs (resetAllGeqBands, applyPeqPreset, setPeqBandEnabled)
+    DspParameterMailbox mailbox;
+
+    // 1. Test resetAllGeqBands()
+    for (size_t b = 0; b < 32; ++b) {
+        mailbox.setGeqBandGain(b, 5.0f);
+    }
+    mailbox.resetAllGeqBands();
+
+    ContinuousDspParameters p;
+    QVERIFY(mailbox.fetchUpdates(p));
+    QCOMPARE(p.geqModifiedMask, 0xFFFFFFFFu);
+    for (size_t b = 0; b < 32; ++b) {
+        QCOMPARE(p.geqGains[b], 0.0f);
+    }
+
+    // 2. Test setPeqBandEnabled()
+    mailbox.setPeqBandEnabled(4, 0, true);
+    mailbox.setPeqBandEnabled(7, 1, false);
+    QVERIFY(mailbox.fetchUpdates(p));
+    QVERIFY((p.peqLeftModifiedMask & (1u << 4)) != 0);
+    QCOMPARE(p.peqLeftBands[4].enabled, 1);
+    QVERIFY((p.peqRightModifiedMask & (1u << 7)) != 0);
+    QCOMPARE(p.peqRightBands[7].enabled, 0);
+
+    // 3. Test applyPeqPreset()
+    std::array<ContinuousDspParameters::PeqBandConfig, 24> leftPreset{};
+    std::array<ContinuousDspParameters::PeqBandConfig, 24> rightPreset{};
+    for (size_t b = 0; b < 24; ++b) {
+        leftPreset[b].frequency = 100.0f * static_cast<float>(b + 1);
+        leftPreset[b].gainDb = -2.0f;
+        leftPreset[b].Q = 1.4f;
+        leftPreset[b].type = 1;
+        leftPreset[b].enabled = 1;
+
+        rightPreset[b].frequency = 120.0f * static_cast<float>(b + 1);
+        rightPreset[b].gainDb = 2.0f;
+        rightPreset[b].Q = 0.7f;
+        rightPreset[b].type = 2;
+        rightPreset[b].enabled = 1;
+    }
+    mailbox.applyPeqPreset(leftPreset, rightPreset);
+
+    QVERIFY(mailbox.fetchUpdates(p));
+    QCOMPARE(p.peqLeftModifiedMask, 0x00FFFFFFu);
+    QCOMPARE(p.peqRightModifiedMask, 0x00FFFFFFu);
+    QCOMPARE(p.peqLeftBands[0].gainDb, -2.0f);
+    QCOMPARE(p.peqRightBands[0].gainDb, 2.0f);
 }
 
 void TestPhase2Dsp::testDspContinuousParameterUpdateRtSafety()

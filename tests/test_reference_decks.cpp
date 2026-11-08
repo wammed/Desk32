@@ -99,6 +99,7 @@ private slots:
     void testFolderSessionErrorHandlingAndFinalTrackEof();
     void testZeroDynamicAllocationInRenderBlock();
     void testSyntheticTrackOwnershipAndConcurrentSwitching();
+    void testDecoderWorkerOpenTimeoutAndStaleRequestCancellation();
     void cleanupTestCase();
 
 private:
@@ -489,6 +490,41 @@ void TestReferenceDecks::testSyntheticTrackOwnershipAndConcurrentSwitching()
     // 5. Open while closing / rapid shutdown
     deck.closeTrack();
     QVERIFY(!deck.isOpen());
+}
+
+void TestReferenceDecks::testDecoderWorkerOpenTimeoutAndStaleRequestCancellation()
+{
+    // P0-30: DecoderWorker Request ID lifecycle, status tracking, and stale open cancellation
+    desk32::engine::decoder::DecoderWorker worker;
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::None);
+
+    // 1. Successful synthetic track open
+    bool ok = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://test1");
+    QVERIFY(ok);
+    QVERIFY(worker.isOpen());
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
+
+    // 2. Cancellation via closeTrack()
+    worker.closeTrack();
+    QVERIFY(!worker.isOpen());
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Cancelled);
+    QCOMPARE(worker.activeRequestId(), 0u);
+
+    // 3. Failed open on non-existent file
+    bool failOk = worker.openTrack("/invalid/non_existent_audio_file.wav", 48000.0);
+    QVERIFY(!failOk);
+    QVERIFY(!worker.isOpen());
+    QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Failed);
+
+    // 4. Superseded open request: rapid consecutive calls commit only the latest request
+    worker.openSyntheticTrack(24000, 48000.0, 48000.0, "synthetic://first");
+    uint64_t latestReq = worker.activeRequestId();
+    bool latestOk = worker.openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://latest");
+    QVERIFY(latestOk);
+    QVERIFY(worker.isOpen());
+    QVERIFY(worker.activeRequestId() >= latestReq);
+    QCOMPARE(worker.trackInfo().path, std::string("synthetic://latest"));
+    QCOMPARE(worker.trackInfo().totalFrames, 48000u);
 }
 
 void TestReferenceDecks::cleanupTestCase()

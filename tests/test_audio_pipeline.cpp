@@ -24,6 +24,7 @@ private slots:
     void testReverbTailPreservationCrossfade();
     void testLimiterLookaheadChangeSampleContinuity();
     void testTelemetrySnapshotThreadSafety();
+    void testEpochReclaimerShutdownConcurrentSafety();
     void cleanupTestCase();
 };
 
@@ -637,6 +638,61 @@ void TestAudioPipeline::testTelemetrySnapshotThreadSafety()
     }
 
     QVERIFY(totalTelemetryReads.load() > 100);
+}
+
+void TestAudioPipeline::testEpochReclaimerShutdownConcurrentSafety()
+{
+    // P0-28: drainAll() shutdown protocol with concurrent speculative readers
+    auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
+    reclaimer->swapChain(std::make_unique<std::string>("InitialActiveData"));
+
+    std::atomic<bool> stopReaders{false};
+    std::atomic<uint64_t> successfulReads{0};
+    std::atomic<uint64_t> rejectedReads{0};
+
+    // 4 concurrent reader threads attempting enterRead() before, during, and after drainAll()
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&]() {
+            while (!stopReaders.load(std::memory_order_relaxed)) {
+                auto guard = reclaimer->enterRead();
+                if (guard.isValid() && guard.chain != nullptr) {
+                    successfulReads.fetch_add(1, std::memory_order_relaxed);
+                    // Verify data sanity
+                    volatile size_t len = guard.chain->length();
+                    (void)len;
+                } else {
+                    rejectedReads.fetch_add(1, std::memory_order_relaxed);
+                    QVERIFY(guard.chain == nullptr);
+                }
+                std::this_thread::yield();
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    // Shutdown while readers are vigorously querying
+    reclaimer->drainAll();
+    QVERIFY(reclaimer->isClosing());
+
+    // Subsequent enterRead() MUST strictly reject
+    auto postGuard = reclaimer->enterRead();
+    QVERIFY(!postGuard.isValid());
+    QVERIFY(postGuard.chain == nullptr);
+
+    // swapChain on closed reclaimer is a safe no-op
+    reclaimer->swapChain(std::make_unique<std::string>("ShouldBeIgnored"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    stopReaders.store(true, std::memory_order_relaxed);
+
+    for (auto& t : readers) {
+        t.join();
+    }
+
+    QVERIFY(successfulReads.load() > 0);
+    QVERIFY(rejectedReads.load() > 0);
 }
 
 void TestAudioPipeline::cleanupTestCase()

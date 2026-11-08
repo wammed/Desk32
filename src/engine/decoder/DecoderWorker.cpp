@@ -28,6 +28,10 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     uint64_t seq = 0;
+    uint64_t reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
+    m_activeRequestId.store(reqId, std::memory_order_release);
+    m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
         seq = ++m_seekSequence;
@@ -36,14 +40,22 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
         cmd.path = filePath;
         cmd.graphRate = graphSampleRate;
         cmd.sequence = seq;
+        cmd.requestId = reqId;
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
     }
     m_cmdCv.notify_one();
 
     if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
-        return future.get();
+        bool ok = future.get();
+        m_lastOpenStatus.store(ok ? OpenStatus::Success : OpenStatus::Failed, std::memory_order_release);
+        return ok;
     }
+
+    // P0-30: Timed out: Invalidate active request ID so late background open is discarded
+    uint64_t expected = reqId;
+    m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
 
@@ -51,6 +63,10 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     uint64_t seq = 0;
+    uint64_t reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
+    m_activeRequestId.store(reqId, std::memory_order_release);
+    m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
+
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
         seq = ++m_seekSequence;
@@ -61,6 +77,7 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
         cmd.graphRate = graphSampleRate;
         cmd.totalFrames = totalFrames;
         cmd.sequence = seq;
+        cmd.requestId = reqId;
         cmd.isSynthetic = true;
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
@@ -68,12 +85,23 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     m_cmdCv.notify_one();
 
     if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
-        return future.get();
+        bool ok = future.get();
+        m_lastOpenStatus.store(ok ? OpenStatus::Success : OpenStatus::Failed, std::memory_order_release);
+        return ok;
     }
+
+    // P0-30: Timed out: Invalidate active request ID
+    uint64_t expected = reqId;
+    m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
 
 void DecoderWorker::closeTrack() {
+    // P0-30: Cancel any in-flight open requests immediately
+    m_activeRequestId.store(0, std::memory_order_release);
+    m_lastOpenStatus.store(OpenStatus::Cancelled, std::memory_order_release);
+
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
     {
@@ -242,6 +270,14 @@ void DecoderWorker::workerLoop() {
 void DecoderWorker::processCommand(const WorkerCommand& cmd) {
     switch (cmd.type) {
     case WorkerCommandType::Open: {
+        // P0-30: Check if this open request was cancelled or timed out before heavy I/O
+        if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+            if (cmd.openPromise) {
+                try { cmd.openPromise->set_value(false); } catch (...) {}
+            }
+            break;
+        }
+
         m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
@@ -252,6 +288,15 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         bool openSuccess = false;
         auto dec = std::make_unique<FFmpegAudioDecoder>();
         if (dec->open(cmd.path)) {
+            // P0-30: Re-verify request ID after slow I/O before committing state
+            if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+                dec.reset();
+                if (cmd.openPromise) {
+                    try { cmd.openPromise->set_value(false); } catch (...) {}
+                }
+                break;
+            }
+
             const auto& info = dec->formatInfo();
             WorkerTrackInfo tInfo;
             tInfo.path = cmd.path;
@@ -283,12 +328,20 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         }
 
         if (cmd.openPromise) {
-            cmd.openPromise->set_value(openSuccess);
+            try { cmd.openPromise->set_value(openSuccess); } catch (...) {}
         }
         m_seekCompleted.store(cmd.sequence, std::memory_order_release);
         break;
     }
     case WorkerCommandType::OpenSynthetic: {
+        // P0-30: Check if request was superseded
+        if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
+            if (cmd.openPromise) {
+                try { cmd.openPromise->set_value(false); } catch (...) {}
+            }
+            break;
+        }
+
         m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
@@ -330,7 +383,7 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         }
 
         if (cmd.openPromise) {
-            cmd.openPromise->set_value(true);
+            try { cmd.openPromise->set_value(true); } catch (...) {}
         }
         m_seekCompleted.store(cmd.sequence, std::memory_order_release);
         break;

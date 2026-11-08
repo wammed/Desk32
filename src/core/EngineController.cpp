@@ -729,17 +729,8 @@ bool EngineController::retreatFolderPrevious(const QString& deckId) {
 
 void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
     if (m_pipeline) {
-        // P0-25: Continuous slider parameter update via lock-free DspParameterMailbox
+        // P0-25, P0-27: Continuous slider parameter update via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setGeqBandGain(static_cast<size_t>(bandIndex), static_cast<float>(gainDb));
-
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetGeqBandGain;
-        cmd.index = static_cast<uint8_t>(bandIndex);
-        cmd.param1 = static_cast<float>(gainDb);
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "GEQ band gain push queue full", "DSPQueue", "GEQ");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
     }
     if (m_geqNode) {
         m_geqNode->dsp().setBandGain(static_cast<size_t>(bandIndex), gainDb);
@@ -753,12 +744,8 @@ double EngineController::getGeqBandGain(int bandIndex) {
 
 void EngineController::resetAllGeqBands() {
     if (m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::ResetAllGeqBands;
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Reset all GEQ bands push queue full", "DSPQueue", "GEQ");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
+        // P0-25, P0-27: Atomic batch reset via DspParameterMailbox
+        m_pipeline->paramMailbox().resetAllGeqBands();
     }
     if (m_geqNode) {
         m_geqNode->dsp().resetAllBands();
@@ -820,24 +807,10 @@ void EngineController::setPeqBand(bool isRightChannel, int bandIndex, double fre
     if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
 
     if (m_pipeline) {
-        // P0-25: Continuous parameter update via lock-free DspParameterMailbox
+        // P0-25, P0-27: Continuous parameter update via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setPeqBand(static_cast<size_t>(bandIndex), isRightChannel ? 1 : 0,
                                               static_cast<float>(frequency), static_cast<float>(gainDb),
                                               static_cast<float>(q), static_cast<uint8_t>(filterType), enabled);
-
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetPeqBand;
-        cmd.index = static_cast<uint8_t>(bandIndex);
-        cmd.subIndex = isRightChannel ? 1 : 0;
-        cmd.boolFlag1 = enabled ? 1 : 0;
-        cmd.intParam1 = static_cast<uint8_t>(std::clamp(filterType, 0, 5));
-        cmd.param1 = static_cast<float>(frequency);
-        cmd.param2 = static_cast<float>(gainDb);
-        cmd.param3 = static_cast<float>(q);
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "PEQ band push queue full", "DSPQueue", "PEQ");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
     }
 
     ParametricEQ::BandConfig cfg;
@@ -859,15 +832,8 @@ void EngineController::setPeqBandEnabled(bool isRightChannel, int bandIndex, boo
     if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
 
     if (m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetPeqBandEnabled;
-        cmd.index = static_cast<uint8_t>(bandIndex);
-        cmd.subIndex = isRightChannel ? 1 : 0;
-        cmd.boolFlag1 = enabled ? 1 : 0;
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "PEQ band enable push queue full", "DSPQueue", "PEQ");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
+        // P0-25, P0-27: Update band enable status via DspParameterMailbox
+        m_pipeline->paramMailbox().setPeqBandEnabled(static_cast<size_t>(bandIndex), isRightChannel ? 1 : 0, enabled);
     }
 
     auto cfg = isRightChannel ? m_peqNode->dsp().rightBand(static_cast<size_t>(bandIndex))
@@ -904,21 +870,32 @@ QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
 }
 
 void EngineController::applyPeqPreset(const QString& presetName) {
-    QStringList presets = availableListeningPresets();
-    qsizetype idx = presets.indexOf(presetName);
-    if (idx >= 0 && idx < 5 && m_pipeline) {
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::ApplyPeqPreset;
-        cmd.index = static_cast<uint8_t>(idx);
-        cmd.subIndex = 0; // 0 = Master PEQ
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Apply PEQ preset push queue full", "DSPQueue", "PEQ");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
-    }
     if (m_peqNode) {
         bool ok = m_peqNode->dsp().applyPreset(presetName.toStdString());
         if (ok) {
+            if (m_pipeline) {
+                // P0-25, P0-27: Publish entire 24-band PEQ configuration atomically via Mailbox
+                std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> leftBands{};
+                std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> rightBands{};
+                for (size_t b = 0; b < 24; ++b) {
+                    const auto& l = m_peqNode->dsp().leftBand(b);
+                    leftBands[b].frequency = static_cast<float>(l.frequency);
+                    leftBands[b].gainDb = static_cast<float>(l.gainDb);
+                    leftBands[b].Q = static_cast<float>(l.Q);
+                    leftBands[b].type = static_cast<uint8_t>(l.type);
+                    leftBands[b].enabled = l.enabled ? 1 : 0;
+                    leftBands[b].modified = 1;
+
+                    const auto& r = m_peqNode->dsp().rightBand(b);
+                    rightBands[b].frequency = static_cast<float>(r.frequency);
+                    rightBands[b].gainDb = static_cast<float>(r.gainDb);
+                    rightBands[b].Q = static_cast<float>(r.Q);
+                    rightBands[b].type = static_cast<uint8_t>(r.type);
+                    rightBands[b].enabled = r.enabled ? 1 : 0;
+                    rightBands[b].modified = 1;
+                }
+                m_pipeline->paramMailbox().applyPeqPreset(leftBands, rightBands);
+            }
             emit peqParametersChanged();
             log::LogService::instance().log("DSP", "ApplyPEQPreset", "Success", "Applied PEQ Preset: " + presetName, "DSPNode", "PEQ");
         }
@@ -927,23 +904,10 @@ void EngineController::applyPeqPreset(const QString& presetName) {
 
 void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope) {
     if (m_pipeline) {
-        // P0-25: Continuous parameter update via lock-free DspParameterMailbox
+        // P0-25, P0-27: Continuous parameter update via lock-free DspParameterMailbox
         m_pipeline->paramMailbox().setFilterParams(static_cast<float>(hpfFreq), static_cast<float>(lpfFreq),
                                                    static_cast<uint8_t>(hpfSlope), static_cast<uint8_t>(lpfSlope),
                                                    hpfOn, lpfOn);
-
-        engine::dsp::DspCommand cmd;
-        cmd.type = engine::dsp::DspCommandType::SetFilterParams;
-        cmd.boolFlag1 = hpfOn ? 1 : 0;
-        cmd.boolFlag2 = lpfOn ? 1 : 0;
-        cmd.intParam1 = (hpfSlope == 1) ? 1 : 0;
-        cmd.intParam2 = (lpfSlope == 1) ? 1 : 0;
-        cmd.param1 = static_cast<float>(hpfFreq);
-        cmd.param2 = static_cast<float>(lpfFreq);
-        if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Filter params push queue full", "DSPQueue", "Filter");
-            emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
-        }
     }
     if (m_filterNode) {
         m_filterNode->dsp().setHpfFrequency(hpfFreq);

@@ -110,9 +110,13 @@ public:
 
     /// Lock-Free multi-reader critical section entry (RT-Safe for Audio Thread & Non-RT threads).
     /// Bounded O(1) slot acquisition, zero heap allocation, sequential consistency memory barrier.
-    /// P0-20: If all slots are saturated, NEVER returns an unshielded pointer. Returns invalid ReadGuard.
+    /// P0-20, P0-28: If closing or all slots are saturated, NEVER returns an unshielded pointer.
     [[nodiscard]] ReadGuard enterRead() const noexcept
     {
+        if (m_closing.load(std::memory_order_seq_cst)) {
+            return ReadGuard{ this, nullptr, MAX_READERS };
+        }
+
         size_t slotIndex = MAX_READERS;
         for (size_t i = 0; i < MAX_READERS; ++i) {
             bool expected = false;
@@ -129,14 +133,20 @@ public:
             return ReadGuard{ this, nullptr, MAX_READERS };
         }
 
+        // P0-28: Prohibit race between reader registration and shutdown drainAll()
+        if (m_closing.load(std::memory_order_seq_cst)) {
+            m_slots[slotIndex].active.store(false, std::memory_order_seq_cst);
+            return ReadGuard{ this, nullptr, MAX_READERS };
+        }
+
         // Announce current global epoch BEFORE loading the active pointer
         const uint64_t currentEpoch = m_globalEpoch.load(std::memory_order_seq_cst);
         m_slots[slotIndex].epoch.store(currentEpoch, std::memory_order_seq_cst);
 
         // Load active chain pointer with sequential consistency
         T* ptr = m_activeChain.load(std::memory_order_seq_cst);
-        if (!ptr) {
-            // Object is already drained/null, release slot immediately
+        if (!ptr || m_closing.load(std::memory_order_seq_cst)) {
+            // Object is already drained/null or reclaimer is closing, release slot immediately
             m_slots[slotIndex].active.store(false, std::memory_order_seq_cst);
             return ReadGuard{ this, nullptr, MAX_READERS };
         }
@@ -168,6 +178,9 @@ public:
     /// Retires the old chain tagged with the epoch during which it was retired.
     void swapChain(std::unique_ptr<T> newChain)
     {
+        if (m_closing.load(std::memory_order_seq_cst)) {
+            return;
+        }
         T* rawNew = newChain.release();
         T* oldPtr = m_activeChain.exchange(rawNew, std::memory_order_seq_cst);
 
@@ -226,9 +239,20 @@ public:
         return m_retiredChains.size();
     }
 
-    /// Wait for active readers and drain all chains (destructor cleanup)
+    [[nodiscard]] bool isClosing() const noexcept {
+        return m_closing.load(std::memory_order_seq_cst);
+    }
+
+    /// Wait for active readers and drain all chains (destructor cleanup, P0-28)
     void drainAll()
     {
+        // 1. Prohibit new reader registrations
+        m_closing.store(true, std::memory_order_seq_cst);
+
+        // 2. Clear active chain pointer immediately so speculative readers see null
+        T* current = m_activeChain.exchange(nullptr, std::memory_order_seq_cst);
+
+        // 3. Wait for all existing active readers to exit
         for (;;) {
             bool anyActive = false;
             for (size_t i = 0; i < MAX_READERS; ++i) {
@@ -243,9 +267,9 @@ public:
             std::this_thread::yield();
         }
 
+        // 4. Safely free retired chains and current active chain outside Audio Thread
         std::lock_guard<std::mutex> lock(m_retiredMutex);
         m_retiredChains.clear();
-        T* current = m_activeChain.exchange(nullptr, std::memory_order_seq_cst);
         delete current;
     }
 
@@ -260,6 +284,7 @@ private:
         std::atomic<uint64_t> epoch{0};
     };
 
+    alignas(64) std::atomic<bool> m_closing{false};
     std::atomic<T*> m_activeChain{nullptr};
     std::atomic<uint64_t> m_globalEpoch{1};
     mutable std::atomic<uint64_t> m_slotExhaustionCount{0};

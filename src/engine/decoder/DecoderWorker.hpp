@@ -25,6 +25,14 @@ struct WorkerTrackInfo {
     uint64_t totalFrames = 0;
 };
 
+enum class OpenStatus : uint8_t {
+    None = 0,
+    Success,
+    Failed,
+    TimedOut,
+    Cancelled
+};
+
 enum class WorkerCommandType : uint8_t {
     None = 0,
     Open,
@@ -45,6 +53,7 @@ struct WorkerCommand {
     uint64_t totalFrames = 0;
     int64_t targetFrame = 0;
     uint64_t sequence = 0;
+    uint64_t requestId = 0;
     bool isSynthetic = false;
     std::shared_ptr<std::promise<bool>> openPromise;
 };
@@ -80,6 +89,8 @@ public:
     void clearEofDelivered() noexcept { m_eofDelivered.store(false, std::memory_order_release); }
     [[nodiscard]] int64_t playhead() const noexcept { return m_playhead.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t underrunCount() const noexcept { return m_underrunCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] OpenStatus lastOpenStatus() const noexcept { return m_lastOpenStatus.load(std::memory_order_acquire); }
+    [[nodiscard]] uint64_t activeRequestId() const noexcept { return m_activeRequestId.load(std::memory_order_acquire); }
 
     /// Thread-safe copy of track info (P0-05)
     [[nodiscard]] WorkerTrackInfo trackInfo() const {
@@ -113,6 +124,9 @@ private:
     std::atomic<double> m_graphRate{48000.0};
     std::atomic<uint64_t> m_seekSequence{0};
     std::atomic<uint64_t> m_seekCompleted{0};
+    std::atomic<uint64_t> m_nextRequestId{1};
+    std::atomic<uint64_t> m_activeRequestId{0};
+    std::atomic<OpenStatus> m_lastOpenStatus{OpenStatus::None};
 
     mutable std::mutex m_trackMutex;
     WorkerTrackInfo m_trackInfo;

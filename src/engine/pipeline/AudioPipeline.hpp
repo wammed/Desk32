@@ -284,104 +284,19 @@ private:
 
     void applyDspCommand(const dsp::DspCommand& cmd, AudioChain* master, AudioChain* listening) noexcept {
         switch (cmd.type) {
-        case dsp::DspCommandType::SetGeqBandGain:
-            if (master) {
-                for (size_t i = 0; i < master->nodeCount(); ++i) {
-                    if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
-                        geqNode->dsp().setBandGain(cmd.index, static_cast<double>(cmd.param1));
-                        break;
-                    }
-                }
-            }
-            break;
-        case dsp::DspCommandType::ResetAllGeqBands:
-            if (master) {
-                for (size_t i = 0; i < master->nodeCount(); ++i) {
-                    if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
-                        geqNode->dsp().resetAllBands();
-                        break;
-                    }
-                }
-            }
-            break;
-        case dsp::DspCommandType::SetPeqBand:
-            if (master) {
-                for (size_t i = 0; i < master->nodeCount(); ++i) {
-                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
-                        ParametricEQ::BandConfig cfg;
-                        cfg.frequency = static_cast<double>(cmd.param1);
-                        cfg.gainDb = static_cast<double>(cmd.param2);
-                        cfg.Q = static_cast<double>(cmd.param3);
-                        cfg.type = static_cast<BiquadFilterType>(cmd.intParam1);
-                        cfg.enabled = (cmd.boolFlag1 != 0);
-                        if (cmd.subIndex == 1) {
-                            peqNode->dsp().setRightBand(cmd.index, cfg);
-                        } else {
-                            peqNode->dsp().setLeftBand(cmd.index, cfg);
-                        }
-                        break;
-                    }
-                }
-            }
-            break;
-        case dsp::DspCommandType::SetPeqBandEnabled:
-            if (master) {
-                for (size_t i = 0; i < master->nodeCount(); ++i) {
-                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
-                        if (cmd.subIndex == 1) {
-                            auto cfg = peqNode->dsp().rightBand(cmd.index);
-                            cfg.enabled = (cmd.boolFlag1 != 0);
-                            peqNode->dsp().setRightBand(cmd.index, cfg);
-                        } else {
-                            auto cfg = peqNode->dsp().leftBand(cmd.index);
-                            cfg.enabled = (cmd.boolFlag1 != 0);
-                            peqNode->dsp().setLeftBand(cmd.index, cfg);
-                        }
-                        break;
-                    }
-                }
-            }
-            break;
+        // P0-26, P0-27: Continuous parameters (GEQ, PEQ, Filter) are updated exclusively
+        // via DspParameterMailbox to prevent double-update racing and parameter rewind.
         case dsp::DspCommandType::ApplyPeqPreset:
-            {
+            // Listening chain preset selection (discrete preset trigger)
+            if (cmd.subIndex == 1 && listening) {
                 const char* presetNames[] = {
                     "Monitor Flat", "Acoustic Clarity", "Harman Target", "Bass Punch", "Vocal Air"
                 };
-                if (cmd.subIndex == 1) {
-                    if (listening) {
-                        for (size_t i = 0; i < listening->nodeCount(); ++i) {
-                            if (auto* peqNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
-                                if (cmd.index < 5) {
-                                    peqNode->dsp().applyPreset(presetNames[cmd.index]);
-                                }
-                                break;
-                            }
+                for (size_t i = 0; i < listening->nodeCount(); ++i) {
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
+                        if (cmd.index < 5) {
+                            peqNode->dsp().applyPreset(presetNames[cmd.index]);
                         }
-                    }
-                } else {
-                    if (master) {
-                        for (size_t i = 0; i < master->nodeCount(); ++i) {
-                            if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
-                                if (cmd.index < 5) {
-                                    peqNode->dsp().applyPreset(presetNames[cmd.index]);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-        case dsp::DspCommandType::SetFilterParams:
-            if (master) {
-                for (size_t i = 0; i < master->nodeCount(); ++i) {
-                    if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
-                        filterNode->dsp().setHpfFrequency(static_cast<double>(cmd.param1));
-                        filterNode->dsp().setLpfFrequency(static_cast<double>(cmd.param2));
-                        filterNode->dsp().setHpfSlope(static_cast<HighLowPassFilter::FilterSlope>(cmd.intParam1));
-                        filterNode->dsp().setLpfSlope(static_cast<HighLowPassFilter::FilterSlope>(cmd.intParam2));
-                        filterNode->dsp().setHpfEnabled(cmd.boolFlag1 != 0);
-                        filterNode->dsp().setLpfEnabled(cmd.boolFlag2 != 0);
                         break;
                     }
                 }
