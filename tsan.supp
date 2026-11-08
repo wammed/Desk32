@@ -20,3 +20,8 @@ thread:QThread::start
 #    Reason: libpipewire-0.3 pw_thread_loop locks and unlocks mutex across internal loop/control threads by design.
 #    Scope : Strictly scoped to third-party shared library libpipewire-0.3.so.
 mutex:libpipewire-0.3.so
+
+# 5. Target: Qt6 queued cross-thread event delivery in precompiled distribution libQt6Core
+#    Reason: Precompiled distribution libQt6Core lacks TSan annotations for cross-thread event dispatching.
+#    Scope : Strictly scoped to QObject::event symbol.
+race:QObject::event

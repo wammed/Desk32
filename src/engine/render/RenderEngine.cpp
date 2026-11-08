@@ -55,7 +55,10 @@ RenderTaskInfo RenderEngine::currentTaskInfo() const {
 }
 
 void RenderEngine::cancelCurrentRender() {
-    m_cancelRequested.store(true, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    if (m_isRendering.load(std::memory_order_acquire) || !m_taskQueue.empty()) {
+        m_cancelRequested.store(true, std::memory_order_release);
+    }
 }
 
 void RenderEngine::setDatabasePath(const QString& dbPath) {
@@ -188,6 +191,7 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
 void RenderEngine::resetTaskInfo() {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_currentTask = RenderTaskInfo();
+    m_cancelRequested.store(false, std::memory_order_release);
 }
 
 void RenderEngine::workerLoop() {
@@ -201,6 +205,9 @@ void RenderEngine::workerLoop() {
         QString activeDbPath;
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
+            if (m_taskQueue.empty() && !m_isRendering.load(std::memory_order_acquire)) {
+                m_cancelRequested.store(false, std::memory_order_release);
+            }
             m_queueCv.wait(lock, [this]() {
                 return m_stopWorker.load(std::memory_order_acquire) || !m_taskQueue.empty();
             });

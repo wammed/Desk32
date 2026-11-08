@@ -590,6 +590,7 @@ void TestPhase4ExportRender::testEngineControllerRenderIntegration()
     while (RenderEngine::instance().queuedTasksCount() > 0 || RenderEngine::instance().isRendering()) {
         QTest::qWait(10);
     }
+    RenderEngine::instance().resetTaskInfo();
     QCoreApplication::processEvents();
 
     // Test auditionRenderedFile into deck B
@@ -677,6 +678,7 @@ void TestPhase4ExportRender::testRenderWorkerThreadOwnership()
 {
     // P0-02: SQLite Connection must be created, used, and closed on the Render Worker thread
     RenderEngine& engine = RenderEngine::instance();
+    engine.resetTaskInfo();
     engine.setDatabasePath(m_dbPath);
 
     // Create a temporary track
@@ -707,6 +709,7 @@ void TestPhase4ExportRender::testRenderJobDspSnapshotIsolation()
 {
     // P0-03: Render Job must take an immutable DSP snapshot at enqueue time
     RenderEngine& engine = RenderEngine::instance();
+    engine.resetTaskInfo();
     engine.setDatabasePath(m_dbPath);
 
     // 1. Configure template chain with PEQ Band 0 Gain = +12.0 dB

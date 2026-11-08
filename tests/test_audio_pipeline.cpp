@@ -1447,8 +1447,14 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
         QCOMPARE(s_rtStats.totalAllocations(), 0u);
         QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
 #if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED)
-        // 4096 frames @ 48kHz deadline is 85.3 ms; 16 nodes must finish under 10 ms
+        // 4096 frames @ 48kHz audio deadline is 85.3 ms (85,333,333 ns).
+#if defined(NDEBUG)
+        // In optimized Release build, 16 nodes must finish well under 10 ms
         QVERIFY(stressNanos < 10000000);
+#else
+        // In unoptimized Debug build (-O0), must still comfortably beat the 85.3 ms audio deadline
+        QVERIFY(stressNanos < 85333333);
+#endif
 #endif
     }
 }
