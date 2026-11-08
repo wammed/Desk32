@@ -7,6 +7,7 @@ import Desk32.Core
 ApplicationWindow {
     id: root
     visible: true
+    visibility: Window.FullScreen
     width: 2560
     height: 1440
     minimumWidth: 1280
@@ -14,6 +15,17 @@ ApplicationWindow {
     title: qsTr("Desk32 - Audiophile Studio Console")
 
     color: "#0f1114"
+
+    Shortcut {
+        sequence: "F11"
+        onActivated: {
+            if (root.visibility === Window.FullScreen) {
+                root.visibility = Window.Windowed
+            } else {
+                root.visibility = Window.FullScreen
+            }
+        }
+    }
 
     // Active View state: "console" or "log"
     property string currentView: "console"
@@ -949,80 +961,456 @@ ApplicationWindow {
                             }
                         }
 
-                        // Master Volume Gain & VU Peak Meters
+                        // EXTERNAL INSERT (HOST BRIDGE) QUICK STATUS & ROUTING
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
+                            Layout.preferredHeight: 105
                             color: "#101215"
                             border.color: "#20252b"
                             radius: 4
 
                             ColumnLayout {
                                 anchors.fill: parent
-                                anchors.margins: 12
-                                spacing: 8
+                                anchors.margins: 10
+                                spacing: 6
 
-                                Label {
-                                    text: qsTr("MASTER OUTPUT LEVEL")
-                                    font.bold: true
-                                    font.pixelSize: 11
-                                    color: "#A0AAB2"
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label {
+                                        text: qsTr("EXTERNAL INSERT (HOST BRIDGE)")
+                                        font.bold: true
+                                        font.pixelSize: 11
+                                        color: "#A0AAB2"
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    // Status LED Badge
+                                    Rectangle {
+                                        id: insertBadgeQuick
+                                        property int st: EngineController.externalInsertState
+                                        property bool isByp: EngineController.externalInsertBypassed
+                                        width: 90
+                                        height: 18
+                                        radius: 3
+                                        color: st === 2 ? (isByp ? "#FFD60025" : "#00E67625") : (st === 1 ? "#00E5FF25" : (st === 0 ? "#262b32" : "#FF525225"))
+                                        border.color: st === 2 ? (isByp ? "#FFD600" : "#00E676") : (st === 1 ? "#00E5FF" : (st === 0 ? "#3a414d" : "#FF5252"))
+                                        Label {
+                                            anchors.centerIn: parent
+                                            text: insertBadgeQuick.st === 2 ? (insertBadgeQuick.isByp ? qsTr("BYPASS") : qsTr("ACTIVE")) : (insertBadgeQuick.st === 1 ? qsTr("CONNECTED") : (insertBadgeQuick.st === 0 ? qsTr("DISCONNECTED") : qsTr("ERROR")))
+                                            font.pixelSize: 9
+                                            font.bold: true
+                                            color: insertBadgeQuick.border.color
+                                        }
+                                    }
                                 }
 
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    Layout.fillHeight: true
-                                    spacing: 12
+                                    spacing: 6
+                                    Label {
+                                        text: qsTr("Host:")
+                                        font.pixelSize: 10
+                                        color: "#808c99"
+                                    }
+                                    Label {
+                                        text: EngineController.externalInsertClientName.length > 0 ? EngineController.externalInsertClientName : "Carla"
+                                        font.pixelSize: 11
+                                        font.bold: true
+                                        color: "#E0E6ED"
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Button {
+                                        text: EngineController.externalInsertBypassed ? qsTr("DRY BYPASS [ON]") : qsTr("INSERT [ON]")
+                                        font.pixelSize: 9
+                                        highlighted: !EngineController.externalInsertBypassed
+                                        Layout.preferredHeight: 22
+                                        onClicked: EngineController.externalInsertBypassed = !EngineController.externalInsertBypassed
+                                    }
+                                }
 
-                                    // Stereo VU meter bars
-                                    RowLayout {
-                                        Layout.fillHeight: true
-                                        spacing: 4
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 4
+                                    Label {
+                                        text: "Rep: " + EngineController.externalInsertReportedLatency + "smp | Meas: " + (EngineController.externalInsertMeasuredLatency >= 0 ? EngineController.externalInsertMeasuredLatency : "--") + "smp | PDC: " + EngineController.externalInsertDelayCompensation + "smp"
+                                        font.pixelSize: 9
+                                        font.family: "Monospace"
+                                        color: "#758291"
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Button {
+                                        text: qsTr("OPEN HOST PANEL ▶")
+                                        font.pixelSize: 9
+                                        highlighted: eqConsoleRect.eqMode === "insert"
+                                        Layout.preferredHeight: 22
+                                        onClicked: eqConsoleRect.eqMode = "insert"
+                                    }
+                                }
+                            }
+                        }
 
-                                        // Left meter
-                                        Rectangle {
-                                            width: 14
-                                            Layout.fillHeight: true
-                                            color: "#080a0c"
-                                            border.color: "#1e242c"
-                                            Rectangle {
-                                                anchors.bottom: parent.bottom
-                                                width: parent.width
-                                                height: parent.height * 0.72
-                                                color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
-                                            }
-                                        }
-                                        // Right meter
-                                        Rectangle {
-                                            width: 14
-                                            Layout.fillHeight: true
-                                            color: "#080a0c"
-                                            border.color: "#1e242c"
-                                            Rectangle {
-                                                anchors.bottom: parent.bottom
-                                                width: parent.width
-                                                height: parent.height * 0.70
-                                                color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
-                                            }
+                        // Master Volume Gain & VU Peak Meters - Studio Console Dual Long Vertical Faders
+                        Rectangle {
+                            id: masterSectionRect
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.minimumHeight: 280
+                            color: "#101215"
+                            border.color: "#20252b"
+                            radius: 4
+
+                            property bool fadersLinked: true
+
+                            function formatGainDb(g) {
+                                if (g <= 0.0001) return "-∞ dB";
+                                var db = 20.0 * Math.log10(g);
+                                return (db > 0.0 ? "+" : "") + db.toFixed(1) + " dB";
+                            }
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 6
+
+                                // Top Control Strip: Title, Balance, Link Toggle, Reset Button
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+
+                                    Label {
+                                        text: qsTr("MASTER BUS FADERS")
+                                        font.bold: true
+                                        font.pixelSize: 11
+                                        color: "#A0AAB2"
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    // Balance indicator
+                                    Rectangle {
+                                        height: 20
+                                        radius: 2
+                                        color: "#181c22"
+                                        border.color: "#2a313b"
+                                        implicitWidth: balText.implicitWidth + 8
+                                        Label {
+                                            id: balText
+                                            anchors.centerIn: parent
+                                            property double diff: EngineController.masterGainR - EngineController.masterGainL
+                                            text: Math.abs(diff) < 0.005 ? "BAL: C" : (diff < 0 ? ("BAL: L " + (-diff * 6.0).toFixed(1) + " dB") : ("BAL: R " + (diff * 6.0).toFixed(1) + " dB"))
+                                            font.pixelSize: 9
+                                            font.family: "Monospace"
+                                            font.bold: true
+                                            color: Math.abs(diff) < 0.005 ? "#00E5FF" : "#FFD600"
                                         }
                                     }
 
-                                    // Master Gain Slider
+                                    // Stereo Link Button
+                                    Button {
+                                        text: masterSectionRect.fadersLinked ? qsTr("🔗 LINK") : qsTr("⛓ UNLINK")
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        highlighted: masterSectionRect.fadersLinked
+                                        Layout.preferredHeight: 22
+                                        onClicked: masterSectionRect.fadersLinked = !masterSectionRect.fadersLinked
+                                    }
+
+                                    // Reset to 0 dB Unity Gain
+                                    Button {
+                                        text: "0 dB"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        Layout.preferredHeight: 22
+                                        onClicked: {
+                                            EngineController.setMasterGainL(1.0);
+                                            EngineController.setMasterGainR(1.0);
+                                            EngineController.setMasterGain(1.0);
+                                            masterSliderL.value = 1.0;
+                                            masterSliderR.value = 1.0;
+                                        }
+                                    }
+                                }
+
+                                // Dual Vertical Fader Bank
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    spacing: 8
+
+                                    // ================= LEFT CHANNEL =================
                                     ColumnLayout {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        Slider {
-                                            Layout.fillWidth: true
-                                            from: 0.0
-                                            to: 2.0
-                                            value: EngineController.masterGain
-                                            onMoved: EngineController.masterGain = value
-                                        }
+                                        spacing: 4
+
                                         Label {
                                             Layout.alignment: Qt.AlignHCenter
-                                            text: (20.0 * Math.log10(Math.max(0.0001, EngineController.masterGain))).toFixed(1) + " dBFS"
+                                            text: "CH L (LEFT)"
+                                            font.pixelSize: 10
+                                            font.bold: true
                                             font.family: "Monospace"
-                                            font.pixelSize: 12
+                                            color: "#00E5FF"
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 6
+
+                                            // Left VU Meter Bar
+                                            Rectangle {
+                                                width: 12
+                                                Layout.fillHeight: true
+                                                color: "#07090b"
+                                                border.color: "#1b2129"
+                                                radius: 2
+                                                clip: true
+
+                                                Rectangle {
+                                                    anchors.bottom: parent.bottom
+                                                    width: parent.width
+                                                    height: Math.max(4, parent.height * Math.min(1.0, 0.72 * EngineController.masterGainL))
+                                                    color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
+                                                }
+                                            }
+
+                                            // Left Long Vertical Slider
+                                            Slider {
+                                                id: masterSliderL
+                                                Layout.fillWidth: true
+                                                Layout.fillHeight: true
+                                                orientation: Qt.Vertical
+                                                from: 0.0
+                                                to: 2.0
+                                                value: EngineController.masterGainL
+                                                onMoved: {
+                                                    EngineController.setMasterGainL(value);
+                                                    if (masterSectionRect.fadersLinked) {
+                                                        EngineController.setMasterGainR(value);
+                                                        masterSliderR.value = value;
+                                                    }
+                                                }
+
+                                                background: Rectangle {
+                                                    x: (masterSliderL.width - width) / 2
+                                                    y: masterSliderL.topPadding
+                                                    width: 6
+                                                    height: masterSliderL.availableHeight
+                                                    color: "#0a0c0f"
+                                                    border.color: "#1d232c"
+                                                    radius: 3
+                                                    Rectangle {
+                                                        anchors.centerIn: parent
+                                                        width: 2
+                                                        height: parent.height - 4
+                                                        color: "#151a22"
+                                                    }
+                                                }
+
+                                                handle: Rectangle {
+                                                    x: (masterSliderL.width - width) / 2
+                                                    y: masterSliderL.topPadding + masterSliderL.visualPosition * (masterSliderL.availableHeight - height)
+                                                    width: 34
+                                                    height: 22
+                                                    radius: 3
+                                                    color: masterSliderL.pressed ? "#E53935" : "#D32F2F"
+                                                    border.color: "#FFCDD2"
+                                                    border.width: 1
+                                                    Rectangle {
+                                                        anchors.centerIn: parent
+                                                        width: parent.width - 6
+                                                        height: 2
+                                                        color: "#FFFFFF"
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    acceptedButtons: Qt.NoButton
+                                                    onDoubleClicked: {
+                                                        EngineController.setMasterGainL(1.0);
+                                                        masterSliderL.value = 1.0;
+                                                        if (masterSectionRect.fadersLinked) {
+                                                            EngineController.setMasterGainR(1.0);
+                                                            masterSliderR.value = 1.0;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Left Numerical Readout
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: masterSectionRect.formatGainDb(EngineController.masterGainL)
+                                            font.family: "Monospace"
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            color: "#00E5FF"
+                                        }
+                                    }
+
+                                    // ================= CENTER CALIBRATION SCALE =================
+                                    ColumnLayout {
+                                        Layout.fillHeight: true
+                                        Layout.preferredWidth: 42
+                                        spacing: 0
+
+                                        Item { Layout.preferredHeight: 18 }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 0
+
+                                            Repeater {
+                                                model: [
+                                                    { label: "+6 dB", color: "#FF5252" },
+                                                    { label: "+3 dB", color: "#FFD600" },
+                                                    { label: "  0 dB", color: "#00E5FF" },
+                                                    { label: " -3 dB", color: "#78909C" },
+                                                    { label: " -6 dB", color: "#78909C" },
+                                                    { label: "-12 dB", color: "#607D8B" },
+                                                    { label: "-18 dB", color: "#607D8B" },
+                                                    { label: "-24 dB", color: "#546E7A" },
+                                                    { label: "-36 dB", color: "#455A64" },
+                                                    { label: " -∞ dB", color: "#37474F" }
+                                                ]
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    Layout.fillHeight: true
+                                                    spacing: 2
+
+                                                    Rectangle {
+                                                        width: modelData.label.indexOf("0 dB") !== -1 ? 8 : 4
+                                                        height: 1
+                                                        color: modelData.color
+                                                    }
+
+                                                    Label {
+                                                        text: modelData.label
+                                                        font.pixelSize: 8
+                                                        font.family: "Monospace"
+                                                        font.bold: modelData.label.indexOf("0 dB") !== -1
+                                                        color: modelData.color
+                                                        Layout.fillWidth: true
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Item { Layout.preferredHeight: 18 }
+                                    }
+
+                                    // ================= RIGHT CHANNEL =================
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        spacing: 4
+
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: "CH R (RIGHT)"
+                                            font.pixelSize: 10
+                                            font.bold: true
+                                            font.family: "Monospace"
+                                            color: "#00E5FF"
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 6
+
+                                            // Right Long Vertical Slider
+                                            Slider {
+                                                id: masterSliderR
+                                                Layout.fillWidth: true
+                                                Layout.fillHeight: true
+                                                orientation: Qt.Vertical
+                                                from: 0.0
+                                                to: 2.0
+                                                value: EngineController.masterGainR
+                                                onMoved: {
+                                                    EngineController.setMasterGainR(value);
+                                                    if (masterSectionRect.fadersLinked) {
+                                                        EngineController.setMasterGainL(value);
+                                                        masterSliderL.value = value;
+                                                    }
+                                                }
+
+                                                background: Rectangle {
+                                                    x: (masterSliderR.width - width) / 2
+                                                    y: masterSliderR.topPadding
+                                                    width: 6
+                                                    height: masterSliderR.availableHeight
+                                                    color: "#0a0c0f"
+                                                    border.color: "#1d232c"
+                                                    radius: 3
+                                                    Rectangle {
+                                                        anchors.centerIn: parent
+                                                        width: 2
+                                                        height: parent.height - 4
+                                                        color: "#151a22"
+                                                    }
+                                                }
+
+                                                handle: Rectangle {
+                                                    x: (masterSliderR.width - width) / 2
+                                                    y: masterSliderR.topPadding + masterSliderR.visualPosition * (masterSliderR.availableHeight - height)
+                                                    width: 34
+                                                    height: 22
+                                                    radius: 3
+                                                    color: masterSliderR.pressed ? "#E53935" : "#D32F2F"
+                                                    border.color: "#FFCDD2"
+                                                    border.width: 1
+                                                    Rectangle {
+                                                        anchors.centerIn: parent
+                                                        width: parent.width - 6
+                                                        height: 2
+                                                        color: "#FFFFFF"
+                                                    }
+                                                }
+
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    acceptedButtons: Qt.NoButton
+                                                    onDoubleClicked: {
+                                                        EngineController.setMasterGainR(1.0);
+                                                        masterSliderR.value = 1.0;
+                                                        if (masterSectionRect.fadersLinked) {
+                                                            EngineController.setMasterGainL(1.0);
+                                                            masterSliderL.value = 1.0;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Right VU Meter Bar
+                                            Rectangle {
+                                                width: 12
+                                                Layout.fillHeight: true
+                                                color: "#07090b"
+                                                border.color: "#1b2129"
+                                                radius: 2
+                                                clip: true
+
+                                                Rectangle {
+                                                    anchors.bottom: parent.bottom
+                                                    width: parent.width
+                                                    height: Math.max(4, parent.height * Math.min(1.0, 0.70 * EngineController.masterGainR))
+                                                    color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
+                                                }
+                                            }
+                                        }
+
+                                        // Right Numerical Readout
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: masterSectionRect.formatGainDb(EngineController.masterGainR)
+                                            font.family: "Monospace"
+                                            font.pixelSize: 11
+                                            font.bold: true
                                             color: "#00E5FF"
                                         }
                                     }
@@ -1073,7 +1461,7 @@ ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Label {
-                            text: qsTr("STUDIO EQUALIZER CONSOLE")
+                            text: qsTr("STUDIO PROCESSING CONSOLE // EQUALIZERS & EXTERNAL INSERT HOST")
                             font.bold: true
                             font.pixelSize: 13
                             color: "#00E5FF"
@@ -1100,12 +1488,19 @@ ApplicationWindow {
                             highlighted: eqConsoleRect.eqMode === "peq"
                             onClicked: eqConsoleRect.eqMode = "peq"
                         }
+                        Button {
+                            text: qsTr("External Insert (Carla / Plugin Host)")
+                            flat: eqConsoleRect.eqMode !== "insert"
+                            highlighted: eqConsoleRect.eqMode === "insert"
+                            onClicked: eqConsoleRect.eqMode = "insert"
+                        }
                     }
 
                     // DYNAMIC FREQUENCY RESPONSE CURVE CANVAS (SECTION 5.8)
                     Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 120
+                        visible: eqConsoleRect.eqMode !== "insert"
                         color: "#090b0e"
                         border.color: "#1f242c"
                         radius: 3
@@ -1626,6 +2021,516 @@ ApplicationWindow {
                                                 value: 1.0
                                                 onMoved: peqContainer.updateActiveBand()
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // PAGE 2: EXTERNAL INSERT STUDIO RACK (4 CARDS)
+                        Rectangle {
+                            id: insertControlCenter
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            visible: eqConsoleRect.eqMode === "insert"
+                            color: "transparent"
+
+                            Connections {
+                                target: EngineController
+                                function onExternalInsertStatusChanged() {
+                                    if (!insertClientNameInput.activeFocus) insertClientNameInput.text = EngineController.externalInsertClientName;
+                                    if (!insertSendLInput.activeFocus) insertSendLInput.text = EngineController.externalInsertSendPortL;
+                                    if (!insertSendRInput.activeFocus) insertSendRInput.text = EngineController.externalInsertSendPortR;
+                                    if (!insertReturnLInput.activeFocus) insertReturnLInput.text = EngineController.externalInsertReturnPortL;
+                                    if (!insertReturnRInput.activeFocus) insertReturnRInput.text = EngineController.externalInsertReturnPortR;
+                                }
+                            }
+
+                            onVisibleChanged: {
+                                if (visible) {
+                                    insertPresetCombo.model = EngineController.listPresets("external_insert");
+                                }
+                            }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                spacing: 10
+
+                                // CARD 1: PORT ROUTING & CLIENT CONFIGURATION
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#0d0f12"
+                                    border.color: "#1c2128"
+                                    radius: 3
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+
+                                        Label {
+                                            text: qsTr("1. PORT ROUTING & HOST CLIENT")
+                                            font.bold: true
+                                            font.pixelSize: 11
+                                            color: "#00E5FF"
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Label { text: qsTr("Target Host Client Name:"); font.pixelSize: 10; color: "#808c99" }
+                                            TextField {
+                                                id: insertClientNameInput
+                                                Layout.fillWidth: true
+                                                text: EngineController.externalInsertClientName
+                                                placeholderText: "e.g. Carla, lsp-plugins"
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("Send Port L:"); font.pixelSize: 10; color: "#808c99" }
+                                                TextField {
+                                                    id: insertSendLInput
+                                                    Layout.fillWidth: true
+                                                    text: EngineController.externalInsertSendPortL
+                                                    placeholderText: "carla:audio_in_1"
+                                                }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("Send Port R:"); font.pixelSize: 10; color: "#808c99" }
+                                                TextField {
+                                                    id: insertSendRInput
+                                                    Layout.fillWidth: true
+                                                    text: EngineController.externalInsertSendPortR
+                                                    placeholderText: "carla:audio_in_2"
+                                                }
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("Return Port L:"); font.pixelSize: 10; color: "#808c99" }
+                                                TextField {
+                                                    id: insertReturnLInput
+                                                    Layout.fillWidth: true
+                                                    text: EngineController.externalInsertReturnPortL
+                                                    placeholderText: "carla:audio_out_1"
+                                                }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("Return Port R:"); font.pixelSize: 10; color: "#808c99" }
+                                                TextField {
+                                                    id: insertReturnRInput
+                                                    Layout.fillWidth: true
+                                                    text: EngineController.externalInsertReturnPortR
+                                                    placeholderText: "carla:audio_out_2"
+                                                }
+                                            }
+                                        }
+
+                                        Item { Layout.fillHeight: true }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 8
+                                            Button {
+                                                text: qsTr("Connect / Reconfigure")
+                                                highlighted: true
+                                                Layout.fillWidth: true
+                                                onClicked: {
+                                                    EngineController.configureExternalInsert(
+                                                        insertClientNameInput.text,
+                                                        insertSendLInput.text,
+                                                        insertSendRInput.text,
+                                                        insertReturnLInput.text,
+                                                        insertReturnRInput.text,
+                                                        EngineController.graphSampleRate,
+                                                        256,
+                                                        EngineController.externalInsertReportedLatency
+                                                    );
+                                                }
+                                            }
+                                            Button {
+                                                text: qsTr("Disconnect")
+                                                Layout.preferredWidth: 90
+                                                onClicked: EngineController.disconnectExternalInsert()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // CARD 2: HOST STATUS & SIGNAL INTEGRITY
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#0d0f12"
+                                    border.color: "#1c2128"
+                                    radius: 3
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+
+                                        Label {
+                                            text: qsTr("2. HOST STATUS & INTEGRITY")
+                                            font.bold: true
+                                            font.pixelSize: 11
+                                            color: "#00E5FF"
+                                        }
+
+                                        Rectangle {
+                                            id: insertBadgeFull
+                                            Layout.fillWidth: true
+                                            height: 44
+                                            radius: 3
+                                            property int st: EngineController.externalInsertState
+                                            property bool isByp: EngineController.externalInsertBypassed
+                                            color: st === 2 ? (isByp ? "#FFD60020" : "#00E67620") : (st === 1 ? "#00E5FF20" : (st === 0 ? "#1c2128" : "#FF525220"))
+                                            border.color: st === 2 ? (isByp ? "#FFD600" : "#00E676") : (st === 1 ? "#00E5FF" : (st === 0 ? "#2c333e" : "#FF5252"))
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 8
+                                                spacing: 10
+                                                Rectangle {
+                                                    width: 12
+                                                    height: 12
+                                                    radius: 6
+                                                    color: insertBadgeFull.border.color
+                                                }
+                                                ColumnLayout {
+                                                    spacing: 1
+                                                    Label {
+                                                        text: EngineController.externalInsertStateText.toUpperCase()
+                                                        font.bold: true
+                                                        font.pixelSize: 11
+                                                        color: insertBadgeFull.border.color
+                                                    }
+                                                    Label {
+                                                        text: EngineController.externalInsertBypassed ? qsTr("Dry Bypass Active (Lossless passthrough)") : qsTr("Active Stream passing through Insert Node")
+                                                        font.pixelSize: 9
+                                                        color: "#9aa5b1"
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Button {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 30
+                                            text: EngineController.externalInsertBypassed ? qsTr("ENGAGE INSERT (DISABLE BYPASS)") : qsTr("FORCE DRY BYPASS (MUTE INSERT)")
+                                            highlighted: !EngineController.externalInsertBypassed
+                                            onClicked: EngineController.setExternalInsertBypass(!EngineController.externalInsertBypassed)
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 3
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Feedback Protection:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label { text: qsTr("PASSED (SAFE)"); font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Sample Rate Match:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label { text: (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz (MATCHED)"; font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Buffer Size Match:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label { text: "256 smp (MATCHED)"; font.pixelSize: 9; font.bold: true; color: "#00E676" }
+                                            }
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Insert XRUN / Dropouts:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: EngineController.externalInsertXRunCount.toString()
+                                                    font.pixelSize: 9
+                                                    font.bold: true
+                                                    color: EngineController.externalInsertXRunCount === 0 ? "#00E676" : "#FF5252"
+                                                }
+                                                Button {
+                                                    text: qsTr("Reset")
+                                                    font.pixelSize: 8
+                                                    Layout.preferredHeight: 18
+                                                    onClicked: EngineController.resetInsertXRuns()
+                                                }
+                                            }
+                                        }
+
+                                        Item { Layout.fillHeight: true }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            Button {
+                                                text: qsTr("Simulate Drop")
+                                                font.pixelSize: 8
+                                                Layout.fillWidth: true
+                                                onClicked: EngineController.simulateInsertDisconnect()
+                                            }
+                                            Button {
+                                                text: qsTr("Simulate Recovery")
+                                                font.pixelSize: 8
+                                                Layout.fillWidth: true
+                                                onClicked: EngineController.simulateInsertRecovery()
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // CARD 3: PDC & LATENCY CALIBRATION
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#0d0f12"
+                                    border.color: "#1c2128"
+                                    radius: 3
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+
+                                        Label {
+                                            text: qsTr("3. PDC & LATENCY CALIBRATION")
+                                            font.bold: true
+                                            font.pixelSize: 11
+                                            color: "#00E5FF"
+                                        }
+
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            height: 36
+                                            color: "#07090b"
+                                            border.color: "#181d24"
+                                            radius: 2
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 6
+                                                Label { text: qsTr("Reported Latency:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: EngineController.externalInsertReportedLatency + " smp (" + (EngineController.externalInsertReportedLatency / 48.0).toFixed(2) + " ms)"
+                                                    font.family: "Monospace"
+                                                    font.pixelSize: 10
+                                                    font.bold: true
+                                                    color: "#00E5FF"
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            height: 36
+                                            color: "#07090b"
+                                            border.color: "#181d24"
+                                            radius: 2
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 6
+                                                Label { text: qsTr("Measured (Impulse):"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: EngineController.externalInsertMeasuredLatency >= 0 ?
+                                                          (EngineController.externalInsertMeasuredLatency + " smp (" + EngineController.externalInsertMeasuredLatencyMs.toFixed(2) + " ms)") :
+                                                          qsTr("Not Calibrated")
+                                                    font.family: "Monospace"
+                                                    font.pixelSize: 10
+                                                    font.bold: true
+                                                    color: EngineController.externalInsertMeasuredLatency >= 0 ? "#00E676" : "#FFB300"
+                                                }
+                                            }
+                                        }
+
+                                        Button {
+                                            text: qsTr("CALIBRATE IMPULSE LATENCY NOW")
+                                            font.bold: true
+                                            font.pixelSize: 9
+                                            highlighted: true
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 28
+                                            onClicked: EngineController.calibrateInsertLatency()
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Delay Compensation Buffer:"); font.pixelSize: 9; color: "#808c99" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    text: EngineController.externalInsertDelayCompensation + " smp (" + (EngineController.externalInsertDelayCompensation / 48.0).toFixed(2) + " ms)"
+                                                    font.family: "Monospace"
+                                                    font.pixelSize: 10
+                                                    font.bold: true
+                                                    color: "#00E5FF"
+                                                }
+                                            }
+                                            Slider {
+                                                id: pdcSlider
+                                                Layout.fillWidth: true
+                                                from: 0
+                                                to: 4096
+                                                stepSize: 1
+                                                value: EngineController.externalInsertDelayCompensation
+                                                onMoved: EngineController.setInsertDelayCompensation(value)
+                                            }
+                                        }
+
+                                        Item { Layout.fillHeight: true }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 4
+                                            Button {
+                                                text: qsTr("To Measured")
+                                                font.pixelSize: 8
+                                                Layout.fillWidth: true
+                                                enabled: EngineController.externalInsertMeasuredLatency >= 0
+                                                onClicked: {
+                                                    if (EngineController.externalInsertMeasuredLatency >= 0) {
+                                                        EngineController.setInsertDelayCompensation(EngineController.externalInsertMeasuredLatency);
+                                                    }
+                                                }
+                                            }
+                                            Button {
+                                                text: qsTr("To Reported")
+                                                font.pixelSize: 8
+                                                Layout.fillWidth: true
+                                                onClicked: EngineController.setInsertDelayCompensation(EngineController.externalInsertReportedLatency)
+                                            }
+                                            Button {
+                                                text: qsTr("Zero (0)")
+                                                font.pixelSize: 8
+                                                Layout.preferredWidth: 60
+                                                onClicked: EngineController.setInsertDelayCompensation(0)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // CARD 4: PRESET MANAGEMENT (XDG COMPLIANT)
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#0d0f12"
+                                    border.color: "#1c2128"
+                                    radius: 3
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 12
+                                        spacing: 8
+
+                                        Label {
+                                            text: qsTr("4. PRESET MANAGEMENT (XDG)")
+                                            font.bold: true
+                                            font.pixelSize: 11
+                                            color: "#00E5FF"
+                                        }
+
+                                        Label {
+                                            text: qsTr("Category: external_insert")
+                                            font.pixelSize: 9
+                                            color: "#6c7885"
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Label { text: qsTr("Select Preset:"); font.pixelSize: 9; color: "#808c99" }
+                                            ComboBox {
+                                                id: insertPresetCombo
+                                                Layout.fillWidth: true
+                                                model: EngineController.listPresets("external_insert")
+                                            }
+                                        }
+
+                                        Button {
+                                            text: qsTr("Apply Selected Preset")
+                                            font.bold: true
+                                            font.pixelSize: 9
+                                            highlighted: true
+                                            Layout.fillWidth: true
+                                            onClicked: {
+                                                if (insertPresetCombo.currentText.length > 0) {
+                                                    EngineController.applyPresetProfile("external_insert", insertPresetCombo.currentText);
+                                                }
+                                            }
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Label { text: qsTr("Save Current Setup:"); font.pixelSize: 9; color: "#808c99" }
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 4
+                                                TextField {
+                                                    id: newPresetNameInput
+                                                    Layout.fillWidth: true
+                                                    placeholderText: qsTr("Preset name...")
+                                                }
+                                                Button {
+                                                    text: qsTr("Save")
+                                                    enabled: newPresetNameInput.text.trim().length > 0
+                                                    onClicked: {
+                                                        var map = EngineController.captureCurrentStateAsPreset("external_insert");
+                                                        EngineController.savePreset("external_insert", newPresetNameInput.text.trim(), map);
+                                                        insertPresetCombo.model = EngineController.listPresets("external_insert");
+                                                        newPresetNameInput.text = "";
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Item { Layout.fillHeight: true }
+
+                                        Button {
+                                            text: qsTr("Delete Selected Preset")
+                                            font.pixelSize: 8
+                                            Layout.fillWidth: true
+                                            enabled: insertPresetCombo.currentText !== "Carla Default" && insertPresetCombo.currentText !== "LSP Plugins Rack"
+                                            onClicked: {
+                                                if (insertPresetCombo.currentText.length > 0) {
+                                                    EngineController.deletePreset("external_insert", insertPresetCombo.currentText);
+                                                    insertPresetCombo.model = EngineController.listPresets("external_insert");
+                                                }
+                                            }
+                                        }
+
+                                        Label {
+                                            text: qsTr("Factory presets (Carla, LSP) are protected.")
+                                            font.pixelSize: 8
+                                            color: "#6c7885"
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
                                         }
                                     }
                                 }

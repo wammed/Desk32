@@ -29,6 +29,8 @@ class EngineController : public QObject {
     Q_PROPERTY(int outputRoutingMode READ outputRoutingMode WRITE setOutputRoutingMode NOTIFY outputRoutingModeChanged)
     Q_PROPERTY(bool globalDspBypass READ globalDspBypass WRITE setGlobalDspBypass NOTIFY globalDspBypassChanged)
     Q_PROPERTY(double masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
+    Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY masterGainChanged)
+    Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY masterGainChanged)
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
@@ -52,6 +54,11 @@ class EngineController : public QObject {
     Q_PROPERTY(int externalInsertDelayCompensation READ insertDelayCompensation WRITE setInsertDelayCompensation NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(int externalInsertXRunCount READ externalInsertXRunCount NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(QString externalInsertLastError READ externalInsertLastError NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertClientName READ externalInsertClientName NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertSendPortL READ externalInsertSendPortL NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertSendPortR READ externalInsertSendPortR NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertReturnPortL READ externalInsertReturnPortL NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(QString externalInsertReturnPortR READ externalInsertReturnPortR NOTIFY externalInsertStatusChanged)
 
     // Phase 4: Export & Render Telemetry (Section 5.11 & 20.1)
     Q_PROPERTY(bool isRendering READ isRendering NOTIFY renderStateChanged)
@@ -76,6 +83,8 @@ public:
     [[nodiscard]] int outputRoutingMode() const;
     [[nodiscard]] bool globalDspBypass() const;
     [[nodiscard]] double masterGain() const;
+    [[nodiscard]] double masterGainL() const;
+    [[nodiscard]] double masterGainR() const;
     [[nodiscard]] int xrunCount() const;
     [[nodiscard]] bool isDirectMode() const;
     [[nodiscard]] int directModeStatus() const;
@@ -99,6 +108,11 @@ public:
     [[nodiscard]] int insertDelayCompensation() const;
     [[nodiscard]] int externalInsertXRunCount() const;
     [[nodiscard]] QString externalInsertLastError() const;
+    [[nodiscard]] QString externalInsertClientName() const;
+    [[nodiscard]] QString externalInsertSendPortL() const;
+    [[nodiscard]] QString externalInsertSendPortR() const;
+    [[nodiscard]] QString externalInsertReturnPortL() const;
+    [[nodiscard]] QString externalInsertReturnPortR() const;
 
     // Phase 4 Getters
     [[nodiscard]] bool isRendering() const;
@@ -113,6 +127,8 @@ public:
     void setOutputRoutingMode(int path);
     void setGlobalDspBypass(bool bypass);
     void setMasterGain(double gain);
+    void setMasterGainL(double gain);
+    void setMasterGainR(double gain);
 
     // QML-invokable Deck Operations
     Q_INVOKABLE void play(const QString& deckId);
@@ -172,8 +188,11 @@ public:
                                             int reportedLatencyFrames = 0);
     Q_INVOKABLE void setExternalInsertBypass(bool bypass);
     Q_INVOKABLE void triggerInsertLatencyMeasurement();
+    Q_INVOKABLE void calibrateInsertLatency();
     Q_INVOKABLE void recordInsertImpulseReturn(qint64 returnFrame);
     Q_INVOKABLE QVariantMap getExternalInsertStatus() const;
+    Q_INVOKABLE void disconnectExternalInsert();
+    Q_INVOKABLE void resetInsertXRuns();
     Q_INVOKABLE void simulateInsertDisconnect();
     Q_INVOKABLE void simulateInsertRecovery();
     Q_INVOKABLE void setInsertDelayCompensation(int frames);
@@ -252,6 +271,8 @@ private:
     std::atomic<int> m_outputRoutingMode{0}; // 0 = Listening, 1 = RenderMonitor
     std::atomic<bool> m_globalDspBypass{false};
     std::atomic<double> m_masterGain{1.0};
+    std::atomic<double> m_masterGainL{1.0};
+    std::atomic<double> m_masterGainR{1.0};
 
     // Pre-allocated Audio Thread scratch buffers (strictly ZERO dynamic allocation in RT audio callback)
     alignas(64) std::array<double, 4096> m_audioInL{};

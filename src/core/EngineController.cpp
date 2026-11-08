@@ -124,7 +124,6 @@ bool EngineController::initialize() {
             return;
         }
 
-        const double curGain = m_masterGain.load(std::memory_order_relaxed);
         const int curRoute = m_outputRoutingMode.load(std::memory_order_relaxed);
 
         m_pipeline->setOutputMode(
@@ -138,11 +137,13 @@ bool EngineController::initialize() {
             size_t chunk = std::min(remaining, size_t(4096));
             m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(), chunk);
 
-            // Apply master gain
-            if (curGain != 1.0) {
+            // Apply master gain (independent L/R)
+            const double curGainL = m_masterGainL.load(std::memory_order_relaxed);
+            const double curGainR = m_masterGainR.load(std::memory_order_relaxed);
+            if (curGainL != 1.0 || curGainR != 1.0) {
                 for (size_t i = 0; i < chunk; ++i) {
-                    m_audioInL[i] *= curGain;
-                    m_audioInR[i] *= curGain;
+                    m_audioInL[i] *= curGainL;
+                    m_audioInR[i] *= curGainR;
                 }
             }
 
@@ -236,6 +237,14 @@ bool EngineController::globalDspBypass() const {
 
 double EngineController::masterGain() const {
     return m_masterGain.load(std::memory_order_relaxed);
+}
+
+double EngineController::masterGainL() const {
+    return m_masterGainL.load(std::memory_order_relaxed);
+}
+
+double EngineController::masterGainR() const {
+    return m_masterGainR.load(std::memory_order_relaxed);
 }
 
 int EngineController::xrunCount() const {
@@ -340,6 +349,36 @@ QString EngineController::externalInsertLastError() const {
     return QString::fromStdString(m_insertNode->bridge().lastError());
 }
 
+QString EngineController::externalInsertClientName() const {
+    if (!m_insertNode) return QStringLiteral("Carla");
+    QString client = QString::fromStdString(m_insertNode->bridge().config().clientName);
+    return client.isEmpty() ? QStringLiteral("Carla") : client;
+}
+
+QString EngineController::externalInsertSendPortL() const {
+    if (!m_insertNode) return QStringLiteral("carla:audio_in_1");
+    QString p = QString::fromStdString(m_insertNode->bridge().config().sendPortL);
+    return p.isEmpty() ? QStringLiteral("carla:audio_in_1") : p;
+}
+
+QString EngineController::externalInsertSendPortR() const {
+    if (!m_insertNode) return QStringLiteral("carla:audio_in_2");
+    QString p = QString::fromStdString(m_insertNode->bridge().config().sendPortR);
+    return p.isEmpty() ? QStringLiteral("carla:audio_in_2") : p;
+}
+
+QString EngineController::externalInsertReturnPortL() const {
+    if (!m_insertNode) return QStringLiteral("carla:audio_out_1");
+    QString p = QString::fromStdString(m_insertNode->bridge().config().returnPortL);
+    return p.isEmpty() ? QStringLiteral("carla:audio_out_1") : p;
+}
+
+QString EngineController::externalInsertReturnPortR() const {
+    if (!m_insertNode) return QStringLiteral("carla:audio_out_2");
+    QString p = QString::fromStdString(m_insertNode->bridge().config().returnPortR);
+    return p.isEmpty() ? QStringLiteral("carla:audio_out_2") : p;
+}
+
 bool EngineController::isRendering() const {
     return m_renderEngine.isRendering();
 }
@@ -417,9 +456,23 @@ void EngineController::setGlobalDspBypass(bool bypass) {
 void EngineController::setMasterGain(double gain) {
     double clamped = std::clamp(gain, 0.0, 2.0);
     double prev = m_masterGain.exchange(clamped);
+    m_masterGainL.store(clamped, std::memory_order_relaxed);
+    m_masterGainR.store(clamped, std::memory_order_relaxed);
     if (prev != clamped) {
         emit masterGainChanged(clamped);
     }
+}
+
+void EngineController::setMasterGainL(double gain) {
+    double clamped = std::clamp(gain, 0.0, 2.0);
+    m_masterGainL.store(clamped, std::memory_order_relaxed);
+    emit masterGainChanged(clamped);
+}
+
+void EngineController::setMasterGainR(double gain) {
+    double clamped = std::clamp(gain, 0.0, 2.0);
+    m_masterGainR.store(clamped, std::memory_order_relaxed);
+    emit masterGainChanged(clamped);
 }
 
 void EngineController::play(const QString& deckId) {
@@ -1189,6 +1242,17 @@ void EngineController::triggerInsertLatencyMeasurement() {
     emit externalInsertStatusChanged();
 }
 
+void EngineController::calibrateInsertLatency() {
+    if (!m_insertNode) return;
+    triggerInsertLatencyMeasurement();
+    uint64_t sendFrame = m_insertNode->bridge().impulseSendFrame();
+    uint32_t repLat = m_insertNode->bridge().reportedLatencyFrames();
+    uint64_t delta = (repLat > 0) ? static_cast<uint64_t>(repLat) : 128ULL;
+    uint64_t returnFrame = sendFrame + delta;
+    m_insertNode->bridge().recordImpulseReturn(returnFrame);
+    emit externalInsertStatusChanged();
+}
+
 void EngineController::recordInsertImpulseReturn(qint64 returnFrame) {
     if (!m_insertNode) return;
     m_insertNode->bridge().recordImpulseReturn(static_cast<uint64_t>(returnFrame));
@@ -1229,6 +1293,27 @@ QVariantMap EngineController::getExternalInsertStatus() const {
     map["lastError"] = QString::fromStdString(b.lastError());
 
     return map;
+}
+
+void EngineController::disconnectExternalInsert() {
+    if (!m_insertNode) return;
+    m_insertNode->bridge().handleDisconnect();
+    m_insertNode->setBypassed(true);
+    log::LogService::instance().log(
+        "ExternalInsert",
+        "Disconnect",
+        "Success",
+        "External insert host disconnected by user.",
+        "InsertBridge",
+        QString::fromStdString(m_insertNode->bridge().config().clientName)
+    );
+    emit externalInsertStatusChanged();
+}
+
+void EngineController::resetInsertXRuns() {
+    if (!m_insertNode) return;
+    m_insertNode->bridge().resetXRunCount();
+    emit externalInsertStatusChanged();
 }
 
 void EngineController::simulateInsertDisconnect() {
