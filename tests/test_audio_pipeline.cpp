@@ -426,7 +426,8 @@ void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
     const size_t numReaders = 8;
     std::atomic<bool> stop{false};
     std::vector<std::thread> readers;
-    std::vector<uint64_t> readerCounts(numReaders, 0);
+    std::array<std::atomic<uint64_t>, 8> readerCounts{};
+    for (auto& c : readerCounts) c.store(0);
 
     for (size_t t = 0; t < numReaders; ++t) {
         readers.emplace_back([&reclaimer, &stop, &readerCounts, t]() {
@@ -436,7 +437,7 @@ void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
                     volatile size_t sz = guard->size();
                     (void)sz;
                 }
-                readerCounts[t]++;
+                readerCounts[t].fetch_add(1, std::memory_order_relaxed);
                 std::this_thread::yield();
             }
         });
@@ -456,6 +457,13 @@ void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
         reclaimer.swapChain(std::make_unique<std::string>("Chain Swap " + std::to_string(i)));
     }
 
+    // Ensure all readers have actively scheduled and read at least 20 times (deterministic synchronization)
+    for (size_t t = 0; t < numReaders; ++t) {
+        while (readerCounts[t].load(std::memory_order_relaxed) < 20) {
+            std::this_thread::yield();
+        }
+    }
+
     stop.store(true, std::memory_order_relaxed);
     for (auto& r : readers) {
         r.join();
@@ -466,7 +474,7 @@ void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
     for (size_t t = 0; t < numReaders; ++t) {
-        QVERIFY(readerCounts[t] > 10);
+        QVERIFY(readerCounts[t].load() > 10);
     }
 }
 

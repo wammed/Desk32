@@ -144,7 +144,7 @@ jobs:
 
       - name: Run Tests under ASan & LSan
         run: |
-          ASAN_OPTIONS="detect_leaks=1" ctest --test-dir build_asan --output-on-failure
+          ASAN_OPTIONS="detect_leaks=1" LSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/lsan.supp" ctest --test-dir build_asan --output-on-failure
 
   ubsan-build-and-test:
     name: UBSan Sanitizer Verification

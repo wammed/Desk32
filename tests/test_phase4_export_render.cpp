@@ -593,7 +593,8 @@ void TestPhase4ExportRender::testRenderWorkerThreadOwnership()
     QString taskId = engine.enqueueTrackRender(trackPath);
     QVERIFY(!taskId.isEmpty());
 
-    QVERIFY(finishedSpy.wait(5000));
+    // Wait for render task completion (up to 15s to accommodate low-core CI virtual machines in Debug)
+    QVERIFY(finishedSpy.wait(15000));
     QCOMPARE(finishedSpy.count(), 1);
 
     auto args = finishedSpy.takeFirst();

@@ -1,0 +1,5 @@
+leak:libpipewire
+leak:pw_context_load_module
+leak:libQt6Core
+leak:libasound
+
