@@ -71,24 +71,22 @@ void LogService::postLog(const LogEvent& ev) {
     {
         std::lock_guard<std::mutex> lock(m_cvMutex);
         m_cv.notify_one();
-    }
 
-    // Notify UI via queued signal
-    QMetaObject::invokeMethod(this, [this, ev]() {
-        emit logAppended(
-            QString::fromStdString(ev.category),
-            QString::fromStdString(ev.operation),
-            QString::fromStdString(ev.status),
-            QString::fromStdString(ev.message)
-        );
-    }, Qt::QueuedConnection);
+        // Notify UI via queued signal under m_cvMutex to serialize QPostEventList access across std::threads
+        QMetaObject::invokeMethod(this, [this, ev]() {
+            emit logAppended(
+                QString::fromStdString(ev.category),
+                QString::fromStdString(ev.operation),
+                QString::fromStdString(ev.status),
+                QString::fromStdString(ev.message)
+            );
+        }, Qt::QueuedConnection);
+    }
 }
 
 void LogService::postRealtimeLog(const LogEvent& ev) {
-    // Strictly non-blocking push for real-time Audio Thread
-    if (m_queue.try_push(ev)) {
-        m_cv.notify_one();
-    }
+    // Strictly non-blocking push for real-time Audio Thread (workerLoop drains periodically or on flush)
+    m_queue.try_push(ev);
 }
 
 void LogService::flush() {

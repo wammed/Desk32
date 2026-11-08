@@ -1,9 +1,7 @@
-race:libQt6Core.so
-race:libQt6Test.so
-race:libpipewire-0.3.so
-race:libasound.so
-race:QTest
-thread:libQt6Core.so
-thread:QThread
+# External library suppressions for ThreadSanitizer (P0-28 audited minimal set)
+# 1. Qt6 QTest Watchdog thread internal stack variable race during QTest::qExec teardown
+race:libQt6Test
+# 2. Qt6 QTest Watchdog QThread leak at process exit (Desk32 uses std::thread exclusively and never calls QThread::start)
+thread:QThread::start
+# 3. PipeWire pw_thread_loop internal mutex unlock across loop/control threads
 mutex:libpipewire-0.3.so
-mutex:libpipewire

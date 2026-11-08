@@ -105,7 +105,7 @@ public:
     void setCeilingDb(double db) { configure(m_sampleRate, db, m_releaseMs, m_lookaheadMs, m_enabled.load(std::memory_order_relaxed)); }
     void setReleaseMs(double ms) { configure(m_sampleRate, m_ceilingDb, ms, m_lookaheadMs, m_enabled.load(std::memory_order_relaxed)); }
     void setLookaheadMs(double ms) { configure(m_sampleRate, m_ceilingDb, m_releaseMs, ms, m_enabled.load(std::memory_order_relaxed)); }
-    void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_ceilingDb, m_releaseMs, m_lookaheadMs, enabled); }
+    void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
 
     PeakLimiter* nextRetired = nullptr;
 
@@ -149,7 +149,7 @@ public:
     {
         auto guard = m_paramsReclaimer.enterRead();
         const Params* p = guard.get();
-        if (!p || !p->enabled) {
+        if (!p || !m_enabled.load(std::memory_order_relaxed)) {
             m_gainReductionDb.store(0.0, std::memory_order_relaxed);
             return;
         }

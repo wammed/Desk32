@@ -21,8 +21,8 @@ DecoderWorker::~DecoderWorker() {
             }
         }
         m_pendingCommands.clear();
+        m_cmdCv.notify_all();
     }
-    m_cmdCv.notify_all();
     if (m_thread.joinable()) {
         m_thread.join();
     }
@@ -33,6 +33,7 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
     auto future = promise->get_future();
     uint64_t seq = 0;
     uint64_t reqId = 0;
+    uint32_t timeoutMs = 5000;
 
     // Linearization Point: Lock m_trackMutex and m_cmdMutex together in strict hierarchical order
     // to atomically issue the Request ID and enqueue the command, eliminating Close/Open interleaving race
@@ -40,6 +41,7 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
         std::lock_guard<std::mutex> trackLock(m_trackMutex);
         std::lock_guard<std::mutex> cmdLock(m_cmdMutex);
 
+        timeoutMs = m_openTimeoutMs.load(std::memory_order_acquire);
         reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
         m_activeRequestId.store(reqId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
@@ -53,22 +55,24 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
         cmd.requestId = reqId;
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 
-    if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
-        bool ok = future.get();
-        m_lastOpenStatus.store(ok ? OpenStatus::Success : OpenStatus::Failed, std::memory_order_release);
-        return ok;
+    if (future.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready) {
+        return future.get();
     }
 
     // P0-26: Timed out: Invalidate active request ID under m_trackMutex to serialize with worker commit
     {
         std::lock_guard<std::mutex> lock(m_trackMutex);
+        if (m_committedRequestId.load(std::memory_order_acquire) == reqId) {
+            return true;
+        }
         uint64_t expected = reqId;
-        m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+        if (m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) {
+            m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
+        }
     }
-    m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
 
@@ -77,12 +81,14 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     auto future = promise->get_future();
     uint64_t seq = 0;
     uint64_t reqId = 0;
+    uint32_t timeoutMs = 5000;
 
     // Linearization Point: Lock m_trackMutex and m_cmdMutex together in strict hierarchical order
     {
         std::lock_guard<std::mutex> trackLock(m_trackMutex);
         std::lock_guard<std::mutex> cmdLock(m_cmdMutex);
 
+        timeoutMs = m_openTimeoutMs.load(std::memory_order_acquire);
         reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
         m_activeRequestId.store(reqId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
@@ -99,22 +105,24 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
         cmd.isSynthetic = true;
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 
-    if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
-        bool ok = future.get();
-        m_lastOpenStatus.store(ok ? OpenStatus::Success : OpenStatus::Failed, std::memory_order_release);
-        return ok;
+    if (future.wait_for(std::chrono::milliseconds(timeoutMs)) == std::future_status::ready) {
+        return future.get();
     }
 
     // P0-26: Timed out: Invalidate active request ID under m_trackMutex
     {
         std::lock_guard<std::mutex> lock(m_trackMutex);
+        if (m_committedRequestId.load(std::memory_order_acquire) == reqId) {
+            return true;
+        }
         uint64_t expected = reqId;
-        m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+        if (m_activeRequestId.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) {
+            m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
+        }
     }
-    m_lastOpenStatus.store(OpenStatus::TimedOut, std::memory_order_release);
     return false;
 }
 
@@ -139,8 +147,8 @@ void DecoderWorker::closeTrack() {
         cmd.targetRequestId = closingReqId; // Tag generation so older close doesn't close newer open
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 
     if (future.wait_for(std::chrono::milliseconds(1000)) == std::future_status::ready) {
         future.get();
@@ -154,8 +162,8 @@ void DecoderWorker::play() noexcept {
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::Play;
         m_pendingCommands.push_back(cmd);
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 }
 
 void DecoderWorker::pause() noexcept {
@@ -165,8 +173,8 @@ void DecoderWorker::pause() noexcept {
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::Pause;
         m_pendingCommands.push_back(cmd);
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 }
 
 void DecoderWorker::stop() noexcept {
@@ -177,8 +185,8 @@ void DecoderWorker::stop() noexcept {
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::Stop;
         m_pendingCommands.push_back(cmd);
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 }
 
 void DecoderWorker::seek(int64_t targetFrame) noexcept {
@@ -193,8 +201,8 @@ void DecoderWorker::seek(int64_t targetFrame) noexcept {
         cmd.targetFrame = targetFrame;
         cmd.sequence = seq;
         m_pendingCommands.push_back(cmd);
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 
     // Wait briefly for worker to process seek and prime buffer with at least 256 frames
     auto start = std::chrono::steady_clock::now();
@@ -214,8 +222,8 @@ void DecoderWorker::configureGraphRate(double graphSampleRate) noexcept {
         cmd.type = WorkerCommandType::ConfigureRate;
         cmd.graphRate = graphSampleRate;
         m_pendingCommands.push_back(cmd);
+        m_cmdCv.notify_one();
     }
-    m_cmdCv.notify_one();
 }
 
 size_t DecoderWorker::readAudioBlock(double* outLeft, double* outRight, size_t frames) noexcept {
@@ -239,9 +247,6 @@ size_t DecoderWorker::readAudioBlock(double* outLeft, double* outRight, size_t f
     }
 
     m_playhead.fetch_add(static_cast<int64_t>(read), std::memory_order_relaxed);
-    if (m_ringBuffer.availableWrite() >= 4096) {
-        m_cmdCv.notify_one(); // Signal worker thread when space is available
-    }
     return read;
 }
 
@@ -254,7 +259,11 @@ void DecoderWorker::workerLoop() {
                 (!m_isOpen.load(std::memory_order_relaxed) ||
                  m_isEof.load(std::memory_order_relaxed) ||
                  (m_pendingOutCount == 0 && m_ringBuffer.availableWrite() < 4096))) {
-                m_cmdCv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
+                const auto waitDuration = (m_isOpen.load(std::memory_order_relaxed) &&
+                                           !m_isEof.load(std::memory_order_relaxed))
+                                              ? std::chrono::milliseconds(2)
+                                              : std::chrono::milliseconds(10);
+                m_cmdCv.wait_for(lock, waitDuration, [this]() {
                     return !m_running.load(std::memory_order_relaxed) ||
                            !m_pendingCommands.empty() ||
                            (m_isOpen.load(std::memory_order_relaxed) &&
@@ -265,9 +274,22 @@ void DecoderWorker::workerLoop() {
             cmds.swap(m_pendingCommands);
         }
 
-        if (!m_running.load(std::memory_order_acquire)) break;
+        if (!m_running.load(std::memory_order_acquire)) {
+            for (auto& cmd : cmds) {
+                if (cmd.openPromise) {
+                    try { cmd.openPromise->set_value(false); } catch (...) {}
+                }
+            }
+            break;
+        }
 
         for (const auto& cmd : cmds) {
+            if (!m_running.load(std::memory_order_acquire)) {
+                if (cmd.openPromise) {
+                    try { cmd.openPromise->set_value(false); } catch (...) {}
+                }
+                continue;
+            }
             processCommand(cmd);
         }
 
@@ -299,20 +321,13 @@ void DecoderWorker::workerLoop() {
 void DecoderWorker::processCommand(const WorkerCommand& cmd) {
     switch (cmd.type) {
     case WorkerCommandType::Open: {
-        // P0-30: Check if this open request was cancelled or timed out before heavy I/O
+        // P0-26: Check if this open request was cancelled, timed out, or superseded before heavy I/O
         if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
             if (cmd.openPromise) {
                 try { cmd.openPromise->set_value(false); } catch (...) {}
             }
             break;
         }
-
-        m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
-        m_pendingOutOffset = 0;
-        m_pendingOutCount = 0;
-        m_syntheticPos = 0;
-        m_isEof.store(false, std::memory_order_release);
-        m_eofDelivered.store(false, std::memory_order_release);
 
         bool openSuccess = false;
         auto dec = std::make_unique<FFmpegAudioDecoder>();
@@ -332,6 +347,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
             {
                 std::lock_guard<std::mutex> lock(m_trackMutex);
                 if (cmd.requestId != 0 && cmd.requestId == m_activeRequestId.load(std::memory_order_acquire)) {
+                    m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
+                    m_pendingOutOffset = 0;
+                    m_pendingOutCount = 0;
+                    m_syntheticPos = 0;
+                    m_isEof.store(false, std::memory_order_release);
+                    m_eofDelivered.store(false, std::memory_order_release);
+
                     const auto& info = dec->formatInfo();
                     m_trackInfo.path = cmd.path;
                     m_trackInfo.sampleRate = info.sampleRate;
@@ -346,6 +368,7 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
                     m_isOpen.store(true, std::memory_order_release);
                     m_isPlaying.store(false, std::memory_order_release);
                     m_committedRequestId.store(cmd.requestId, std::memory_order_release);
+                    m_lastOpenStatus.store(OpenStatus::Success, std::memory_order_release);
                     committed = true;
                 }
             }
@@ -363,8 +386,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
             }
             openSuccess = true;
         } else {
-            // Open failed: Do NOT mark as open or corrupt track state
-            m_isOpen.store(false, std::memory_order_release);
+            // Open failed: Only update status if this request is still the active request
+            std::lock_guard<std::mutex> lock(m_trackMutex);
+            if (cmd.requestId == 0 || cmd.requestId == m_activeRequestId.load(std::memory_order_acquire)) {
+                m_isOpen.store(false, std::memory_order_release);
+                m_activeRequestId.store(0, std::memory_order_release);
+                m_lastOpenStatus.store(OpenStatus::Failed, std::memory_order_release);
+            }
             openSuccess = false;
         }
 
@@ -375,22 +403,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         break;
     }
     case WorkerCommandType::OpenSynthetic: {
-        // P0-30: Check if request was superseded
+        // P0-26: Check if request was superseded before preparation
         if (cmd.requestId != 0 && cmd.requestId != m_activeRequestId.load(std::memory_order_acquire)) {
             if (cmd.openPromise) {
                 try { cmd.openPromise->set_value(false); } catch (...) {}
             }
             break;
         }
-
-        m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
-        m_pendingOutOffset = 0;
-        m_pendingOutCount = 0;
-        m_syntheticPos = 0;
-        m_isEof.store(false, std::memory_order_release);
-        m_eofDelivered.store(false, std::memory_order_release);
-
-        m_decoder.reset(); // Destroy active decoder exclusively on Worker Thread (P0-15)
 
         WorkerTrackInfo tInfo;
         tInfo.path = cmd.path;
@@ -421,6 +440,13 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         {
             std::lock_guard<std::mutex> lock(m_trackMutex);
             if (cmd.requestId != 0 && cmd.requestId == m_activeRequestId.load(std::memory_order_acquire)) {
+                m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
+                m_pendingOutOffset = 0;
+                m_pendingOutCount = 0;
+                m_syntheticPos = 0;
+                m_isEof.store(false, std::memory_order_release);
+                m_eofDelivered.store(false, std::memory_order_release);
+
                 m_decoder.reset(); // Destroy active decoder exclusively on Worker Thread (P0-15)
                 m_resampler.configure(cmd.sampleRate, cmd.graphRate, 2);
                 m_trackInfo = tInfo;
@@ -431,6 +457,7 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
                 m_isOpen.store(true, std::memory_order_release);
                 m_isPlaying.store(false, std::memory_order_release);
                 m_committedRequestId.store(cmd.requestId, std::memory_order_release);
+                m_lastOpenStatus.store(OpenStatus::Success, std::memory_order_release);
                 committed = true;
             }
         }

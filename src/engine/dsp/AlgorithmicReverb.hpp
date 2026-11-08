@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include "engine/memory/EpochReclaimer.hpp"
 
@@ -58,9 +59,12 @@ public:
         }
 
         [[nodiscard]] double energy() const noexcept {
+            if (!std::isfinite(filterStore)) return std::numeric_limits<double>::quiet_NaN();
             double sum = filterStore * filterStore;
             for (size_t i = 0; i < size; ++i) {
-                sum += buffer[i] * buffer[i];
+                const double v = buffer[i];
+                if (!std::isfinite(v)) return std::numeric_limits<double>::quiet_NaN();
+                sum += v * v;
             }
             return sum;
         }
@@ -94,7 +98,9 @@ public:
         [[nodiscard]] double energy() const noexcept {
             double sum = 0.0;
             for (size_t i = 0; i < size; ++i) {
-                sum += buffer[i] * buffer[i];
+                const double v = buffer[i];
+                if (!std::isfinite(v)) return std::numeric_limits<double>::quiet_NaN();
+                sum += v * v;
             }
             return sum;
         }
@@ -222,17 +228,46 @@ public:
 
     /// Calculate total energy accumulated in all internal comb/allpass delay buffers (P0-22).
     /// Used by Audio Thread to verify that reverberation inside the network has completely decayed (< -100 dB).
+    /// Returns NaN if any internal filter state contains NaN or Inf.
     [[nodiscard]] double totalInternalEnergy() const noexcept {
         double e = 0.0;
-        for (const auto& c : m_combsLeft) e += c.energy();
-        for (const auto& c : m_combsRight) e += c.energy();
-        for (const auto& a : m_allPassLeft) e += a.energy();
-        for (const auto& a : m_allPassRight) e += a.energy();
+        for (const auto& c : m_combsLeft) {
+            double ce = c.energy();
+            if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
+            e += ce;
+        }
+        for (const auto& c : m_combsRight) {
+            double ce = c.energy();
+            if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
+            e += ce;
+        }
+        for (const auto& a : m_allPassLeft) {
+            double ae = a.energy();
+            if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
+            e += ae;
+        }
+        for (const auto& a : m_allPassRight) {
+            double ae = a.energy();
+            if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
+            e += ae;
+        }
         for (size_t i = 0; i < m_predelaySamples; ++i) {
-            double v = m_predelayBuffer[i];
+            size_t idx = (m_predelayWritePos + MAX_PREDELAY_SIZE - m_predelaySamples + i) % MAX_PREDELAY_SIZE;
+            double v = m_predelayBuffer[idx];
+            if (!std::isfinite(v)) return std::numeric_limits<double>::quiet_NaN();
             e += v * v;
         }
         return e;
+    }
+
+    /// Check whether any internal delay line or filter state has become NaN or Inf (P0-22).
+    [[nodiscard]] bool hasInvalidState() const noexcept {
+        return !std::isfinite(totalInternalEnergy());
+    }
+
+    /// Test helper to inject a non-finite value into internal state for safety verification (P0-22).
+    void injectInvalidStateForTest(double nonFiniteVal) noexcept {
+        m_combsLeft[0].filterStore = nonFiniteVal;
     }
 
     /// Acoustic physical decay lower bound (1.5 * RT60 frames) to reach -80 dB safely (P0-22).
@@ -286,7 +321,7 @@ public:
     void setWetLevel(double w) { configure(m_sampleRate, m_roomSize, m_damp, w, m_predelayMs, m_tailPreserving, m_enabled.load(std::memory_order_relaxed)); }
     void setPredelayMs(double ms) { configure(m_sampleRate, m_roomSize, m_damp, m_wet, ms, m_tailPreserving, m_enabled.load(std::memory_order_relaxed)); }
     void setTailPreserving(bool tail) noexcept { configure(m_sampleRate, m_roomSize, m_damp, m_wet, m_predelayMs, tail, m_enabled.load(std::memory_order_relaxed)); }
-    void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_roomSize, m_damp, m_wet, m_predelayMs, m_tailPreserving, enabled); }
+    void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
 
     AlgorithmicReverb* nextRetired = nullptr;
 
@@ -307,7 +342,7 @@ public:
         const Params* p = guard.get();
         if (!p) return;
 
-        const bool active = p->enabled;
+        const bool active = m_enabled.load(std::memory_order_relaxed);
 
         if (!active && !p->tailPreserving) {
             // Immediate Bypass: instantly cut wet signal

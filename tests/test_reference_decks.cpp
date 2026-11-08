@@ -1048,6 +1048,146 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
 
         QVERIFY(!worker.isOpen());
         QCOMPARE(worker.committedRequestId(), 0u);
+        QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Cancelled);
+    }
+
+    // Case 11-E: Open(A) -> Close -> Open(B) 3-Request Deterministic Sequence (P0-26 Section 7 Case E)
+    // While Open(A) is paused in pre-commit hook, Control Thread issues CloseTrack() followed by Open(B).
+    // Verify: Open(A) returns false and is discarded; CloseTrack() does not close B; Open(B) succeeds and commits B.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHitA{false};
+        std::atomic<bool> releaseHookA{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHitA.exchange(true)) {
+                while (!releaseHookA.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::atomic<bool> okA{true};
+        std::thread tA([&]() {
+            okA.store(worker.openTrack(m_wav1.toStdString(), 48000.0));
+        });
+
+        while (!hookHitA.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        // Enqueue CloseTrack() then Open(B) while Worker is blocked in Open(A) pre-commit hook
+        std::latch closeEnqueued(1);
+        std::thread tClose([&]() {
+            // Note: closeTrack() enqueues CloseTrack under lock and waits up to 1000ms for worker;
+            // we signal closeEnqueued right before calling closeTrack or after a brief delay,
+            // OR we release hookA right after Open(B) is enqueued!
+            closeEnqueued.count_down();
+            worker.closeTrack();
+        });
+
+        closeEnqueued.wait();
+        // Give tClose a moment to acquire lock and enqueue CloseTrack
+        while (worker.activeRequestId() != 0) {
+            std::this_thread::yield();
+        }
+
+        std::atomic<bool> okB{false};
+        std::thread tB([&]() {
+            okB.store(worker.openTrack(m_wav2.toStdString(), 48000.0));
+        });
+
+        // Wait until tB has published its new activeRequestId (> 0)
+        while (worker.activeRequestId() == 0) {
+            std::this_thread::yield();
+        }
+        const uint64_t expectedReqB = worker.activeRequestId();
+
+        // Now release Open(A) from pre-commit hook so worker processes A (aborted), Close (skipped or applied before B), and B (committed)
+        releaseHookA.store(true, std::memory_order_release);
+
+        tA.join();
+        tClose.join();
+        tB.join();
+
+        QVERIFY(!okA.load());
+        QVERIFY(okB.load());
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+        QCOMPARE(worker.committedRequestId(), expectedReqB);
+        QCOMPARE(worker.activeRequestId(), expectedReqB);
+        QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
+    }
+
+    // Case 11-F: Timeout & Worker Shutdown Overlap (P0-26 Section 7 Case F)
+    // Subcase F1: Open(A) times out while Worker is in pre-commit hook; when Worker resumes, A is NOT committed.
+    // Subcase F2: Multiple queued Open/Close requests when DecoderWorker shuts down all resolve their promises cleanly.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        worker.setOpenTimeoutMs(50); // 50ms timeout for deterministic fast verification
+
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        // Open A will time out after 50ms because hook holds worker
+        bool okTimeout = worker.openTrack(m_wav1.toStdString(), 48000.0);
+        QVERIFY(!okTimeout);
+        QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::TimedOut);
+        QCOMPARE(worker.activeRequestId(), 0u);
+        QCOMPARE(worker.committedRequestId(), 0u);
+        QVERIFY(!worker.isOpen());
+
+        // Now release hook: worker must see activeRequestId == 0 and discard late commit
+        releaseHook.store(true, std::memory_order_release);
+        // Perform a close/sync or wait briefly to ensure worker finished processing Open(A)
+        worker.setOpenTimeoutMs(2000);
+        worker.setPreCommitHook(nullptr);
+        bool okAfterTimeout = worker.openTrack(m_wav2.toStdString(), 48000.0);
+        QVERIFY(okAfterTimeout);
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+        QCOMPARE(worker.lastOpenStatus(), desk32::engine::decoder::OpenStatus::Success);
+    }
+    {
+        // Subcase F2: Worker shutdown while one request is in-flight and another is queued in m_pendingCommands
+        auto worker = std::make_unique<desk32::engine::decoder::DecoderWorker>();
+        auto* rawWorker = worker.get();
+        std::atomic<bool> firstInHook{false};
+        worker->setPreCommitHook([&](uint64_t) {
+            if (!firstInHook.exchange(true)) {
+                // Deterministically wait until ~DecoderWorker() invalidates activeRequestId to 0
+                while (rawWorker->activeRequestId() != 0) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::atomic<bool> res1{true}, res2{true};
+        std::thread t1([&]() { res1.store(rawWorker->openTrack(m_wav1.toStdString(), 48000.0)); });
+        while (!firstInHook.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        // Queue second open request while worker thread is busy in first request's hook
+        std::thread t2([&]() { res2.store(rawWorker->openSyntheticTrack(48000, 48000.0, 48000.0, "synthetic://shutdown_queued")); });
+        while (rawWorker->activeRequestId() < 2) {
+            std::this_thread::yield();
+        }
+
+        // Trigger worker destruction while t1 is in-flight and t2 is queued in m_pendingCommands
+        worker.reset();
+
+        t1.join();
+        t2.join();
+        QVERIFY(!res1.load());
+        QVERIFY(!res2.load());
     }
 }
 

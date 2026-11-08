@@ -688,27 +688,86 @@ void TestPhase2Dsp::testParameterCommandQueueCoalescingAndOverflowStats()
     nextCmd.index = 1;
     QVERIFY(queue.push(nextCmd));
     QCOMPARE(queue.size(), 1u);
+
+    // 5. Consumer Stop / Restart & Statistics Reset (P0-25)
+    DspCommand poppedNext;
+    QVERIFY(queue.pop(poppedNext));
+    QCOMPARE(poppedNext.type, DspCommandType::SetNodeBypass);
+    QCOMPARE(poppedNext.index, uint8_t(1));
+    QVERIFY(queue.empty());
+
+    queue.resetStatistics();
+    QCOMPARE(queue.overflowCount(), 0u);
+
+    // Pause consumer while multiple producers push and finish concurrently, then resume consumer
+    std::latch producerStartLatch(4);
+    std::vector<std::thread> burstProducers;
+    for (int p = 0; p < 4; ++p) {
+        burstProducers.emplace_back([&, p]() {
+            producerStartLatch.arrive_and_wait();
+            for (int seq = 0; seq < 32; ++seq) {
+                DspCommand c;
+                c.type = DspCommandType::SetNodeBypass;
+                c.index = static_cast<uint8_t>(p);
+                c.intParam1 = static_cast<uint8_t>(seq);
+                QVERIFY(queue.push(c));
+            }
+        });
+    }
+    for (auto& t : burstProducers) t.join();
+    QCOMPARE(queue.size(), size_t(128));
+    QCOMPARE(queue.overflowCount(), 0u);
+
+    // Resume consumer: verify per-producer sequential order is 100% preserved
+    std::array<int, 4> lastSeqPerProducer = {-1, -1, -1, -1};
+    size_t drainedBurst = 0;
+    DspCommand burstOut;
+    while (queue.pop(burstOut)) {
+        size_t prodId = static_cast<size_t>(burstOut.index);
+        int seq = static_cast<int>(burstOut.intParam1);
+        QVERIFY(prodId < 4u);
+        QCOMPARE(seq, lastSeqPerProducer[prodId] + 1);
+        lastSeqPerProducer[prodId] = seq;
+        drainedBurst++;
+    }
+    QCOMPARE(drainedBurst, size_t(128));
+    for (size_t p = 0; p < 4; ++p) {
+        QCOMPARE(lastSeqPerProducer[p], 31);
+    }
 }
 
 void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
 {
-    // P0-25: Multi-Producer safe continuous parameter mailbox with lock-free consumer
+    // P0-24, P0-25: Multi-Producer safe continuous parameter mailbox with lock-free consumer
     DspParameterMailbox mailbox;
+    QVERIFY(mailbox.isLockFree());
     QCOMPARE(mailbox.updateCount(), 0u);
 
     ContinuousDspParameters params;
-    QVERIFY(!mailbox.fetchUpdates(params)); // Initially empty
+    QVERIFY(!mailbox.fetchUpdates(params)); // Immediately after initialization: no pending update
 
-    // 1. Single producer update
+    // 1. Single producer update & sequence number monotonicity
     mailbox.setGeqBandGain(3, 4.5f);
     QCOMPARE(mailbox.updateCount(), 1u);
 
     QVERIFY(mailbox.fetchUpdates(params));
     QCOMPARE(params.geqGains[3], 4.5f);
     QVERIFY((params.geqModifiedMask & (1u << 3)) != 0);
+    QCOMPARE(params.sequenceNumber, 1u);
 
     // Second fetch without new updates must return false
     QVERIFY(!mailbox.fetchUpdates(params));
+
+    // Re-initialization (reset) verification (P0-24)
+    mailbox.reset();
+    QCOMPARE(mailbox.updateCount(), 0u);
+    QVERIFY(!mailbox.fetchUpdates(params));
+
+    mailbox.setGeqBandGain(5, -3.0f);
+    QCOMPARE(mailbox.updateCount(), 1u);
+    QVERIFY(mailbox.fetchUpdates(params));
+    QCOMPARE(params.geqGains[5], -3.0f);
+    QCOMPARE(params.sequenceNumber, 1u);
 
     // 2. Concurrent multi-producer stress test (4 producer threads, 1 consumer thread)
     std::atomic<bool> running{true};
@@ -733,10 +792,14 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
     startLatch.wait();
 
     uint64_t consumedUpdates = 0;
+    uint64_t lastSeq = 1;
     // Consume updates until at least 50 updates are verified, or timeout safety
     for (int i = 0; i < 5000 && (consumedUpdates < 50 || totalPushes.load() < 50); ++i) {
         ContinuousDspParameters p;
         if (mailbox.fetchUpdates(p)) {
+            // Verify strict monotonic sequenceNumber progression (never rewinds)
+            QVERIFY(p.sequenceNumber > lastSeq);
+            lastSeq = p.sequenceNumber;
             consumedUpdates++;
         }
         std::this_thread::yield();
@@ -750,10 +813,13 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
     // Final drain
     ContinuousDspParameters finalParams;
     if (mailbox.fetchUpdates(finalParams)) {
+        QVERIFY(finalParams.sequenceNumber > lastSeq);
+        lastSeq = finalParams.sequenceNumber;
         consumedUpdates++;
     }
 
     QVERIFY(consumedUpdates > 0);
+    QCOMPARE(lastSeq, mailbox.updateCount());
     QVERIFY(mailbox.updateCount() > 0);
     QVERIFY(totalPushes.load() > 0);
 }
@@ -1091,15 +1157,19 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         compNode.prepareInstance(48000.0, -10.0, 2.0, 10.0, 100.0, 1.0, 4.0, true);
         // Overwrite with config B without calling process() in between
         compNode.prepareInstance(48000.0, -22.0, 5.0, 10.0, 100.0, 6.0, 4.0, true);
+        QCOMPARE(compNode.replacedBeforeActivationCount(), 1u);
 
         std::vector<double> left(128, 0.5), right(128, 0.5);
         compNode.process(left.data(), right.data(), 128);
+        QCOMPARE(compNode.activatedCount(), 1u);
+        QCOMPARE(compNode.retiredCount(), 1u);
         QCOMPARE(compNode.dsp().thresholdDb(), -22.0);
         QCOMPARE(compNode.dsp().makeupGainDb(), 6.0);
         compNode.reclaimRetired();
+        QCOMPARE(compNode.reclaimedCount(), 1u);
     }
 
-    // Case 6: Concurrent Audio Thread processing during rapid exchanges
+    // Case 6: Concurrent Multi-Producer Control Threads + Audio Thread processing during rapid exchanges (P0-21)
     {
         auto compNode = std::make_unique<CompressorNode>();
         auto limNode = std::make_unique<PeakLimiterNode>();
@@ -1107,10 +1177,14 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
 
         std::atomic<bool> stopAudio{false};
         std::atomic<uint64_t> blocksProcessed{0};
+        std::latch startSync(3);
 
         std::thread audioThread([&]() {
+            startSync.arrive_and_wait();
             std::vector<double> left(128, 0.4), right(128, 0.4);
             while (!stopAudio.load(std::memory_order_relaxed)) {
+                std::fill(left.begin(), left.end(), 0.4);
+                std::fill(right.begin(), right.end(), 0.4);
                 compNode->process(left.data(), right.data(), 128);
                 limNode->process(left.data(), right.data(), 128);
                 revNode->process(left.data(), right.data(), 128);
@@ -1119,13 +1193,25 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
             }
         });
 
-        for (int i = 0; i < 30; ++i) {
-            compNode->prepareInstance(48000.0, -10.0 - (i % 8), 3.0, 10.0, 100.0, static_cast<double>(i % 4), 4.0, true);
-            limNode->prepareInstance(48000.0, -0.5 - (i % 5) * 0.2, 50.0 + (i % 10) * 5.0, 5.0, true);
-            revNode->prepareInstance(48000.0, 0.5 + (i % 4) * 0.1, 0.3, 0.3, 10.0, true, true);
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        // 2 concurrent Control Threads calling prepareInstance simultaneously
+        std::vector<std::thread> controlThreads;
+        for (int t = 0; t < 2; ++t) {
+            controlThreads.emplace_back([&, t]() {
+                startSync.arrive_and_wait();
+                for (int i = 0; i < 20; ++i) {
+                    compNode->prepareInstance(48000.0, -10.0 - ((i + t) % 8), 3.0, 10.0, 100.0, static_cast<double>(i % 4), 4.0, true);
+                    limNode->prepareInstance(48000.0, -0.5 - ((i + t) % 5) * 0.2, 50.0 + (i % 10) * 5.0, 5.0, true);
+                    revNode->prepareInstance(48000.0, 0.5 + ((i + t) % 4) * 0.1, 0.3, 0.3, 10.0, true, true);
+                    std::this_thread::sleep_for(std::chrono::microseconds(300));
+                }
+            });
         }
 
+        for (auto& ct : controlThreads) ct.join();
+
+        while (blocksProcessed.load(std::memory_order_relaxed) <= 20) {
+            std::this_thread::yield();
+        }
         stopAudio.store(true, std::memory_order_relaxed);
         audioThread.join();
 
@@ -1133,6 +1219,9 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         compNode->reclaimRetired();
         limNode->reclaimRetired();
         revNode->reclaimRetired();
+        QCOMPARE(compNode->retiredCount(), compNode->reclaimedCount());
+        QCOMPARE(limNode->retiredCount(), limNode->reclaimedCount());
+        QCOMPARE(revNode->retiredCount(), revNode->reclaimedCount());
     }
 
     // Case 7 & 8: Shutdown during active exchange and unused instance discard
@@ -1212,22 +1301,26 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         QVERIFY(tailEnergy > 1e-4);
     }
 
-    // Case 10: Reverb Tail Continuity under repeated exchanges
+    // Case 10: Reverb Tail Continuity under repeated exchanges (distinct L/R zero-filled buffers)
     {
         ReverbNode rev;
         rev.prepareInstance(48000.0, 0.85, 0.3, 0.5, 0.0, true, true);
-        std::vector<double> excite(1024, 0.5);
-        rev.process(excite.data(), excite.data(), 1024);
+        std::vector<double> exciteL(2048, 0.5), exciteR(2048, 0.5);
+        rev.process(exciteL.data(), exciteR.data(), 2048);
 
-        // Perform multiple exchanges while input is zero (P0-22: Tail preservation across exchanges)
-        std::vector<double> zero(256, 0.0);
+        // Perform multiple exchanges while input is strictly zero (P0-22: Tail preservation across exchanges)
+        std::vector<double> zeroL(256, 0.0), zeroR(256, 0.0);
         for (int i = 0; i < 8; ++i) { // 8 blocks = 2048 frames (~42.7ms)
+            std::fill(zeroL.begin(), zeroL.end(), 0.0);
+            std::fill(zeroR.begin(), zeroR.end(), 0.0);
             if (i < 4) {
                 rev.prepareInstance(48000.0, 0.7 - i * 0.1, 0.3, 0.5, 0.0, true, true);
             }
-            rev.process(zero.data(), zero.data(), 256);
+            rev.process(zeroL.data(), zeroR.data(), 256);
             double e = 0.0;
-            for (double s : zero) e += s * s;
+            for (size_t s = 0; s < 256; ++s) {
+                e += zeroL[s] * zeroL[s] + zeroR[s] * zeroR[s];
+            }
             // Tail should smoothly decay without dropping to 0 instantaneously
             QVERIFY(e > 1e-6);
         }
@@ -1423,65 +1516,198 @@ void TestPhase2Dsp::testConcurrentSampleRateAndMailboxUpdates()
 
 void TestPhase2Dsp::testReverbMultiExchangeAndBypassTailDecay()
 {
-    // P0-22: Deep Acoustic Verification of Ringout Slots Capacity & Bypass Progression
+    // P0-22: Deep Acoustic & Lifecycle Verification of Reverb Ringout Slots (All Retire Reasons & Edge Cases)
 
-    // 1. Capacity Stress: 10 consecutive exchanges (> MAX_RINGOUT_SLOTS = 8)
+    // 1. Capacity Eviction (SlotCapacityEviction): 10 consecutive excited exchanges (> MAX_RINGOUT_SLOTS = 8)
     {
         ReverbNode rev;
         rev.prepareInstance(48000.0, 0.9, 0.2, 0.5, 0.0, true, true);
-        std::vector<double> excite(1024, 0.6);
-        rev.process(excite.data(), excite.data(), 1024);
+        std::vector<double> exciteL(2048, 0.6), exciteR(2048, 0.6);
+        rev.process(exciteL.data(), exciteR.data(), 2048);
 
-        // Perform 10 rapid exchanges with zero input audio
-        std::vector<double> zero(256, 0.0);
+        // Perform 10 rapid exchanges where each instance is excited then swapped; measure pure ringout tail on zero input
+        std::vector<double> pulseL(64, 0.4), pulseR(64, 0.4);
+        std::vector<double> zeroL(256, 0.0), zeroR(256, 0.0);
         for (int i = 0; i < 10; ++i) {
-            rev.prepareInstance(48000.0, 0.85 - i * 0.03, 0.25, 0.5, 0.0, true, true);
-            rev.process(zero.data(), zero.data(), 256);
+            rev.prepareInstance(48000.0, 0.88 - i * 0.02, 0.25, 0.5, 0.0, true, true);
+            // Activate new instance and excite it briefly so it has internal energy for next swap
+            std::fill(pulseL.begin(), pulseL.end(), 0.4);
+            std::fill(pulseR.begin(), pulseR.end(), 0.4);
+            rev.process(pulseL.data(), pulseR.data(), 64);
+
+            // Measure pure decaying tail with zero input
+            std::fill(zeroL.begin(), zeroL.end(), 0.0);
+            std::fill(zeroR.begin(), zeroR.end(), 0.0);
+            rev.process(zeroL.data(), zeroR.data(), 256);
             double e = 0.0;
-            for (double s : zero) e += s * s;
-            // Tail MUST NEVER be abruptly cut to 0 even when ringout capacity is reached
+            for (size_t s = 0; s < 256; ++s) {
+                e += zeroL[s] * zeroL[s] + zeroR[s] * zeroR[s];
+            }
+            // Tail MUST NEVER be abruptly cut to 0 even when ringout capacity (8 slots) is exceeded
             QVERIFY(e > 1e-6);
+        }
+        // 10 excited swaps: first 8 fill all 8 ringout slots, swaps 9 and 10 evict the 2 lowest-energy slots
+        QCOMPARE(rev.activeRingoutSlotCount(), ReverbNode::MAX_RINGOUT_SLOTS);
+        QCOMPARE(rev.capacityEvictionRetireCount(), 2u);
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::SlotCapacityEviction);
+        rev.reclaimRetired();
+        QCOMPARE(rev.retiredCount(), rev.reclaimedCount());
+    }
+
+    // 2. Natural Decay Complete (NaturalDecayComplete): Short RT60 decays naturally and frees slot
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.2, 0.5, 0.5, 0.0, true, true); // Short decay roomSize = 0.2
+        std::vector<double> exciteL(2048, 0.5), exciteR(2048, 0.5);
+        rev.process(exciteL.data(), exciteR.data(), 2048);
+
+        // Swap to a new instance -> old instance enters ringout slot 0
+        rev.prepareInstance(48000.0, 0.3, 0.5, 0.5, 0.0, true, true);
+        std::vector<double> zeroL(512, 0.0), zeroR(512, 0.0);
+        rev.process(zeroL.data(), zeroR.data(), 512);
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(1));
+
+        // Process silent blocks until natural decay completes (theoreticalDecayFrames for roomSize=0.2 is 0.5s = 24,000 frames = ~47 blocks of 512)
+        for (int b = 0; b < 60; ++b) {
+            std::fill(zeroL.begin(), zeroL.end(), 0.0);
+            std::fill(zeroR.begin(), zeroR.end(), 0.0);
+            rev.process(zeroL.data(), zeroR.data(), 512);
+            if (rev.activeRingoutSlotCount() == 0) break;
+        }
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(0));
+        QCOMPARE(rev.naturalDecayRetireCount(), 1u);
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::NaturalDecayComplete);
+        rev.reclaimRetired();
+        QCOMPARE(rev.retiredCount(), rev.reclaimedCount());
+    }
+
+    // 3. Max Retention Safety Ceiling (MaxRetentionSafetyCeiling) at 48kHz and 96kHz
+    {
+        ReverbNode rev;
+        AlgorithmicReverb dummy48;
+        dummy48.configure(48000.0, 0.98, 0.1, 0.5, 0.0, true, true);
+        ReverbNode::RingoutSlot slot48{&dummy48, 480000, 0, 1.0};
+        QCOMPARE(rev.evaluateRetireCondition(slot48, 0.5), ReverbNode::RetireReason::MaxRetentionSafetyCeiling);
+
+        AlgorithmicReverb dummy96;
+        dummy96.configure(96000.0, 0.98, 0.1, 0.5, 0.0, true, true);
+        ReverbNode::RingoutSlot slot96Early{&dummy96, 480000, 0, 1.0};
+        // At 96kHz, 480,000 frames is only 5 seconds -> should NOT hit 10-second safety ceiling yet
+        QCOMPARE(rev.evaluateRetireCondition(slot96Early, 0.5), ReverbNode::RetireReason::None);
+        ReverbNode::RingoutSlot slot96Full{&dummy96, 960000, 0, 1.0};
+        QCOMPARE(rev.evaluateRetireCondition(slot96Full, 0.5), ReverbNode::RetireReason::MaxRetentionSafetyCeiling);
+    }
+
+    // 4. Explicit Cancel (reset() and non-tail-preserving exchange)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.85, 0.2, 0.5, 0.0, true, true);
+        std::vector<double> exciteL(1024, 0.5), exciteR(1024, 0.5);
+        rev.process(exciteL.data(), exciteR.data(), 1024);
+
+        rev.prepareInstance(48000.0, 0.8, 0.2, 0.5, 0.0, true, true);
+        std::vector<double> zeroL(256, 0.0), zeroR(256, 0.0);
+        rev.process(zeroL.data(), zeroR.data(), 256);
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(1));
+
+        // Explicit reset() cancels all active ringout slots immediately
+        rev.reset();
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(0));
+        QCOMPARE(rev.explicitCancelRetireCount(), 1u);
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::ExplicitCancel);
+        rev.reclaimRetired();
+    }
+
+    // 5. Abnormal State NaN/Inf Protection (AbnormalStateReset)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.85, 0.2, 0.5, 0.0, true, true);
+        std::vector<double> exciteL(1024, 0.5), exciteR(1024, 0.5);
+        rev.process(exciteL.data(), exciteR.data(), 1024);
+
+        // Inject NaN into active reverb state, then swap so it tries to enter ringout
+        rev.dsp().injectInvalidStateForTest(std::numeric_limits<double>::quiet_NaN());
+        QVERIFY(rev.dsp().hasInvalidState());
+
+        rev.prepareInstance(48000.0, 0.75, 0.3, 0.5, 0.0, true, true);
+        std::vector<double> outL(256, 0.2), outR(256, 0.2);
+        rev.process(outL.data(), outR.data(), 256);
+
+        // Abnormal instance must have been reset & retired immediately without entering ringout or polluting output
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(0));
+        QCOMPARE(rev.abnormalStateRetireCount(), 1u);
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::AbnormalStateReset);
+        for (size_t i = 0; i < 256; ++i) {
+            QVERIFY(std::isfinite(outL[i]));
+            QVERIFY(std::isfinite(outR[i]));
         }
         rev.reclaimRetired();
     }
 
-    // 2. Bypass Progression: Tail advances with zero input during bypass
+    // 6. Sample Rate Change (44.1kHz -> 48kHz -> 96kHz) and Block Size Change (64 -> 256 -> 1024) during Ringout
     {
         ReverbNode rev;
-        rev.prepareInstance(48000.0, 0.8, 0.3, 0.5, 0.0, true, true);
+        rev.configure(44100.0);
+        rev.prepareInstance(44100.0, 0.8, 0.3, 0.5, 10.0, true, true);
+        std::vector<double> inL(1024, 0.4), inR(1024, 0.4);
+        rev.process(inL.data(), inR.data(), 64);
+        rev.process(inL.data(), inR.data(), 256);
+
+        rev.configure(48000.0);
+        std::fill(inL.begin(), inL.end(), 0.2);
+        std::fill(inR.begin(), inR.end(), 0.2);
+        rev.process(inL.data(), inR.data(), 256);
+
+        rev.configure(96000.0);
+        std::fill(inL.begin(), inL.end(), 0.1);
+        std::fill(inR.begin(), inR.end(), 0.1);
+        rev.process(inL.data(), inR.data(), 1024);
+
+        for (size_t i = 0; i < 1024; ++i) {
+            QVERIFY(std::isfinite(inL[i]));
+            QVERIFY(std::isfinite(inR[i]));
+        }
+        rev.reclaimRetired();
+    }
+
+    // 7. Bypass Progression & No Ghost Tail Re-Appearance After Unbypass
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.2, 0.5, 0.5, 0.0, true, true); // Fast decay
 
         // Excite reverb with audio
-        std::vector<double> sig(512, 0.5);
-        rev.process(sig.data(), sig.data(), 512);
+        std::vector<double> sigL(1024, 0.5), sigR(1024, 0.5);
+        rev.process(sigL.data(), sigR.data(), 1024);
 
-        // Bypass the node
+        // Swap instance so excited reverb is in ringout slot, then engage Bypass
+        rev.prepareInstance(48000.0, 0.2, 0.5, 0.5, 0.0, true, true);
         rev.setBypassed(true);
         QVERIFY(rev.isBypassed());
 
-        // Process 4 blocks under bypass
-        std::vector<double> passL(256, 0.3);
-        std::vector<double> passR(256, 0.3);
-        rev.process(passL.data(), passR.data(), 256);
-
-        // Under bypass, audio should pass straight through without added wet reverb
-        for (size_t i = 0; i < 256; ++i) {
-            QCOMPARE(passL[i], 0.3);
-            QCOMPARE(passR[i], 0.3);
+        // Process 60 blocks under bypass: output must be dry pass-through, and internal tail must decay & retire
+        std::vector<double> passL(512, 0.3), passR(512, 0.3);
+        for (int b = 0; b < 60; ++b) {
+            std::fill(passL.begin(), passL.end(), 0.3);
+            std::fill(passR.begin(), passR.end(), 0.3);
+            rev.process(passL.data(), passR.data(), 512);
+            QCOMPARE(passL[0], 0.3);
+            QCOMPARE(passR[0], 0.3);
         }
+        // Verify ringout slot retired during bypass!
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(0));
+        QCOMPARE(rev.naturalDecayRetireCount(), 1u);
 
-        // Prepare new instance while bypassed
-        rev.prepareInstance(48000.0, 0.7, 0.4, 0.4, 0.0, true, true);
-        rev.process(passL.data(), passR.data(), 256);
-
-        // Unbypass
+        // Unbypass and feed silence (0.0): verify old tail does NOT reappear!
         rev.setBypassed(false);
         QVERIFY(!rev.isBypassed());
 
-        // Processing resumes cleanly without abrupt explosion
-        rev.process(passL.data(), passR.data(), 256);
-        for (size_t i = 0; i < 256; ++i) {
-            QVERIFY(std::abs(passL[i]) < 2.0);
+        std::vector<double> silentL(512, 0.0), silentR(512, 0.0);
+        rev.process(silentL.data(), silentR.data(), 512);
+        double residualEnergy = 0.0;
+        for (size_t i = 0; i < 512; ++i) {
+            residualEnergy += silentL[i] * silentL[i] + silentR[i] * silentR[i];
         }
+        QVERIFY(residualEnergy < 1e-9);
         rev.reclaimRetired();
     }
 }

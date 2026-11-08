@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
+#include "engine/insert/ExternalInsertNode.hpp"
 
 struct RtAllocationTracker {
     std::atomic<size_t> opNewCount{0};
@@ -176,6 +177,7 @@ private slots:
     void testEpochReclaimerWriterShutdownSerialization();
     void testEpochReclaimerDeterministicShutdownRaces();
     void testRealTimeSafetyInLivePipeline();
+    void testAudioChainMaxNodesAndBoundedCommandDrain();
     void cleanupTestCase();
 };
 
@@ -1113,6 +1115,11 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
     master->appendNode(std::make_shared<GraphicEqNode>("Master GEQ"));
     master->appendNode(std::make_shared<HighLowPassNode>("Master Filters"));
     master->appendNode(std::make_shared<CompressorNode>("Master Comp"));
+    auto insertNode = std::make_shared<desk32::engine::insert::ExternalInsertNode>("Master Insert");
+    desk32::engine::insert::ExternalPortInfo insertCfg{"Carla", "in_l", "in_r", "out_l", "out_r", 48000.0, 256, 64};
+    insertNode->bridge().configure(insertCfg, 48000.0, 256);
+    insertNode->setBypassed(false);
+    master->appendNode(insertNode);
     master->appendNode(std::make_shared<PeakLimiterNode>("Master Limiter"));
     master->appendNode(std::make_shared<ReverbNode>("Master Reverb"));
     pipeline.swapMasterChain(std::move(master));
@@ -1153,12 +1160,35 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
         t_isAudioThread = false; // Reset before exiting thread routine
     });
 
-    // Control Thread: Concurrently mutate Mailbox, swap DSP instances, read telemetry, and reclaim memory
+    // Control Thread: Concurrently mutate Mailbox, swap DSP instances, push discrete commands, swap mock processor, read telemetry, and reclaim memory
     for (int i = 0; i < 100; ++i) {
         pipeline.updateCompressor(-12.0 - (i % 8), 3.0, 10.0, 100.0, 0.0, 4.0, true);
         pipeline.updatePeakLimiter(-0.5 - (i % 4) * 0.2, 50.0, 1.0, true);
         pipeline.updateReverb(0.6 + (i % 3) * 0.1, 0.3, 0.2, 0.0, true, true);
-        pipeline.paramMailbox().setListeningPreset("Flat");
+        pipeline.paramMailbox().setListeningPreset("Monitor Flat");
+
+        // Also test discrete command queue paths (SetCompressorParams / SetLimiterParams / SetReverbParams / SetNodeBypass)
+        desk32::engine::dsp::DspCommand cmdComp;
+        cmdComp.type = desk32::engine::dsp::DspCommandType::SetCompressorParams;
+        cmdComp.boolFlag1 = 1;
+        pipeline.paramQueue().push(cmdComp);
+
+        desk32::engine::dsp::DspCommand cmdLim;
+        cmdLim.type = desk32::engine::dsp::DspCommandType::SetLimiterParams;
+        cmdLim.boolFlag1 = 1;
+        pipeline.paramQueue().push(cmdLim);
+
+        desk32::engine::dsp::DspCommand cmdRev;
+        cmdRev.type = desk32::engine::dsp::DspCommandType::SetReverbParams;
+        cmdRev.boolFlag1 = 1;
+        pipeline.paramQueue().push(cmdRev);
+
+        insertNode->bridge().setMockProcessor([gain = 0.9 + (i % 2) * 0.05](double* l, double* r, size_t f) {
+            for (size_t s = 0; s < f; ++s) {
+                l[s] *= gain;
+                r[s] *= gain;
+            }
+        });
 
         auto telem = pipeline.currentTelemetry();
         (void)telem;
@@ -1248,6 +1278,93 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
         QVERIFY(stressNanos < 10000000);
 #endif
     }
+}
+
+void TestAudioPipeline::testAudioChainMaxNodesAndBoundedCommandDrain()
+{
+    // P0-29: AudioChain MAX_NODES = 16 boundary, non-destructive rejection, removal/re-addition,
+    // and AudioPipeline MAX_COMMANDS_PER_BLOCK = 64 bounded command drain verification.
+
+    // 1. AudioChain MAX_NODES (16) boundary test
+    AudioChain chain("BoundaryChain", ChainPurpose::MasteringChain);
+    QCOMPARE(chain.nodeCount(), size_t(0));
+    QCOMPARE(chain.rejectedNodeCount(), uint64_t(0));
+
+    // Add 15 nodes
+    for (size_t i = 0; i < AudioChain::MAX_NODES - 1; ++i) {
+        QVERIFY(chain.appendNode(std::make_shared<ParametricEqNode>("Node_" + std::to_string(i))));
+    }
+    QCOMPARE(chain.nodeCount(), size_t(15));
+    QCOMPARE(chain.rejectedNodeCount(), uint64_t(0));
+
+    // Add 16th node (exact capacity limit)
+    QVERIFY(chain.appendNode(std::make_shared<GraphicEqNode>("Node_15")));
+    QCOMPARE(chain.nodeCount(), AudioChain::MAX_NODES);
+    QCOMPARE(chain.rejectedNodeCount(), uint64_t(0));
+
+    // Attempt to add 17th node -> must fail cleanly without mutating existing chain
+    QVERIFY(!chain.appendNode(std::make_shared<HighLowPassNode>("Node_16_Overflow")));
+    QCOMPARE(chain.nodeCount(), AudioChain::MAX_NODES);
+    QCOMPARE(chain.rejectedNodeCount(), uint64_t(1));
+    QCOMPARE(chain.node(15)->name(), std::string("Node_15"));
+
+    // Verify processing works cleanly at full 16-node capacity
+    chain.configure(48000.0);
+    std::vector<double> left(256, 0.25), right(256, -0.25);
+    chain.process(left.data(), right.data(), 256);
+    QCOMPARE(left[0], 0.25);
+    QCOMPARE(right[0], -0.25);
+
+    // Remove one node -> count drops to 15 -> re-adding a 16th node must succeed
+    QVERIFY(!chain.removeNode(16)); // Out-of-bounds remove returns false
+    QVERIFY(chain.removeNode(15));
+    QCOMPARE(chain.nodeCount(), size_t(15));
+    QVERIFY(chain.appendNode(std::make_shared<HighLowPassNode>("Node_15_Readded")));
+    QCOMPARE(chain.nodeCount(), AudioChain::MAX_NODES);
+    QCOMPARE(chain.node(15)->name(), std::string("Node_15_Readded"));
+
+    // Clear all nodes -> count drops to 0 -> re-adding succeeds
+    chain.clearNodes();
+    QCOMPARE(chain.nodeCount(), size_t(0));
+    QVERIFY(chain.appendNode(std::make_shared<CompressorNode>("Node_0_AfterClear")));
+    QCOMPARE(chain.nodeCount(), size_t(1));
+
+    // 2. AudioPipeline MAX_COMMANDS_PER_BLOCK (64) bounded drain per block
+    AudioPipeline pipeline(48000.0);
+    auto master = std::make_unique<AudioChain>("Master", ChainPurpose::MasteringChain);
+    master->appendNode(std::make_shared<ParametricEqNode>("PEQ"));
+    pipeline.swapMasterChain(std::move(master));
+
+    // Push 150 discrete commands into parameter queue
+    for (int i = 0; i < 150; ++i) {
+        desk32::engine::dsp::DspCommand cmd;
+        cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+        cmd.index = 0;
+        cmd.subIndex = 0;
+        cmd.boolFlag1 = static_cast<uint8_t>(i % 2);
+        QVERIFY(pipeline.paramQueue().push(cmd));
+    }
+    QCOMPARE(pipeline.paramQueue().size(), size_t(150));
+
+    std::vector<float> out(256 * 2, 0.0f);
+    s_rtStats.reset();
+    t_isAudioThread = true;
+
+    // Block 1: Drains at most MAX_COMMANDS_PER_BLOCK (64) commands -> 150 - 64 = 86 remaining
+    pipeline.process(left.data(), right.data(), 256, out.data(), SampleFormat::Float32, false);
+    QCOMPARE(pipeline.paramQueue().size(), size_t(150 - AudioPipeline::MAX_COMMANDS_PER_BLOCK));
+
+    // Block 2: Drains next 64 commands -> 86 - 64 = 22 remaining
+    pipeline.process(left.data(), right.data(), 256, out.data(), SampleFormat::Float32, false);
+    QCOMPARE(pipeline.paramQueue().size(), size_t(150 - 2 * AudioPipeline::MAX_COMMANDS_PER_BLOCK));
+
+    // Block 3: Drains remaining 22 commands -> 0 remaining
+    pipeline.process(left.data(), right.data(), 256, out.data(), SampleFormat::Float32, false);
+    t_isAudioThread = false;
+
+    QVERIFY(pipeline.paramQueue().empty());
+    QCOMPARE(s_rtStats.totalAllocations(), 0u);
+    QCOMPARE(s_rtStats.opDeleteCount.load() + s_rtStats.opDeleteArrayCount.load(), 0u);
 }
 
 void TestAudioPipeline::cleanupTestCase()

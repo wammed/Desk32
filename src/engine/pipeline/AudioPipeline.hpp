@@ -34,6 +34,8 @@ struct DspTelemetry {
 
 class AudioPipeline {
 public:
+    static constexpr size_t MAX_COMMANDS_PER_BLOCK = 64; ///< Upper bound on discrete commands drained per Audio Thread block (P0-29)
+
     explicit AudioPipeline(double graphSampleRate = 48000.0)
         : m_graphSampleRate(graphSampleRate)
     {
@@ -282,8 +284,10 @@ public:
 private:
     void drainParameterCommands(AudioChain* master, AudioChain* listening) noexcept {
         dsp::DspCommand cmd;
-        while (m_paramQueue.pop(cmd)) {
+        size_t drained = 0;
+        while (drained < MAX_COMMANDS_PER_BLOCK && m_paramQueue.pop(cmd)) {
             applyDspCommand(cmd, master, listening);
+            ++drained;
         }
     }
 

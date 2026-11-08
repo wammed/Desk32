@@ -42,8 +42,23 @@ public:
         m_delayBuffer->reset();
     }
 
+    void reclaimRetired() noexcept override {
+        if (m_bridge) {
+            m_bridge->reclaimRetiredMocks();
+        }
+    }
+
+    void setDelayCompensationFrames(size_t frames) noexcept {
+        m_delayBuffer->setDelayFrames(frames);
+        if (m_bridge) {
+            m_bridge->setDelayCompensationFrames(frames);
+        }
+    }
+
     [[nodiscard]] int64_t latencyFrames() const noexcept override {
-        return static_cast<int64_t>(m_bridge->reportedLatencyFrames() + m_delayBuffer->delayFrames());
+        const int64_t sharedDelay = m_bridge ? m_bridge->delayCompensationFrames() : -1;
+        const size_t pdc = (sharedDelay >= 0) ? static_cast<size_t>(sharedDelay) : m_delayBuffer->delayFrames();
+        return static_cast<int64_t>(m_bridge->reportedLatencyFrames() + pdc);
     }
 
     [[nodiscard]] ExternalInsertBridge& bridge() noexcept { return *m_bridge; }
@@ -87,6 +102,10 @@ public:
         m_bridge->process(left, right, frameCount);
 
         // 3. Apply Plugin Delay Compensation (PDC) alignment if configured
+        const int64_t sharedDelay = m_bridge->delayCompensationFrames();
+        if (sharedDelay >= 0 && m_delayBuffer->delayFrames() != static_cast<size_t>(sharedDelay)) {
+            m_delayBuffer->setDelayFrames(static_cast<size_t>(sharedDelay));
+        }
         m_delayBuffer->process(left, right, frameCount);
     }
 

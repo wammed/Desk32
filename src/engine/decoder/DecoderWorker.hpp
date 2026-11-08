@@ -101,6 +101,14 @@ public:
         m_preCommitHook = std::move(hook);
     }
 
+    void setOpenTimeoutMs(uint32_t timeoutMs) noexcept {
+        m_openTimeoutMs.store(timeoutMs, std::memory_order_release);
+    }
+
+    [[nodiscard]] uint32_t openTimeoutMs() const noexcept {
+        return m_openTimeoutMs.load(std::memory_order_acquire);
+    }
+
     /// Thread-safe copy of track info (P0-05)
     [[nodiscard]] WorkerTrackInfo trackInfo() const {
         std::lock_guard<std::mutex> lock(m_trackMutex);
@@ -137,6 +145,7 @@ private:
     std::atomic<uint64_t> m_activeRequestId{0};
     std::atomic<uint64_t> m_committedRequestId{0};
     std::atomic<OpenStatus> m_lastOpenStatus{OpenStatus::None};
+    std::atomic<uint32_t> m_openTimeoutMs{2000};
 
     mutable std::mutex m_trackMutex;
     WorkerTrackInfo m_trackInfo;

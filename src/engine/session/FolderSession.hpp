@@ -4,6 +4,7 @@
 #include <string_view>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <QString>
@@ -122,7 +123,7 @@ public:
     FolderSession();
     ~FolderSession();
 
-    [[nodiscard]] bool isActive() const noexcept { return m_isActive; }
+    [[nodiscard]] bool isActive() const noexcept { return m_isActive.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& folderPath() const noexcept { return m_folderPath; }
     [[nodiscard]] const std::vector<SessionTrack>& tracks() const noexcept { return m_tracks; }
     [[nodiscard]] size_t currentIndex() const noexcept { return m_currentIndex; }
@@ -149,8 +150,9 @@ public:
 
         // Specification 2.7.2: Continuous playback strictly starts from index 0
         m_currentIndex = 0;
-        m_isActive = !m_tracks.empty();
-        return m_isActive;
+        const bool active = !m_tracks.empty();
+        m_isActive.store(active, std::memory_order_release);
+        return active;
     }
 
     [[nodiscard]] const SessionTrack* currentTrack() const noexcept {
@@ -173,7 +175,7 @@ public:
             m_currentIndex++;
             return true;
         }
-        m_isActive = false; // Reached end of folder session
+        m_isActive.store(false, std::memory_order_release); // Reached end of folder session
         return false;
     }
 
@@ -188,20 +190,20 @@ public:
     bool seekTrack(size_t index) {
         if (index < m_tracks.size()) {
             m_currentIndex = index;
-            m_isActive = true;
+            m_isActive.store(true, std::memory_order_release);
             return true;
         }
         return false;
     }
 
     void stopSession() {
-        m_isActive = false;
+        m_isActive.store(false, std::memory_order_release);
         m_tracks.clear();
         m_currentIndex = 0;
     }
 
 private:
-    bool m_isActive = false;
+    std::atomic<bool> m_isActive{false};
     std::string m_folderPath;
     std::vector<SessionTrack> m_tracks;
     size_t m_currentIndex = 0;

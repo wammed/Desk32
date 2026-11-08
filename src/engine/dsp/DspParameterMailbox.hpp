@@ -104,6 +104,20 @@ public:
         }
     }
 
+    /// Re-initialize mailbox to default state (Control Thread when Audio Thread is stopped, P0-24)
+    void reset() {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        m_listeningPresetConfigured = false;
+        initDefaultStaging();
+        for (auto& buf : m_buffers) {
+            buf = m_staging;
+        }
+        m_writeIndex = 0;
+        m_consumerIndex = 2;
+        m_sharedState.store(1, std::memory_order_release);
+        m_updateCounter.store(0, std::memory_order_release);
+    }
+
     void setSampleRate(double sampleRate) {
         if (sampleRate <= 0.0) return;
         std::lock_guard<std::mutex> lock(m_producerMutex);

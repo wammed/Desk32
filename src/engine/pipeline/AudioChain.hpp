@@ -21,7 +21,9 @@ public:
     explicit AudioChain(std::string name, ChainPurpose purpose)
         : m_name(std::move(name))
         , m_purpose(purpose)
-    {}
+    {
+        m_nodes.reserve(MAX_NODES);
+    }
 
     [[nodiscard]] const std::string& name() const noexcept { return m_name; }
     [[nodiscard]] ChainPurpose purpose() const noexcept { return m_purpose; }
@@ -43,22 +45,46 @@ public:
     /// - NodeAffiliation::ListeningCorrection can ONLY be added to ChainPurpose::ListeningCorrectionChain.
     /// - NodeAffiliation::RenderMonitorOnly can ONLY be added to ChainPurpose::RenderMonitorChain.
     bool appendNode(std::shared_ptr<AudioNode> node) {
-        if (!node) return false;
-        if (m_nodes.size() >= MAX_NODES) return false; // Enforce bounded chain size (P0-29)
+        if (!node) {
+            m_rejectedNodeCount.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (m_nodes.size() >= MAX_NODES) {
+            m_rejectedNodeCount.fetch_add(1, std::memory_order_relaxed);
+            return false; // Enforce bounded chain size (P0-29)
+        }
 
         if (m_purpose == ChainPurpose::MasteringChain) {
             if (node->affiliation() == NodeAffiliation::ListeningCorrection ||
                 node->affiliation() == NodeAffiliation::RenderMonitorOnly) {
+                m_rejectedNodeCount.fetch_add(1, std::memory_order_relaxed);
                 return false; // Structurally forbidden!
             }
         } else if (m_purpose == ChainPurpose::RenderMonitorChain) {
             if (node->affiliation() == NodeAffiliation::ListeningCorrection) {
+                m_rejectedNodeCount.fetch_add(1, std::memory_order_relaxed);
                 return false; // Listening Correction must NEVER enter Render Monitor
             }
         }
 
         m_nodes.push_back(std::move(node));
         return true;
+    }
+
+    /// Remove node at index (Control Thread / Chain Builder only, P0-29).
+    bool removeNode(size_t index) {
+        if (index >= m_nodes.size()) return false;
+        m_nodes.erase(m_nodes.begin() + static_cast<std::ptrdiff_t>(index));
+        return true;
+    }
+
+    /// Clear all nodes from chain (Control Thread / Chain Builder only, P0-29).
+    void clearNodes() {
+        m_nodes.clear();
+    }
+
+    [[nodiscard]] uint64_t rejectedNodeCount() const noexcept {
+        return m_rejectedNodeCount.load(std::memory_order_relaxed);
     }
 
     void configure(double sampleRate) {
@@ -120,6 +146,7 @@ private:
     std::vector<std::shared_ptr<AudioNode>> m_nodes;
     double m_sampleRate = 48000.0;
     std::atomic<bool> m_bypassed{false};
+    std::atomic<uint64_t> m_rejectedNodeCount{0};
 };
 
 } // namespace desk32::engine::pipeline

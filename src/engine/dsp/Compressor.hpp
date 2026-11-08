@@ -103,7 +103,7 @@ public:
     void setReleaseMs(double ms) { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, ms, m_makeupGainDb, m_kneeDb, m_enabled.load(std::memory_order_relaxed)); }
     void setMakeupGainDb(double db) { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, m_releaseMs, db, m_kneeDb, m_enabled.load(std::memory_order_relaxed)); }
     void setKneeDb(double db) { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, m_releaseMs, m_makeupGainDb, db, m_enabled.load(std::memory_order_relaxed)); }
-    void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, m_releaseMs, m_makeupGainDb, m_kneeDb, enabled); }
+    void setEnabled(bool enabled) noexcept { m_enabled.store(enabled, std::memory_order_relaxed); }
 
     Compressor* nextRetired = nullptr;
 
@@ -124,7 +124,7 @@ public:
     {
         auto guard = m_paramsReclaimer.enterRead();
         const Params* p = guard.get();
-        if (!p || !p->enabled) {
+        if (!p || !m_enabled.load(std::memory_order_relaxed)) {
             m_gainReductionDb.store(0.0, std::memory_order_relaxed);
             return;
         }

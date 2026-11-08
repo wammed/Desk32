@@ -1,5 +1,4 @@
-leak:libpipewire
+# External library suppressions for LeakSanitizer (P0-28 audited minimal set)
+# 1. PipeWire SPA module loader singleton allocations in libpipewire-0.3
+leak:libpipewire-0.3.so
 leak:pw_context_load_module
-leak:libQt6Core
-leak:libasound
-

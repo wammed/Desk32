@@ -173,15 +173,17 @@ public:
     void prepareInstance(double sampleRate, double thresholdDb, double ratio,
                          double attackMs, double releaseMs, double makeupDb,
                          double kneeDb, bool enabled) {
-        {
-            std::lock_guard<std::mutex> lock(m_configMutex);
-            m_config = {sampleRate, thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled};
-        }
         auto next = std::make_unique<Compressor>();
         next->configure(sampleRate, thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
         Compressor* raw = next.release();
-        Compressor* unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
+        Compressor* unconsumed = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            m_config = {sampleRate, thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled};
+            unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
+        }
         if (unconsumed) {
+            m_replacedBeforeActivationCount.fetch_add(1, std::memory_order_relaxed);
             delete unconsumed;
         }
         reclaimRetired();
@@ -194,6 +196,7 @@ public:
     void process(double* left, double* right, size_t frameCount) override {
         // 1. Check for prepared instance at block boundary
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
+            m_activatedCount.fetch_add(1, std::memory_order_relaxed);
             if (m_active) {
                 prepared->inheritStateFrom(*m_active);
                 retireInstance(m_active);
@@ -215,6 +218,11 @@ public:
 
     [[nodiscard]] Compressor& dsp() noexcept { return *m_active; }
     [[nodiscard]] const Compressor& dsp() const noexcept { return *m_active; }
+
+    [[nodiscard]] uint64_t activatedCount() const noexcept { return m_activatedCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t replacedBeforeActivationCount() const noexcept { return m_replacedBeforeActivationCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t retiredCount() const noexcept { return m_retiredCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t reclaimedCount() const noexcept { return m_reclaimedCount.load(std::memory_order_relaxed); }
 
     [[nodiscard]] double thresholdDb() const noexcept {
         std::lock_guard<std::mutex> lock(m_configMutex);
@@ -250,6 +258,7 @@ public:
         while (cur) {
             Compressor* next = cur->nextRetired;
             delete cur;
+            m_reclaimedCount.fetch_add(1, std::memory_order_relaxed);
             cur = next;
         }
     }
@@ -274,6 +283,7 @@ private:
         while (!m_retireHead.compare_exchange_weak(old->nextRetired, old,
                                                    std::memory_order_release,
                                                    std::memory_order_relaxed));
+        m_retiredCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     mutable std::mutex m_configMutex;
@@ -281,6 +291,10 @@ private:
     Compressor* m_active{nullptr};
     alignas(64) std::atomic<Compressor*> m_prepared{nullptr};
     alignas(64) std::atomic<Compressor*> m_retireHead{nullptr};
+    std::atomic<uint64_t> m_activatedCount{0};
+    std::atomic<uint64_t> m_replacedBeforeActivationCount{0};
+    std::atomic<uint64_t> m_retiredCount{0};
+    std::atomic<uint64_t> m_reclaimedCount{0};
 };
 
 /// Node 5: Sample Peak Limiter (Section 5.5, P0-21, P0-23)
@@ -329,16 +343,19 @@ public:
     // Called on Control Thread (P0-21, P0-23)
     void prepareInstance(double sampleRate, double ceilingDb, double releaseMs,
                          double lookaheadMs, bool enabled) {
+        auto next = std::make_unique<PeakLimiter>();
+        next->configure(sampleRate, ceilingDb, releaseMs, lookaheadMs, enabled);
+        const int64_t nextLatency = static_cast<int64_t>(next->lookaheadSamples());
+        PeakLimiter* raw = next.release();
+        PeakLimiter* unconsumed = nullptr;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
             m_config = {sampleRate, ceilingDb, releaseMs, lookaheadMs, enabled};
+            m_latencyFrames.store(nextLatency, std::memory_order_release);
+            unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
         }
-        auto next = std::make_unique<PeakLimiter>();
-        next->configure(sampleRate, ceilingDb, releaseMs, lookaheadMs, enabled);
-        m_latencyFrames.store(static_cast<int64_t>(next->lookaheadSamples()), std::memory_order_release);
-        PeakLimiter* raw = next.release();
-        PeakLimiter* unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
         if (unconsumed) {
+            m_replacedBeforeActivationCount.fetch_add(1, std::memory_order_relaxed);
             delete unconsumed;
         }
         reclaimRetired();
@@ -355,6 +372,7 @@ public:
     void process(double* left, double* right, size_t frameCount) override {
         // 1. Check for prepared instance at block boundary
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
+            m_activatedCount.fetch_add(1, std::memory_order_relaxed);
             if (m_active) {
                 // State transition (P0-23): inherit gain and lookahead delay buffer
                 prepared->inheritStateFrom(*m_active);
@@ -378,6 +396,11 @@ public:
     [[nodiscard]] PeakLimiter& dsp() noexcept { return *m_active; }
     [[nodiscard]] const PeakLimiter& dsp() const noexcept { return *m_active; }
 
+    [[nodiscard]] uint64_t activatedCount() const noexcept { return m_activatedCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t replacedBeforeActivationCount() const noexcept { return m_replacedBeforeActivationCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t retiredCount() const noexcept { return m_retiredCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t reclaimedCount() const noexcept { return m_reclaimedCount.load(std::memory_order_relaxed); }
+
     [[nodiscard]] double ceilingDb() const noexcept {
         std::lock_guard<std::mutex> lock(m_configMutex);
         return m_config.ceilingDb;
@@ -400,6 +423,7 @@ public:
         while (cur) {
             PeakLimiter* next = cur->nextRetired;
             delete cur;
+            m_reclaimedCount.fetch_add(1, std::memory_order_relaxed);
             cur = next;
         }
     }
@@ -423,6 +447,7 @@ private:
         while (!m_retireHead.compare_exchange_weak(old->nextRetired, old,
                                                    std::memory_order_release,
                                                    std::memory_order_relaxed));
+        m_retiredCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     mutable std::mutex m_configMutex;
@@ -431,6 +456,10 @@ private:
     PeakLimiter* m_active{nullptr};
     alignas(64) std::atomic<PeakLimiter*> m_prepared{nullptr};
     alignas(64) std::atomic<PeakLimiter*> m_retireHead{nullptr};
+    std::atomic<uint64_t> m_activatedCount{0};
+    std::atomic<uint64_t> m_replacedBeforeActivationCount{0};
+    std::atomic<uint64_t> m_retiredCount{0};
+    std::atomic<uint64_t> m_reclaimedCount{0};
 };
 
 /// Node 6: Algorithmic Reverb (Section 5.6, P0-21, P0-22)
@@ -463,10 +492,14 @@ public:
     };
     static constexpr size_t MAX_RINGOUT_SLOTS = 8;
 
-    enum class RetireReason {
-        None,
-        NaturalDecayComplete,      // Internal buffer energy < 1e-7 AND age >= 1.5*RT60
-        MaxRetentionSafetyCeiling  // Fallback safety timeout (10 seconds @ 48kHz)
+    enum class RetireReason : uint8_t {
+        None = 0,
+        ReplacedBeforeActivation = 1,   // Unconsumed prepared instance replaced on Control Thread
+        NaturalDecayComplete = 2,       // Internal buffer energy < 1e-7 AND age >= 1.5*RT60 AND 8 silent blocks
+        MaxRetentionSafetyCeiling = 3,  // Fallback safety timeout (10 seconds @ sampleRate)
+        SlotCapacityEviction = 4,       // All 8 ringout slots full; lowest-energy slot evicted
+        ExplicitCancel = 5,             // Explicit reset() / non-tail-preserving cancel
+        AbnormalStateReset = 6          // NaN / Inf detected in internal state
     };
 
     explicit ReverbNode(std::string name = "Reverb")
@@ -505,15 +538,18 @@ public:
     void prepareInstance(double sampleRate, double roomSize, double damping,
                          double wetLevel, double predelayMs, bool tailPreserving,
                          bool enabled) {
-        {
-            std::lock_guard<std::mutex> lock(m_configMutex);
-            m_config = {sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled};
-        }
         auto next = std::make_unique<AlgorithmicReverb>();
         next->configure(sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
         AlgorithmicReverb* raw = next.release();
-        AlgorithmicReverb* unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
+        AlgorithmicReverb* unconsumed = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            m_config = {sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled};
+            unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
+        }
         if (unconsumed) {
+            m_replacedBeforeActivationCount.fetch_add(1, std::memory_order_relaxed);
+            m_lastRetireReason.store(RetireReason::ReplacedBeforeActivation, std::memory_order_relaxed);
             delete unconsumed;
         }
         reclaimRetired();
@@ -523,6 +559,7 @@ public:
         if (m_active) m_active->reset();
         for (auto& slot : m_ringoutSlots) {
             if (slot.reverb) {
+                recordRetireReason(RetireReason::ExplicitCancel);
                 retireInstance(slot.reverb);
                 slot = RingoutSlot{};
             }
@@ -532,8 +569,16 @@ public:
     [[nodiscard]] RetireReason evaluateRetireCondition(const RingoutSlot& slot, double maxBlockTail) const noexcept {
         if (!slot.reverb) return RetireReason::None;
 
-        // 1. Max Retention Safety Ceiling (10 seconds @ 48kHz = 480,000 frames)
-        if (slot.ageFrames >= 480000) {
+        // 0. Abnormal state (NaN / Inf) protection
+        const double internalEnergy = slot.reverb->totalInternalEnergy();
+        if (!std::isfinite(maxBlockTail) || !std::isfinite(internalEnergy)) {
+            return RetireReason::AbnormalStateReset;
+        }
+
+        // 1. Max Retention Safety Ceiling (10 seconds @ instance sampleRate)
+        const double sr = std::max(8000.0, slot.reverb->sampleRate());
+        const size_t maxRetentionFrames = static_cast<size_t>(10.0 * sr);
+        if (slot.ageFrames >= maxRetentionFrames) {
             return RetireReason::MaxRetentionSafetyCeiling;
         }
 
@@ -542,7 +587,6 @@ public:
         if (maxBlockTail < 1e-4 &&
             slot.silentBlocks >= 8 &&
             slot.ageFrames >= slot.reverb->theoreticalDecayFrames()) {
-            double internalEnergy = slot.reverb->totalInternalEnergy();
             if (internalEnergy < 1e-7) {
                 return RetireReason::NaturalDecayComplete;
             }
@@ -554,29 +598,44 @@ public:
     void process(double* left, double* right, size_t frameCount) override {
         // 1. Check for prepared instance at block boundary (RT-safe atomic exchange)
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
+            m_activatedCount.fetch_add(1, std::memory_order_relaxed);
             if (m_active) {
-                // Tail Preservation (P0-22): Migrate active instance to ringout slot for natural tail decay
-                bool placed = false;
-                for (auto& slot : m_ringoutSlots) {
-                    if (!slot.reverb) {
-                        slot = RingoutSlot{m_active, 0, 0, m_active->totalInternalEnergy()};
-                        placed = true;
-                        break;
-                    }
-                }
-                if (!placed) {
-                    // All slots occupied: find the slot with the lowest internal energy (most decayed)
-                    size_t minIdx = 0;
-                    double minEnergy = 1e18;
-                    for (size_t s = 0; s < MAX_RINGOUT_SLOTS; ++s) {
-                        double e = m_ringoutSlots[s].reverb->totalInternalEnergy();
-                        if (e < minEnergy) {
-                            minEnergy = e;
-                            minIdx = s;
+                const double activeEnergy = m_active->totalInternalEnergy();
+                if (!std::isfinite(activeEnergy)) {
+                    m_active->reset();
+                    recordRetireReason(RetireReason::AbnormalStateReset);
+                    retireInstance(m_active);
+                } else if (!m_active->isTailPreserving()) {
+                    recordRetireReason(RetireReason::ExplicitCancel);
+                    retireInstance(m_active);
+                } else if (activeEnergy <= 1e-12) {
+                    // Already silent (never excited or completely decayed): retire directly without occupying a ringout slot
+                    retireInstance(m_active);
+                } else {
+                    // Tail Preservation (P0-22): Migrate active instance to ringout slot for natural tail decay
+                    bool placed = false;
+                    for (auto& slot : m_ringoutSlots) {
+                        if (!slot.reverb) {
+                            slot = RingoutSlot{m_active, 0, 0, activeEnergy};
+                            placed = true;
+                            break;
                         }
                     }
-                    retireInstance(m_ringoutSlots[minIdx].reverb);
-                    m_ringoutSlots[minIdx] = RingoutSlot{m_active, 0, 0, m_active->totalInternalEnergy()};
+                    if (!placed) {
+                        // All 8 slots occupied: find the slot with the lowest internal energy (most decayed)
+                        size_t minIdx = 0;
+                        double minEnergy = 1e30;
+                        for (size_t s = 0; s < MAX_RINGOUT_SLOTS; ++s) {
+                            double e = m_ringoutSlots[s].reverb->totalInternalEnergy();
+                            if (!std::isfinite(e) || e < minEnergy) {
+                                minEnergy = std::isfinite(e) ? e : -1.0;
+                                minIdx = s;
+                            }
+                        }
+                        recordRetireReason(RetireReason::SlotCapacityEviction);
+                        retireInstance(m_ringoutSlots[minIdx].reverb);
+                        m_ringoutSlots[minIdx] = RingoutSlot{m_active, 0, 0, activeEnergy};
+                    }
                 }
                 m_active = prepared;
             } else {
@@ -591,19 +650,34 @@ public:
             for (auto& slot : m_ringoutSlots) {
                 if (!slot.reverb) continue;
                 double maxTail = 0.0;
+                bool abnormal = false;
                 for (size_t i = 0; i < frameCount; ++i) {
                     double dummyL = 0.0, dummyR = 0.0;
                     slot.reverb->process(dummyL, dummyR);
+                    if (!std::isfinite(dummyL) || !std::isfinite(dummyR)) {
+                        abnormal = true;
+                        break;
+                    }
                     double absL = std::abs(dummyL);
                     double absR = std::abs(dummyR);
                     if (absL > maxTail) maxTail = absL;
                     if (absR > maxTail) maxTail = absR;
                 }
+                if (abnormal) {
+                    slot.reverb->reset();
+                    recordRetireReason(RetireReason::AbnormalStateReset);
+                    retireInstance(slot.reverb);
+                    slot = RingoutSlot{};
+                    continue;
+                }
                 slot.ageFrames += frameCount;
                 if (maxTail < 1e-4) slot.silentBlocks++; else slot.silentBlocks = 0;
+                slot.lastMeasuredEnergy = slot.reverb->totalInternalEnergy();
 
                 RetireReason reason = evaluateRetireCondition(slot, maxTail);
                 if (reason != RetireReason::None) {
+                    if (reason == RetireReason::AbnormalStateReset) slot.reverb->reset();
+                    recordRetireReason(reason);
                     retireInstance(slot.reverb);
                     slot = RingoutSlot{};
                 }
@@ -612,6 +686,10 @@ public:
                 for (size_t i = 0; i < frameCount; ++i) {
                     double dummyL = 0.0, dummyR = 0.0;
                     m_active->process(dummyL, dummyR);
+                    if (!std::isfinite(dummyL) || !std::isfinite(dummyR)) {
+                        m_active->reset();
+                        break;
+                    }
                 }
             }
             return;
@@ -619,8 +697,18 @@ public:
 
         // 3. Active audio processing with new parameters
         if (m_active) {
+            if (m_active->hasInvalidState()) {
+                m_active->reset();
+            }
             for (size_t i = 0; i < frameCount; ++i) {
+                const double dryL = left[i];
+                const double dryR = right[i];
                 m_active->process(left[i], right[i]);
+                if (!std::isfinite(left[i]) || !std::isfinite(right[i])) {
+                    m_active->reset();
+                    left[i] = dryL;
+                    right[i] = dryR;
+                }
             }
         }
 
@@ -628,11 +716,24 @@ public:
         for (auto& slot : m_ringoutSlots) {
             if (!slot.reverb) continue;
 
+            if (slot.reverb->hasInvalidState()) {
+                slot.reverb->reset();
+                recordRetireReason(RetireReason::AbnormalStateReset);
+                retireInstance(slot.reverb);
+                slot = RingoutSlot{};
+                continue;
+            }
+
             double maxBlockTail = 0.0;
+            bool abnormal = false;
             for (size_t i = 0; i < frameCount; ++i) {
                 double tailL = 0.0;
                 double tailR = 0.0;
                 slot.reverb->process(tailL, tailR);
+                if (!std::isfinite(tailL) || !std::isfinite(tailR)) {
+                    abnormal = true;
+                    break;
+                }
                 left[i] += tailL;
                 right[i] += tailR;
 
@@ -642,6 +743,14 @@ public:
                 if (absR > maxBlockTail) maxBlockTail = absR;
             }
 
+            if (abnormal) {
+                slot.reverb->reset();
+                recordRetireReason(RetireReason::AbnormalStateReset);
+                retireInstance(slot.reverb);
+                slot = RingoutSlot{};
+                continue;
+            }
+
             slot.ageFrames += frameCount;
 
             if (maxBlockTail < 1e-4) {
@@ -649,9 +758,12 @@ public:
             } else {
                 slot.silentBlocks = 0;
             }
+            slot.lastMeasuredEnergy = slot.reverb->totalInternalEnergy();
 
             RetireReason reason = evaluateRetireCondition(slot, maxBlockTail);
             if (reason != RetireReason::None) {
+                if (reason == RetireReason::AbnormalStateReset) slot.reverb->reset();
+                recordRetireReason(reason);
                 retireInstance(slot.reverb);
                 slot = RingoutSlot{};
             }
@@ -664,6 +776,25 @@ public:
 
     [[nodiscard]] AlgorithmicReverb& dsp() noexcept { return *m_active; }
     [[nodiscard]] const AlgorithmicReverb& dsp() const noexcept { return *m_active; }
+
+    [[nodiscard]] size_t activeRingoutSlotCount() const noexcept {
+        size_t count = 0;
+        for (const auto& slot : m_ringoutSlots) {
+            if (slot.reverb != nullptr) ++count;
+        }
+        return count;
+    }
+
+    [[nodiscard]] uint64_t activatedCount() const noexcept { return m_activatedCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t replacedBeforeActivationCount() const noexcept { return m_replacedBeforeActivationCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t retiredCount() const noexcept { return m_retiredCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t reclaimedCount() const noexcept { return m_reclaimedCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t naturalDecayRetireCount() const noexcept { return m_naturalDecayRetireCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t safetyCeilingRetireCount() const noexcept { return m_safetyCeilingRetireCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t capacityEvictionRetireCount() const noexcept { return m_capacityEvictionRetireCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t explicitCancelRetireCount() const noexcept { return m_explicitCancelRetireCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t abnormalStateRetireCount() const noexcept { return m_abnormalStateRetireCount.load(std::memory_order_relaxed); }
+    [[nodiscard]] RetireReason lastRetireReason() const noexcept { return m_lastRetireReason.load(std::memory_order_relaxed); }
 
     [[nodiscard]] double roomSize() const noexcept {
         std::lock_guard<std::mutex> lock(m_configMutex);
@@ -691,6 +822,7 @@ public:
         while (cur) {
             AlgorithmicReverb* next = cur->nextRetired;
             delete cur;
+            m_reclaimedCount.fetch_add(1, std::memory_order_relaxed);
             cur = next;
         }
     }
@@ -710,11 +842,35 @@ public:
     }
 
 private:
+    void recordRetireReason(RetireReason reason) noexcept {
+        m_lastRetireReason.store(reason, std::memory_order_relaxed);
+        switch (reason) {
+        case RetireReason::NaturalDecayComplete:
+            m_naturalDecayRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case RetireReason::MaxRetentionSafetyCeiling:
+            m_safetyCeilingRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case RetireReason::SlotCapacityEviction:
+            m_capacityEvictionRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case RetireReason::ExplicitCancel:
+            m_explicitCancelRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case RetireReason::AbnormalStateReset:
+            m_abnormalStateRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        default:
+            break;
+        }
+    }
+
     void retireInstance(AlgorithmicReverb* old) noexcept {
         old->nextRetired = m_retireHead.load(std::memory_order_relaxed);
         while (!m_retireHead.compare_exchange_weak(old->nextRetired, old,
                                                    std::memory_order_release,
                                                    std::memory_order_relaxed));
+        m_retiredCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     mutable std::mutex m_configMutex;
@@ -724,6 +880,17 @@ private:
 
     alignas(64) std::atomic<AlgorithmicReverb*> m_prepared{nullptr};
     alignas(64) std::atomic<AlgorithmicReverb*> m_retireHead{nullptr};
+
+    std::atomic<uint64_t> m_activatedCount{0};
+    std::atomic<uint64_t> m_replacedBeforeActivationCount{0};
+    std::atomic<uint64_t> m_retiredCount{0};
+    std::atomic<uint64_t> m_reclaimedCount{0};
+    std::atomic<uint64_t> m_naturalDecayRetireCount{0};
+    std::atomic<uint64_t> m_safetyCeilingRetireCount{0};
+    std::atomic<uint64_t> m_capacityEvictionRetireCount{0};
+    std::atomic<uint64_t> m_explicitCancelRetireCount{0};
+    std::atomic<uint64_t> m_abnormalStateRetireCount{0};
+    std::atomic<RetireReason> m_lastRetireReason{RetireReason::None};
 };
 
 } // namespace desk32::engine::pipeline

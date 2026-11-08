@@ -48,7 +48,21 @@ class ExternalInsertBridge {
 public:
     using MockProcessorFunc = std::function<void(double*, double*, size_t)>;
 
+    struct MockHolder {
+        MockProcessorFunc func;
+        MockHolder* nextRetired = nullptr;
+    };
+
     ExternalInsertBridge() = default;
+
+    ~ExternalInsertBridge() {
+        reclaimRetiredMocks();
+        delete m_preparedMock.exchange(nullptr, std::memory_order_acquire);
+        delete m_activeMock;
+    }
+
+    ExternalInsertBridge(const ExternalInsertBridge&) = delete;
+    ExternalInsertBridge& operator=(const ExternalInsertBridge&) = delete;
 
     [[nodiscard]] InsertState state() const noexcept { return m_state.load(std::memory_order_acquire); }
     [[nodiscard]] bool isBypassed() const noexcept { return m_isBypassed.load(std::memory_order_acquire); }
@@ -109,21 +123,44 @@ public:
         m_xrunCount.store(0, std::memory_order_relaxed);
     }
 
-    /// Set mock processing function for testing or simulated plugins (lock-free RT-safe update, P0-4.1)
+    /// Set mock processing function for testing or simulated plugins (lock-free Prepared Instance Exchange, P0-21/P0-27)
+    /// Strictly zero shared_ptr atomic spinlocks and zero Audio Thread deallocations.
     void setMockProcessor(MockProcessorFunc processor) {
-        std::shared_ptr<MockProcessorFunc> sp;
-        if (processor) {
-            sp = std::make_shared<MockProcessorFunc>(std::move(processor));
+        auto next = std::make_unique<MockHolder>();
+        next->func = std::move(processor);
+        MockHolder* unconsumed = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            unconsumed = m_preparedMock.exchange(next.release(), std::memory_order_acq_rel);
         }
-        m_mockProcessor.store(sp, std::memory_order_release);
+        delete unconsumed;
+        reclaimRetiredMocks();
+    }
+
+    /// Reclaim retired MockHolder instances strictly on Control Thread (P0-21/P0-27)
+    void reclaimRetiredMocks() noexcept {
+        MockHolder* cur = m_retiredMockHead.exchange(nullptr, std::memory_order_acquire);
+        while (cur) {
+            MockHolder* next = cur->nextRetired;
+            delete cur;
+            cur = next;
+        }
+    }
+
+    void setDelayCompensationFrames(size_t frames) noexcept {
+        m_delayCompensationFrames.store(static_cast<int64_t>(frames), std::memory_order_release);
+    }
+
+    [[nodiscard]] int64_t delayCompensationFrames() const noexcept {
+        return m_delayCompensationFrames.load(std::memory_order_acquire);
     }
 
     /// Configure external insert connection ports
     bool configure(const ExternalPortInfo& config, double engineSampleRate, size_t engineBufferSize) {
         std::lock_guard<std::mutex> lock(m_configMutex);
         m_config = config;
-        m_engineSampleRate = engineSampleRate;
-        m_engineBufferSize = engineBufferSize;
+        m_engineSampleRate.store(engineSampleRate, std::memory_order_release);
+        m_engineBufferSize.store(engineBufferSize, std::memory_order_release);
         m_reportedLatencyFrames.store(config.reportedLatencyFrames, std::memory_order_release);
 
         if (m_config.clientName.empty()) {
@@ -141,14 +178,14 @@ public:
         }
 
         // 2. Sample Rate & Buffer Matching Check
-        if (std::abs(m_config.sampleRate - m_engineSampleRate) > 0.01) {
+        if (std::abs(m_config.sampleRate - engineSampleRate) > 0.01) {
             m_state.store(InsertState::RateMismatch, std::memory_order_release);
             m_lastError = "Sample rate mismatch between Engine and External Host";
             m_isBypassed.store(true, std::memory_order_release);
             return false;
         }
 
-        if (m_config.bufferSize != m_engineBufferSize) {
+        if (m_config.bufferSize != engineBufferSize) {
             m_state.store(InsertState::BufferMismatch, std::memory_order_release);
             m_lastError = "Buffer size mismatch between Engine and External Host";
             m_isBypassed.store(true, std::memory_order_release);
@@ -176,9 +213,11 @@ public:
     void handleRecovery() {
         m_state.store(InsertState::Recovering, std::memory_order_release);
         std::lock_guard<std::mutex> lock(m_configMutex);
+        const double sr = m_engineSampleRate.load(std::memory_order_acquire);
+        const size_t bs = m_engineBufferSize.load(std::memory_order_acquire);
         // Verify parameters
-        if (std::abs(m_config.sampleRate - m_engineSampleRate) < 0.01 &&
-            m_config.bufferSize == m_engineBufferSize) {
+        if (std::abs(m_config.sampleRate - sr) < 0.01 &&
+            m_config.bufferSize == bs) {
             m_state.store(InsertState::Connected, std::memory_order_release);
             m_isBypassed.store(false, std::memory_order_release);
             m_lastError.clear();
@@ -190,73 +229,98 @@ public:
 
     /// Audio block processing through insert
     /// If bypassed or disconnected, performs dry pass-through with no clicks.
-    /// Audio Thread execution: strictly zero dynamic allocations or blocking locks (P0-4.1).
-    void process(double* inOutLeft, double* inOutRight, size_t frames) {
-        if (m_isBypassed.load(std::memory_order_acquire) || m_state.load(std::memory_order_acquire) != InsertState::Connected) {
+    /// Audio Thread execution: strictly zero dynamic allocations, zero deallocations, zero blocking locks (P0-21/P0-23/P0-27).
+    void process(double* inOutLeft, double* inOutRight, size_t frames) noexcept {
+        // 1. Activate prepared mock processor at block boundary if present
+        if (auto* prepared = m_preparedMock.exchange(nullptr, std::memory_order_acq_rel)) {
+            if (m_activeMock) {
+                retireMock(m_activeMock);
+            }
+            m_activeMock = prepared;
+        }
+
+        const InsertState curState = m_state.load(std::memory_order_acquire);
+        if (m_isBypassed.load(std::memory_order_acquire) ||
+            (curState != InsertState::Connected && curState != InsertState::Active)) {
             // Passthrough (dry)
             return;
         }
 
-        // Active state
-        m_state.store(InsertState::Active, std::memory_order_release);
+        // Transition Connected -> Active on first active block
+        if (curState == InsertState::Connected) {
+            m_state.store(InsertState::Active, std::memory_order_release);
+        }
 
-        // If mock processor attached, execute safely without mutex on Audio Thread (P0-4.1)
-        auto mock = m_mockProcessor.load(std::memory_order_acquire);
-        if (mock && *mock) {
-            (*mock)(inOutLeft, inOutRight, frames);
+        // Execute active mock processor without any locks or refcounting on Audio Thread
+        if (m_activeMock && m_activeMock->func) {
+            m_activeMock->func(inOutLeft, inOutRight, frames);
         }
 
         // In active send/return, check for impulse detection during latency measurement
+        const uint64_t baseFrame = m_totalFramesProcessed.load(std::memory_order_relaxed);
         if (m_measuringLatency.load(std::memory_order_acquire)) {
+            const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; ++i) {
-                // If impulse was sent at m_impulseSendFrame
-                if (m_totalFramesProcessed + i == m_impulseSendFrame.load(std::memory_order_relaxed)) {
+                if (baseFrame + i == targetFrame) {
                     inOutLeft[i] += 1.0;
                     inOutRight[i] += 1.0;
                 }
             }
         }
 
-        m_totalFramesProcessed += frames;
+        m_totalFramesProcessed.store(baseFrame + frames, std::memory_order_release);
     }
 
     /// Initiate round-trip latency measurement using an impulse signal
-    void triggerLatencyMeasurement() {
+    void triggerLatencyMeasurement() noexcept {
         m_measuringLatency.store(true, std::memory_order_release);
-        m_impulseSendFrame.store(m_totalFramesProcessed + 64, std::memory_order_release); // Send in 64 frames
+        const uint64_t curFrames = m_totalFramesProcessed.load(std::memory_order_acquire);
+        m_impulseSendFrame.store(curFrames + 64, std::memory_order_release); // Send in 64 frames
         m_measuredLatencyFrames.store(-1, std::memory_order_release);
         m_measuredLatencyMs.store(-1.0, std::memory_order_release);
     }
 
     /// Record received impulse frame and calculate measured roundtrip latency
-    void recordImpulseReturn(uint64_t returnFrame, LatencySource source = LatencySource::SimulatedMock) {
+    void recordImpulseReturn(uint64_t returnFrame, LatencySource source = LatencySource::SimulatedMock) noexcept {
         uint64_t sendFrame = m_impulseSendFrame.load(std::memory_order_acquire);
         if (returnFrame >= sendFrame) {
             int64_t latencyFrames = static_cast<int64_t>(returnFrame - sendFrame);
+            const double sr = std::max(1.0, m_engineSampleRate.load(std::memory_order_acquire));
             m_measuredLatencyFrames.store(latencyFrames, std::memory_order_release);
-            m_measuredLatencyMs.store((static_cast<double>(latencyFrames) / m_engineSampleRate) * 1000.0, std::memory_order_release);
+            m_measuredLatencyMs.store((static_cast<double>(latencyFrames) / sr) * 1000.0, std::memory_order_release);
             m_latencySource.store(source, std::memory_order_release);
             m_measuringLatency.store(false, std::memory_order_release);
         }
     }
 
 private:
+    void retireMock(MockHolder* old) noexcept {
+        old->nextRetired = m_retiredMockHead.load(std::memory_order_relaxed);
+        while (!m_retiredMockHead.compare_exchange_weak(old->nextRetired, old,
+                                                        std::memory_order_release,
+                                                        std::memory_order_relaxed));
+    }
+
     std::atomic<InsertState> m_state{InsertState::NotConfigured};
     std::atomic<bool> m_isBypassed{true};
     mutable std::mutex m_configMutex;
     ExternalPortInfo m_config;
-    double m_engineSampleRate = 48000.0;
-    size_t m_engineBufferSize = 256;
+    std::atomic<double> m_engineSampleRate{48000.0};
+    std::atomic<size_t> m_engineBufferSize{256};
     std::string m_lastError;
-    std::atomic<std::shared_ptr<MockProcessorFunc>> m_mockProcessor{nullptr};
+
+    MockHolder* m_activeMock{nullptr};
+    alignas(64) std::atomic<MockHolder*> m_preparedMock{nullptr};
+    alignas(64) std::atomic<MockHolder*> m_retiredMockHead{nullptr};
 
     std::atomic<uint32_t> m_xrunCount{0};
     std::atomic<bool> m_measuringLatency{false};
     std::atomic<uint64_t> m_impulseSendFrame{0};
-    uint64_t m_totalFramesProcessed{0};
+    std::atomic<uint64_t> m_totalFramesProcessed{0};
     std::atomic<int64_t> m_measuredLatencyFrames{-1};
     std::atomic<double> m_measuredLatencyMs{-1.0};
     std::atomic<uint32_t> m_reportedLatencyFrames{0};
+    std::atomic<int64_t> m_delayCompensationFrames{-1};
     std::atomic<LatencySource> m_latencySource{LatencySource::Uncalibrated};
 };
 

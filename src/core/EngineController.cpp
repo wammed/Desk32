@@ -1355,7 +1355,7 @@ void EngineController::simulateInsertRecovery() {
 
 void EngineController::setInsertDelayCompensation(int frames) {
     if (!m_insertNode) return;
-    m_insertNode->delayBuffer().setDelayFrames(static_cast<size_t>(std::max(0, frames)));
+    m_insertNode->setDelayCompensationFrames(static_cast<size_t>(std::max(0, frames)));
     emit externalInsertStatusChanged();
 }
 
