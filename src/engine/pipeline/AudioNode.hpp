@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <memory>
 
 namespace desk32::engine::pipeline {
 
@@ -38,6 +39,9 @@ public:
 
     [[nodiscard]] virtual int64_t latencyFrames() const noexcept { return 0; }
     virtual void reset() {}
+
+    /// Real-time safe deep clone of node state for graph reconstruction (P0-08)
+    [[nodiscard]] virtual std::shared_ptr<AudioNode> clone() const = 0;
 
     /// Real-time audio processing callback.
     /// Audio Thread execution guarantees:

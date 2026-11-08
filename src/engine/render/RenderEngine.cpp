@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QStorageInfo>
 #include <QDateTime>
+#include <QThread>
 #include <QDebug>
 #include <array>
 #include <algorithm>
@@ -57,6 +58,21 @@ void RenderEngine::cancelCurrentRender() {
     m_cancelRequested.store(true, std::memory_order_release);
 }
 
+void RenderEngine::setDatabasePath(const QString& dbPath) {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_dbPath = dbPath;
+}
+
+QString RenderEngine::databasePath() const {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return m_dbPath;
+}
+
+RenderDspSnapshot RenderEngine::captureTemplateSnapshot() const {
+    std::lock_guard<std::mutex> lock(m_templateMutex);
+    return m_templateChain.createSnapshot();
+}
+
 bool RenderEngine::validatePreflight(const QString& sourceFolder, qint64 requiredBytes, QString& outError) {
     QFileInfo dirInfo(sourceFolder);
     if (!dirInfo.exists() || !dirInfo.isDir()) {
@@ -100,6 +116,7 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
     task.trackFiles.append(fi.fileName());
     task.totalTracks = 1;
     task.settings = settings;
+    task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
 
     {
@@ -154,6 +171,7 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
     task.trackFiles = sortedList;
     task.totalTracks = static_cast<int>(sortedList.size());
     task.settings = settings;
+    task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
 
     {
@@ -173,8 +191,14 @@ void RenderEngine::resetTaskInfo() {
 }
 
 void RenderEngine::workerLoop() {
+    // P0-02: SQLite Connection is created, owned, and closed strictly within this worker thread
+    const QString workerConnName = QString("Desk32RenderWorkerConn_%1")
+                                       .arg(reinterpret_cast<quintptr>(QThread::currentThreadId()));
+    RenderSequenceManager workerSeqMgr(workerConnName);
+
     while (!m_stopWorker.load(std::memory_order_acquire)) {
         RenderTaskInfo task;
+        QString activeDbPath;
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
             m_queueCv.wait(lock, [this]() {
@@ -188,6 +212,11 @@ void RenderEngine::workerLoop() {
             task = m_taskQueue.front();
             m_taskQueue.pop();
             m_currentTask = task;
+            activeDbPath = m_dbPath;
+        }
+
+        if (!workerSeqMgr.isInitialized()) {
+            workerSeqMgr.initialize(activeDbPath);
         }
 
         bool wasCancelRequested = m_cancelRequested.exchange(false, std::memory_order_acq_rel);
@@ -199,7 +228,7 @@ void RenderEngine::workerLoop() {
             task.status = RenderStatus::Cancelled;
             task.errorMessage = "Render cancelled by user";
         } else {
-            bool success = processTask(task);
+            bool success = processTask(task, workerSeqMgr);
             (void)success;
         }
 
@@ -215,16 +244,54 @@ void RenderEngine::workerLoop() {
         emit renderTaskFinished(task.taskId, static_cast<int>(task.status),
                                 task.finalOutputDir, task.errorMessage);
     }
+
+    workerSeqMgr.close();
 }
 
-bool RenderEngine::processTask(RenderTaskInfo& task) {
+bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqMgr) {
     const QString parentOpId = QString("RENDER_%1").arg(task.taskId);
 
-    // 1. Pre-flight Check
+    // 1. Pre-flight Check: Accurate PCM disk space estimation (P0-12)
     qint64 estimatedBytes = 0;
+    qint64 bytesPerSample = (task.settings.bitDepth == RenderBitDepth::Int16) ? 2 :
+                            ((task.settings.bitDepth == RenderBitDepth::Float32) ? 4 : 3);
+
     for (const auto& f : task.trackFiles) {
-        QFileInfo fi(task.sourceFolder + "/" + f);
-        estimatedBytes += std::max<qint64>(fi.size() * 2, 10 * 1024 * 1024);
+        QString inputPath = task.sourceFolder + "/" + f;
+        double durationSec = 0.0;
+        double srcRate = 48000.0;
+
+        decoder::FFmpegAudioDecoder probeDecoder;
+        if (probeDecoder.open(inputPath.toStdString())) {
+            const auto& fmt = probeDecoder.formatInfo();
+            if (fmt.sampleRate > 0 && fmt.totalFrames > 0) {
+                durationSec = static_cast<double>(fmt.totalFrames) / fmt.sampleRate;
+            }
+            srcRate = fmt.sampleRate > 0 ? fmt.sampleRate : 48000.0;
+            probeDecoder.close();
+        } else {
+            // Fallback estimation if probe fails
+            QFileInfo fi(inputPath);
+            durationSec = std::max<double>(180.0, static_cast<double>(fi.size()) / (44100.0 * 2.0 * 2.0));
+        }
+
+        double outRate = (task.settings.rateMode == RenderSampleRateMode::Custom && task.settings.targetSampleRate > 0.0)
+                             ? task.settings.targetSampleRate : srcRate;
+        qint64 pcmBytes = static_cast<qint64>(std::ceil(durationSec * outRate * 2.0 * static_cast<double>(bytesPerSample)));
+
+        // P0-12: Detect WAV 4 GiB size overflow upfront and reject before starting render
+        if (pcmBytes + 44 > MAX_CLASSIC_WAV_BYTES) {
+            task.status = RenderStatus::Failed;
+            task.errorMessage = QString("Estimated WAV file size (%1 MB) exceeds classic 4 GiB RIFF limit for track %2.")
+                                   .arg((pcmBytes + 44) / (1024 * 1024))
+                                   .arg(f);
+            core::log::LogService::instance().log(
+                "Render", "Preflight", "Failed", task.errorMessage, "AudioFile", inputPath
+            );
+            return false;
+        }
+
+        estimatedBytes += (pcmBytes + 44 + 1024 * 1024); // header + 1MB safety margin per file
     }
 
     QString preflightError;
@@ -243,8 +310,17 @@ bool RenderEngine::processTask(RenderTaskInfo& task) {
         return false;
     }
 
-    // 2. Allocate non-reusable serial letter (Decision D-2)
-    task.serial = RenderSequenceManager::instance().allocateNextSerial(task.sourceFolder);
+    // 2. Allocate non-reusable serial letter via worker-owned manager (P0-01, P0-02)
+    task.serial = seqMgr.allocateNextSerial(task.sourceFolder);
+    if (task.serial.isEmpty()) {
+        task.status = RenderStatus::Failed;
+        task.errorMessage = "Failed to allocate render sequence number (database initialization or transaction error).";
+        core::log::LogService::instance().log(
+            "Render", "AllocateSerial", "Failed", task.errorMessage, "Database", task.sourceFolder
+        );
+        return false;
+    }
+
     QDateTime now = QDateTime::currentDateTime();
     QString folderSuffix = RenderSequenceManager::formatFolderName(task.serial, now);
 
@@ -297,7 +373,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task) {
                                    i + 1, task.totalTracks, trackFile);
 
         bool ok = renderSingleFile(inputFilePath, outputFilePath, task.settings,
-                                   m_cancelRequested, trackFraction, trackError);
+                                   task.dspSnapshot, m_cancelRequested, trackFraction, trackError);
 
         if (!ok) {
             allTracksOk = false;
@@ -320,32 +396,50 @@ bool RenderEngine::processTask(RenderTaskInfo& task) {
                                    i + 1, task.totalTracks, trackFile);
     }
 
-    // 4. Transaction Resolution: Rollback vs Commit
+    // 4. Transaction Resolution: Rollback vs Commit (P0-12)
+    QFileInfo stagingFi(task.stagingDir);
+    bool isValidStaging = task.stagingDir.startsWith(task.sourceFolder) &&
+                          stagingFi.fileName().startsWith(".desk32_staging_");
+
     if (!allTracksOk || task.status == RenderStatus::Cancelled || task.status == RenderStatus::Failed) {
-        // Rollback: delete all staged files and staging directory completely
-        bool removed = QDir(task.stagingDir).removeRecursively();
-        if (!removed) {
-            core::log::LogService::instance().log(
-                "Render", "Rollback", "Warning",
-                "Rollback incomplete: unable to delete temporary staging directory: " + task.stagingDir,
-                "FileSystem", task.stagingDir
-            );
-        } else {
-            core::log::LogService::instance().log(
-                "Render", "Rollback", "Success",
-                "Rollback completed: deleted staging directory without modifying existing files.",
-                "FileSystem", task.stagingDir
-            );
+        // Rollback: delete all staged files and staging directory strictly within job scope
+        if (isValidStaging && stagingFi.exists()) {
+            bool removed = QDir(task.stagingDir).removeRecursively();
+            if (!removed) {
+                QString rollbackErr = QString("Rollback failed: unable to delete temporary staging directory: %1")
+                                          .arg(task.stagingDir);
+                task.errorMessage = task.errorMessage.isEmpty() ? rollbackErr : (task.errorMessage + " | " + rollbackErr);
+                core::log::LogService::instance().log(
+                    "Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir
+                );
+            } else {
+                core::log::LogService::instance().log(
+                    "Render", "Rollback", "Success",
+                    "Rollback completed: deleted staging directory without modifying existing files.",
+                    "FileSystem", task.stagingDir
+                );
+            }
         }
         return false;
     }
 
     // Commit: Rename staging directory to final output directory
-    bool committed = QDir().rename(task.stagingDir, task.finalOutputDir);
+    bool committed = false;
+    if (isValidStaging && stagingFi.exists()) {
+        committed = QDir().rename(task.stagingDir, task.finalOutputDir);
+    }
+
     if (!committed) {
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to commit staging directory to final output directory: " + task.finalOutputDir;
-        QDir(task.stagingDir).removeRecursively();
+        if (isValidStaging && stagingFi.exists()) {
+            bool removed = QDir(task.stagingDir).removeRecursively();
+            if (!removed) {
+                QString rollbackErr = QString("Rollback failed after commit failure: unable to delete %1").arg(task.stagingDir);
+                task.errorMessage += " | " + rollbackErr;
+                core::log::LogService::instance().log("Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir);
+            }
+        }
         core::log::LogService::instance().log(
             "Render", "Commit", "Failed", task.errorMessage, "FileSystem", task.finalOutputDir
         );
@@ -371,6 +465,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task) {
 bool RenderEngine::renderSingleFile(const QString& inputFilePath,
                                     const QString& outputFilePath,
                                     const RenderSettings& settings,
+                                    const RenderDspSnapshot& dspSnapshot,
                                     std::atomic<bool>& cancelFlag,
                                     double& outProgressFraction,
                                     QString& outError)
@@ -397,19 +492,12 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
         }
     }
 
-    // RenderChain setup (cloned from live console template)
+    // RenderChain setup: configured strictly from job's immutable snapshot (P0-03)
     RenderChain chain;
-    chain.configure(targetRate);
     if (settings.enableMasterDsp) {
-        chain.copyParametersFrom(
-            m_templateChain.peq(),
-            m_templateChain.geq(),
-            m_templateChain.filter(),
-            m_templateChain.compressor(),
-            m_templateChain.reverb(),
-            m_templateChain.limiter()
-        );
+        chain.applySnapshot(dspSnapshot, targetRate);
     } else {
+        chain.configure(targetRate);
         chain.setEnabled(false);
     }
 
@@ -447,7 +535,7 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
     while (!cancelFlag.load(std::memory_order_relaxed)) {
         size_t framesRead = decoder.readFrames(inL.data(), inR.data(), BLOCK_FRAMES);
         if (framesRead == 0) {
-            break; // EOF
+            break; // EOF reached
         }
 
         if (needsResample) {
@@ -457,24 +545,45 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
                 interIn[i * 2 + 1] = inR[i];
             }
 
-            size_t inDone = 0;
-            size_t outDone = 0;
+            // P0-11: Guarantee full input consumption by processing in a loop until all inDone consumed
+            size_t framesConsumedTotal = 0;
             size_t maxOut = interOut.size() / 2;
-            resampler->process(interIn.data(), framesRead, inDone, interOut.data(), maxOut, outDone);
 
-            // De-interleave
-            for (size_t i = 0; i < outDone; ++i) {
-                resampL[i] = interOut[i * 2];
-                resampR[i] = interOut[i * 2 + 1];
-            }
+            while (framesConsumedTotal < framesRead && !cancelFlag.load(std::memory_order_relaxed)) {
+                size_t inDone = 0;
+                size_t outDone = 0;
+                const double* inPtr = interIn.data() + framesConsumedTotal * 2;
+                size_t inRemaining = framesRead - framesConsumedTotal;
 
-            // Process through Render Chain
-            chain.process(resampL.data(), resampR.data(), outDone);
+                bool okResample = resampler->process(inPtr, inRemaining, inDone, interOut.data(), maxOut, outDone);
+                if (!okResample) {
+                    outError = "SoXR resampling failed during processing";
+                    writer.close();
+                    return false;
+                }
+                framesConsumedTotal += inDone;
 
-            // Write to WAV
-            if (!writer.writeBlock(resampL.data(), resampR.data(), outDone, settings.applyDither)) {
-                outError = "Disk write failure during rendered WAV output";
-                return false;
+                if (outDone > 0) {
+                    // De-interleave
+                    for (size_t i = 0; i < outDone; ++i) {
+                        resampL[i] = interOut[i * 2];
+                        resampR[i] = interOut[i * 2 + 1];
+                    }
+
+                    // Process through Render Chain
+                    chain.process(resampL.data(), resampR.data(), outDone);
+
+                    // Write to WAV
+                    if (!writer.writeBlock(resampL.data(), resampR.data(), outDone, settings.applyDither)) {
+                        outError = "Disk write failure during rendered WAV output";
+                        writer.close();
+                        return false;
+                    }
+                }
+
+                if (inDone == 0 && outDone == 0) {
+                    break;
+                }
             }
         } else {
             // Direct planar processing
@@ -483,6 +592,7 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
             // Write to WAV
             if (!writer.writeBlock(inL.data(), inR.data(), framesRead, settings.applyDither)) {
                 outError = "Disk write failure during rendered WAV output";
+                writer.close();
                 return false;
             }
         }
@@ -496,6 +606,24 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
     if (cancelFlag.load(std::memory_order_relaxed)) {
         writer.close();
         return false;
+    }
+
+    // P0-11: SoXR EOF Flush - Flush remaining delayed filter samples until empty
+    if (needsResample && !cancelFlag.load(std::memory_order_relaxed)) {
+        size_t outDone = 0;
+        size_t maxOut = interOut.size() / 2;
+        while (resampler->flush(interOut.data(), maxOut, outDone) && outDone > 0) {
+            for (size_t i = 0; i < outDone; ++i) {
+                resampL[i] = interOut[i * 2];
+                resampR[i] = interOut[i * 2 + 1];
+            }
+            chain.process(resampL.data(), resampR.data(), outDone);
+            if (!writer.writeBlock(resampL.data(), resampR.data(), outDone, settings.applyDither)) {
+                outError = "Disk write failure during SoXR EOF flush";
+                writer.close();
+                return false;
+            }
+        }
     }
 
     writer.close();

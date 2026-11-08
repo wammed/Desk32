@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <vector>
+#include <array>
 #include "engine/dsp/ParametricEQ.hpp"
 #include "engine/dsp/GraphicEQ.hpp"
 #include "engine/dsp/HighLowPassFilter.hpp"
@@ -11,6 +12,53 @@
 #include "engine/pipeline/AudioNode.hpp"
 
 namespace desk32::engine::render {
+
+/// Immutable snapshot of DSP parameters captured at Render Job enqueue time (P0-03).
+/// Guarantees that running and enqueued render jobs are completely isolated from
+/// subsequent GUI tweaks, live console edits, and subsequent render job registrations.
+struct RenderDspSnapshot {
+    bool enabled = true;
+
+    // PEQ
+    bool peqEnabled = true;
+    std::array<ParametricEQ::BandConfig, 12> peqLeftBands{};
+    std::array<ParametricEQ::BandConfig, 12> peqRightBands{};
+
+    // GEQ
+    bool geqEnabled = true;
+    std::array<double, 32> geqGains{};
+
+    // Filter
+    bool hpfEnabled = false;
+    double hpfFrequency = 20.0;
+    HighLowPassFilter::FilterSlope hpfSlope = HighLowPassFilter::FilterSlope::Slope12dB;
+    bool lpfEnabled = false;
+    double lpfFrequency = 20000.0;
+    HighLowPassFilter::FilterSlope lpfSlope = HighLowPassFilter::FilterSlope::Slope12dB;
+
+    // Compressor
+    bool compEnabled = false;
+    double compThresholdDb = -12.0;
+    double compRatio = 4.0;
+    double compAttackMs = 10.0;
+    double compReleaseMs = 100.0;
+    double compMakeupGainDb = 0.0;
+    double compKneeDb = 4.0;
+
+    // Reverb
+    bool reverbEnabled = false;
+    double reverbRoomSize = 0.7;
+    double reverbDamp = 0.3;
+    double reverbWetLevel = 0.2;
+    double reverbPredelayMs = 0.0;
+    bool reverbTailPreserving = true;
+
+    // Limiter
+    bool limiterEnabled = true;
+    double limiterCeilingDb = -0.1;
+    double limiterReleaseMs = 50.0;
+    double limiterLookaheadMs = 1.0;
+};
 
 /// Offline DSP Render Chain for File Output (Specification Section 5.11.3 & 20.1).
 /// Operates exclusively on the background Render Worker Thread (NEVER on Audio Thread).
@@ -51,11 +99,17 @@ public:
 
     // Direct access to cloned DSP processors
     [[nodiscard]] ParametricEQ& peq() noexcept { return m_peq; }
+    [[nodiscard]] const ParametricEQ& peq() const noexcept { return m_peq; }
     [[nodiscard]] GraphicEQ& geq() noexcept { return m_geq; }
+    [[nodiscard]] const GraphicEQ& geq() const noexcept { return m_geq; }
     [[nodiscard]] HighLowPassFilter& filter() noexcept { return m_filter; }
+    [[nodiscard]] const HighLowPassFilter& filter() const noexcept { return m_filter; }
     [[nodiscard]] Compressor& compressor() noexcept { return m_comp; }
+    [[nodiscard]] const Compressor& compressor() const noexcept { return m_comp; }
     [[nodiscard]] PeakLimiter& limiter() noexcept { return m_limiter; }
+    [[nodiscard]] const PeakLimiter& limiter() const noexcept { return m_limiter; }
     [[nodiscard]] AlgorithmicReverb& reverb() noexcept { return m_reverb; }
+    [[nodiscard]] const AlgorithmicReverb& reverb() const noexcept { return m_reverb; }
 
     /// Synchronize parameters from live console Master Chain
     void copyParametersFrom(const ParametricEQ& peq,
@@ -97,6 +151,97 @@ public:
         // 6. Peak Limiter
         m_limiter.configure(m_sampleRate, lim.ceilingDb(), lim.releaseMs(), lim.lookaheadMs());
         m_limiter.setEnabled(lim.isEnabled());
+    }
+
+    /// Capture an immutable parameter snapshot (P0-03)
+    [[nodiscard]] RenderDspSnapshot createSnapshot() const {
+        RenderDspSnapshot s;
+        s.enabled = m_enabled;
+
+        // 1. PEQ
+        s.peqEnabled = m_peq.isEnabled();
+        for (size_t b = 0; b < 12; ++b) {
+            s.peqLeftBands[b] = m_peq.leftBand(b);
+            s.peqRightBands[b] = m_peq.rightBand(b);
+        }
+
+        // 2. GEQ
+        s.geqEnabled = m_geq.isEnabled();
+        for (size_t b = 0; b < 32; ++b) {
+            s.geqGains[b] = m_geq.bandGain(b);
+        }
+
+        // 3. Filter
+        s.hpfEnabled = m_filter.isHpfEnabled();
+        s.hpfFrequency = m_filter.hpfFrequency();
+        s.hpfSlope = m_filter.hpfSlope();
+        s.lpfEnabled = m_filter.isLpfEnabled();
+        s.lpfFrequency = m_filter.lpfFrequency();
+        s.lpfSlope = m_filter.lpfSlope();
+
+        // 4. Compressor
+        s.compEnabled = m_comp.isEnabled();
+        s.compThresholdDb = m_comp.thresholdDb();
+        s.compRatio = m_comp.ratio();
+        s.compAttackMs = m_comp.attackMs();
+        s.compReleaseMs = m_comp.releaseMs();
+        s.compMakeupGainDb = m_comp.makeupGainDb();
+        s.compKneeDb = m_comp.kneeDb();
+
+        // 5. Reverb
+        s.reverbEnabled = m_reverb.isEnabled();
+        s.reverbRoomSize = m_reverb.roomSize();
+        s.reverbDamp = m_reverb.damping();
+        s.reverbWetLevel = m_reverb.wetLevel();
+        s.reverbPredelayMs = m_reverb.predelayMs();
+        s.reverbTailPreserving = m_reverb.isTailPreserving();
+
+        // 6. Peak Limiter
+        s.limiterEnabled = m_limiter.isEnabled();
+        s.limiterCeilingDb = m_limiter.ceilingDb();
+        s.limiterReleaseMs = m_limiter.releaseMs();
+        s.limiterLookaheadMs = m_limiter.lookaheadMs();
+
+        return s;
+    }
+
+    /// Apply an immutable parameter snapshot configured for target sample rate (P0-03)
+    void applySnapshot(const RenderDspSnapshot& s, double sampleRate) {
+        configure(sampleRate);
+        m_enabled = s.enabled;
+
+        // 1. PEQ
+        m_peq.setEnabled(s.peqEnabled);
+        for (size_t b = 0; b < 12; ++b) {
+            m_peq.setLeftBand(b, s.peqLeftBands[b]);
+            m_peq.setRightBand(b, s.peqRightBands[b]);
+        }
+
+        // 2. GEQ
+        m_geq.setEnabled(s.geqEnabled);
+        for (size_t b = 0; b < 32; ++b) {
+            m_geq.setBandGain(b, s.geqGains[b]);
+        }
+
+        // 3. Filter
+        m_filter.setHpfFrequency(s.hpfFrequency);
+        m_filter.setHpfSlope(s.hpfSlope);
+        m_filter.setHpfEnabled(s.hpfEnabled);
+        m_filter.setLpfFrequency(s.lpfFrequency);
+        m_filter.setLpfSlope(s.lpfSlope);
+        m_filter.setLpfEnabled(s.lpfEnabled);
+
+        // 4. Compressor
+        m_comp.configure(sampleRate, s.compThresholdDb, s.compRatio, s.compAttackMs, s.compReleaseMs, s.compMakeupGainDb, s.compKneeDb);
+        m_comp.setEnabled(s.compEnabled);
+
+        // 5. Reverb
+        m_reverb.configure(sampleRate, s.reverbRoomSize, s.reverbDamp, s.reverbWetLevel, s.reverbPredelayMs, s.reverbTailPreserving);
+        m_reverb.setEnabled(s.reverbEnabled);
+
+        // 6. Peak Limiter
+        m_limiter.configure(sampleRate, s.limiterCeilingDb, s.limiterReleaseMs, s.limiterLookaheadMs);
+        m_limiter.setEnabled(s.limiterEnabled);
     }
 
     /// Process planar double stereo block through offline Render Chain

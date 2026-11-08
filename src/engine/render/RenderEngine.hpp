@@ -58,6 +58,7 @@ struct RenderTaskInfo {
     QString sourceFolder;
     QStringList trackFiles;
     RenderSettings settings;
+    RenderDspSnapshot dspSnapshot;
     RenderStatus status = RenderStatus::Queued;
     double progress = 0.0;
     int currentTrackIndex = 0;
@@ -83,6 +84,8 @@ class RenderEngine : public QObject {
     Q_OBJECT
 
 public:
+    static constexpr qint64 MAX_CLASSIC_WAV_BYTES = 4294967200LL;
+
     static RenderEngine& instance();
 
     explicit RenderEngine(QObject* parent = nullptr);
@@ -90,6 +93,10 @@ public:
 
     RenderEngine(const RenderEngine&) = delete;
     RenderEngine& operator=(const RenderEngine&) = delete;
+
+    /// Set SQLite database path for sequence management
+    void setDatabasePath(const QString& dbPath);
+    [[nodiscard]] QString databasePath() const;
 
     /// Stop background worker thread safely
     void stop();
@@ -100,6 +107,12 @@ public:
     /// Template render chain configured from live console
     [[nodiscard]] RenderChain& templateChain() noexcept { return m_templateChain; }
     [[nodiscard]] const RenderChain& templateChain() const noexcept { return m_templateChain; }
+    [[nodiscard]] std::unique_lock<std::mutex> lockTemplateChain() const {
+        return std::unique_lock<std::mutex>(m_templateMutex);
+    }
+
+    /// Capture an immutable DSP snapshot from live template chain (P0-03)
+    [[nodiscard]] RenderDspSnapshot captureTemplateSnapshot() const;
 
     /// Queue a single track render task
     QString enqueueTrackRender(const QString& trackPath, const RenderSettings& settings = RenderSettings());
@@ -124,15 +137,18 @@ signals:
 
 private:
     void workerLoop();
-    bool processTask(RenderTaskInfo& task);
+    bool processTask(RenderTaskInfo& task, RenderSequenceManager& seqMgr);
     bool renderSingleFile(const QString& inputFilePath,
                           const QString& outputFilePath,
                           const RenderSettings& settings,
+                          const RenderDspSnapshot& dspSnapshot,
                           std::atomic<bool>& cancelFlag,
                           double& outProgressFraction,
                           QString& outError);
 
+    mutable std::mutex m_templateMutex;
     RenderChain m_templateChain;
+    QString m_dbPath;
 
     mutable std::mutex m_queueMutex;
     std::condition_variable m_queueCv;

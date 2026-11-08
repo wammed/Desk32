@@ -121,11 +121,12 @@ public:
             return {sourceId, targetId, SwitchingMode::Normal, 0.0, false};
         }
 
-        // Backend sample rate reconfiguration
-        setGraphRate(tgt->trackInfo().sampleRate);
+        // Backend sample rate reconfiguration & resampler bypass for Direct Mode (P0-09)
+        const double targetRate = tgt->trackInfo().sampleRate;
+        if (targetRate > 0.0) {
+            setGraphRate(targetRate);
+        }
 
-        // Reconfigure active deck for direct mode (bypass resampler)
-        tgt->loadTrack(tgt->trackInfo(), tgt->trackInfo().sampleRate);
         tgt->play();
         m_previousDeckId.store(sourceId, std::memory_order_relaxed);
         m_activeDeckId.store(targetId, std::memory_order_relaxed);

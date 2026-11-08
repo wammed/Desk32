@@ -16,18 +16,8 @@ DecoderWorker::~DecoderWorker() {
 }
 
 bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRate) {
-    auto dec = std::make_unique<FFmpegAudioDecoder>();
-    if (!dec->open(filePath)) {
-        return false;
-    }
-
-    const auto& info = dec->formatInfo();
-    WorkerTrackInfo tInfo;
-    tInfo.path = filePath;
-    tInfo.sampleRate = info.sampleRate;
-    tInfo.channels = info.channels;
-    tInfo.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, info.totalFrames));
-
+    auto promise = std::make_shared<std::promise<bool>>();
+    auto future = promise->get_future();
     uint64_t seq = 0;
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
@@ -37,26 +27,15 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
         cmd.path = filePath;
         cmd.graphRate = graphSampleRate;
         cmd.sequence = seq;
+        cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
-
-        m_trackInfo = tInfo;
-        m_isSynthetic.store(false, std::memory_order_release);
-        m_graphRate.store(graphSampleRate, std::memory_order_release);
-        m_playhead.store(0, std::memory_order_release);
-        m_isOpen.store(true, std::memory_order_release);
-        m_isPlaying.store(false, std::memory_order_release);
-        m_isEof.store(false, std::memory_order_release);
-        m_eofDelivered.store(false, std::memory_order_release);
     }
     m_cmdCv.notify_one();
 
-    // Give worker brief moment to prime the buffer
-    auto start = std::chrono::steady_clock::now();
-    while (m_seekCompleted.load(std::memory_order_acquire) < seq && !m_isEof.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() > 20.0) break;
+    if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
+        return future.get();
     }
-    return true;
+    return false;
 }
 
 bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, double graphSampleRate, const std::string& path) {
@@ -66,6 +45,23 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     tInfo.channels = 2;
     tInfo.totalFrames = totalFrames;
 
+    metadata::TrackMetadata meta;
+    meta.title = "Synthetic Reference Signal";
+    meta.artist = "Desk32 DSP Test Engine";
+    meta.sampleRate = sampleRate;
+    meta.channels = 2;
+    meta.totalFrames = totalFrames;
+    meta.durationSeconds = (sampleRate > 0) ? (static_cast<double>(totalFrames) / sampleRate) : 0.0;
+
+    {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        m_trackInfo = tInfo;
+        m_metadata = std::make_shared<metadata::TrackMetadata>(std::move(meta));
+        m_resampler.configure(sampleRate, graphSampleRate, 2);
+    }
+
+    auto promise = std::make_shared<std::promise<bool>>();
+    auto future = promise->get_future();
     uint64_t seq = 0;
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
@@ -75,26 +71,16 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
         cmd.path = path;
         cmd.graphRate = graphSampleRate;
         cmd.sequence = seq;
+        cmd.isSynthetic = true;
+        cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
-
-        m_trackInfo = tInfo;
-        m_isSynthetic.store(true, std::memory_order_release);
-        m_graphRate.store(graphSampleRate, std::memory_order_release);
-        m_playhead.store(0, std::memory_order_release);
-        m_isOpen.store(true, std::memory_order_release);
-        m_isPlaying.store(false, std::memory_order_release);
-        m_isEof.store(false, std::memory_order_release);
-        m_eofDelivered.store(false, std::memory_order_release);
     }
     m_cmdCv.notify_one();
 
-    // Prime ring buffer with initial frames
-    auto start = std::chrono::steady_clock::now();
-    while (m_seekCompleted.load(std::memory_order_acquire) < seq && !m_isEof.load(std::memory_order_acquire)) {
-        std::this_thread::yield();
-        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() > 20.0) break;
+    if (future.wait_for(std::chrono::milliseconds(2000)) == std::future_status::ready) {
+        return future.get();
     }
-    return true;
+    return false;
 }
 
 void DecoderWorker::play() noexcept {
@@ -136,7 +122,7 @@ void DecoderWorker::seek(int64_t targetFrame) noexcept {
     {
         std::lock_guard<std::mutex> lock(m_cmdMutex);
         m_playhead.store(targetFrame, std::memory_order_release);
-        m_ringBuffer.clear();
+        // Note: Do NOT touch m_ringBuffer directly from Control Thread (P0-04)
         seq = ++m_seekSequence;
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::Seek;
@@ -249,29 +235,69 @@ void DecoderWorker::workerLoop() {
 void DecoderWorker::processCommand(const WorkerCommand& cmd) {
     switch (cmd.type) {
     case WorkerCommandType::Open: {
-        m_ringBuffer.clear();
+        m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
         m_syntheticPos = 0;
         m_isEof.store(false, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
 
-        if (cmd.path != "synthetic://sine" && cmd.path.find("synthetic") == std::string::npos) {
+        bool openSuccess = false;
+        if (!cmd.isSynthetic && cmd.path != "synthetic://sine" && cmd.path.find("synthetic") == std::string::npos) {
             auto dec = std::make_unique<FFmpegAudioDecoder>();
             if (dec->open(cmd.path)) {
                 const auto& info = dec->formatInfo();
+                WorkerTrackInfo tInfo;
+                tInfo.path = cmd.path;
+                tInfo.sampleRate = info.sampleRate;
+                tInfo.channels = info.channels;
+                tInfo.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, info.totalFrames));
+
                 m_resampler.configure(info.sampleRate, cmd.graphRate, info.channels);
+                {
+                    std::lock_guard<std::mutex> lock(m_trackMutex);
+                    m_trackInfo = tInfo;
+                    m_metadata = std::make_shared<metadata::TrackMetadata>(dec->metadata());
+                }
                 m_decoder = std::move(dec);
+                m_isSynthetic.store(false, std::memory_order_release);
+                m_graphRate.store(cmd.graphRate, std::memory_order_release);
+                m_playhead.store(0, std::memory_order_release);
+                m_isOpen.store(true, std::memory_order_release);
+                m_isPlaying.store(false, std::memory_order_release);
+
+                for (int i = 0; i < 4; ++i) {
+                    doDecodeChunk();
+                }
+                openSuccess = true;
+            } else {
+                // Open failed: Do NOT mark as open or corrupt track state
+                m_isOpen.store(false, std::memory_order_release);
+                openSuccess = false;
             }
+        } else {
+            // Synthetic track
+            m_decoder.reset();
+            m_isSynthetic.store(true, std::memory_order_release);
+            m_graphRate.store(cmd.graphRate, std::memory_order_release);
+            m_playhead.store(0, std::memory_order_release);
+            m_isOpen.store(true, std::memory_order_release);
+            m_isPlaying.store(false, std::memory_order_release);
+
+            for (int i = 0; i < 4; ++i) {
+                doDecodeChunk();
+            }
+            openSuccess = true;
         }
-        for (int i = 0; i < 4; ++i) {
-            doDecodeChunk();
+
+        if (cmd.openPromise) {
+            cmd.openPromise->set_value(openSuccess);
         }
         m_seekCompleted.store(cmd.sequence, std::memory_order_release);
         break;
     }
     case WorkerCommandType::Seek: {
-        m_ringBuffer.clear();
+        m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
         m_isEof.store(false, std::memory_order_release);
@@ -292,7 +318,7 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
     case WorkerCommandType::Pause:
         break;
     case WorkerCommandType::Stop:
-        m_ringBuffer.clear();
+        m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
         m_isEof.store(false, std::memory_order_release);
@@ -304,8 +330,14 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         }
         break;
     case WorkerCommandType::ConfigureRate:
-        if (m_decoder) {
-            m_resampler.configure(m_trackInfo.sampleRate, cmd.graphRate, m_trackInfo.channels);
+        {
+            std::lock_guard<std::mutex> lock(m_trackMutex);
+            if (m_trackInfo.sampleRate > 0.0 && cmd.graphRate > 0.0) {
+                m_resampler.configure(m_trackInfo.sampleRate, cmd.graphRate, m_trackInfo.channels);
+                m_ringBuffer.resetProducer();
+                m_pendingOutOffset = 0;
+                m_pendingOutCount = 0;
+            }
         }
         break;
     default:

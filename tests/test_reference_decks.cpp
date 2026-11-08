@@ -94,6 +94,8 @@ private slots:
     void testSwitchingDualModesAndQuickAB();
     void testDeckLockProtectionAndTransportPermission();
     void testFolderSessionIndexZeroAndReadAhead();
+    void testDirectModeSwitchPreservesRealFileTrack();
+    void testFolderSessionNeedsAdvanceAndLockDiscard();
     void testZeroDynamicAllocationInRenderBlock();
     void cleanupTestCase();
 
@@ -295,6 +297,56 @@ void TestReferenceDecks::testFolderSessionIndexZeroAndReadAhead()
     QVERIFY(!deck.advanceFolderNext());
     QVERIFY(!deck.folderSession().isActive());
     QCOMPARE(deck.state(), TransportState::Stopped);
+}
+
+void TestReferenceDecks::testDirectModeSwitchPreservesRealFileTrack()
+{
+    DeckManager manager(48000.0);
+    // P0-09: Load real audio file track (44.1 kHz)
+    QVERIFY(manager.deck('A')->loadTrack(m_wav2.toStdString(), 48000.0));
+    QCOMPARE(manager.deck('A')->trackInfo().path, m_wav2.toStdString());
+    QCOMPARE(manager.deck('A')->trackInfo().sampleRate, 44100.0);
+
+    // Perform Direct Mode switch
+    SwitchResult res = manager.directModeSwitch('A');
+    QVERIFY(res.success);
+    QCOMPARE(manager.graphRate(), 44100.0);
+    // Must strictly retain genuine file path, NOT replaced with synthetic track
+    QCOMPARE(manager.deck('A')->trackInfo().path, m_wav2.toStdString());
+}
+
+void TestReferenceDecks::testFolderSessionNeedsAdvanceAndLockDiscard()
+{
+    ReferenceDeck deck('C');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav"
+    };
+
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    QVERIFY(deck.folderSession().isActive());
+    deck.play();
+
+    // Render audio past end of track_01_intro.wav (4800 frames) to trigger EOF
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+
+    // P0-10: EOF delivered should raise needsFolderAdvance flag
+    QVERIFY(deck.needsFolderAdvance());
+    deck.clearNeedsFolderAdvance();
+    QVERIFY(!deck.needsFolderAdvance());
+
+    // Advance to next track
+    QVERIFY(deck.advanceFolderNext());
+    QCOMPARE(deck.folderSession().currentIndex(), 1u);
+    QCOMPARE(deck.trackInfo().path, m_wav2.toStdString());
+
+    // P0-10: Engaging lock must immediately terminate and discard folder session
+    deck.setLocked(true);
+    QVERIFY(deck.isLocked());
+    QVERIFY(!deck.folderSession().isActive());
 }
 
 void TestReferenceDecks::testZeroDynamicAllocationInRenderBlock()

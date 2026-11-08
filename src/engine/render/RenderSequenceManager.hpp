@@ -24,8 +24,11 @@ public:
     /// Open/initialize persistent database for sequence management
     bool initialize(const QString& dbPath = QString());
 
+    /// Check if database connection is successfully initialized
+    [[nodiscard]] bool isInitialized() const;
+
     /// Allocate next strictly non-reusable uppercase serial letter for the given source folder.
-    /// Thread-safe and persistent in SQLite.
+    /// Thread-safe and persistent in SQLite. Returns empty QString on failure (never a fallback dummy).
     QString allocateNextSerial(const QString& sourceFolder);
 
     /// Format standard output folder name: {Serial}{YYYYMMDD_HHMMSS_zzz} in local time (Decision D-3)
@@ -34,11 +37,16 @@ public:
     /// Mathematical Bijective Base-26 converter (0 -> "A", 25 -> "Z", 26 -> "AA", 27 -> "AB"...)
     static std::string indexToSerial(uint64_t index);
 
-    /// Close database
+    /// Close database and clean up connection safely
     void close();
 
 private:
+    bool initializeLocked(const QString& dbPath);
+    QString allocateNextSerialLocked(const QString& sourceFolder);
+    void closeLocked();
+
     QString m_connectionName;
+    QString m_dbPath;
     QSqlDatabase m_db;
     mutable std::mutex m_mutex;
     bool m_initialized = false;

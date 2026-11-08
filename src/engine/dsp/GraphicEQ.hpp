@@ -18,6 +18,24 @@ public:
         configure(48000.0);
     }
 
+    GraphicEQ(const GraphicEQ& other)
+    {
+        *this = other;
+    }
+
+    GraphicEQ& operator=(const GraphicEQ& other)
+    {
+        if (this != &other) {
+            m_sampleRate = other.m_sampleRate;
+            m_enabled.store(other.m_enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_frequencies = other.m_frequencies;
+            m_gainsDb = other.m_gainsDb;
+            m_leftFilters = other.m_leftFilters;
+            m_rightFilters = other.m_rightFilters;
+        }
+        return *this;
+    }
+
     void initFrequencies()
     {
         // 32 Standard ISO Frequencies (from 16 Hz to 20 kHz)

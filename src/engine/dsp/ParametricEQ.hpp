@@ -27,6 +27,24 @@ public:
         configure(48000.0);
     }
 
+    ParametricEQ(const ParametricEQ& other)
+    {
+        *this = other;
+    }
+
+    ParametricEQ& operator=(const ParametricEQ& other)
+    {
+        if (this != &other) {
+            m_sampleRate = other.m_sampleRate;
+            m_enabled.store(other.m_enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_leftBands = other.m_leftBands;
+            m_rightBands = other.m_rightBands;
+            m_leftFilters = other.m_leftFilters;
+            m_rightFilters = other.m_rightFilters;
+        }
+        return *this;
+    }
+
     void initDefaults()
     {
         // Standard ISO frequencies distributed across audio band

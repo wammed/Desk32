@@ -79,20 +79,20 @@ bool EngineController::initialize() {
     m_listeningCorrectionNode->dsp().configure(48000.0);
     m_listeningCorrectionNode->dsp().applyPreset("Monitor Flat");
 
-    // 3. Construct Master and Listening Chains
+    // 3. Construct Master and Listening Chains with cloned DSP nodes (P0-08: Audio Thread isolated ownership)
     // Section 5.1: Mastering DSP belongs in Master Chain (upstream of Render Tap)
     auto masterChain = std::make_unique<engine::pipeline::AudioChain>("Master Chain", engine::pipeline::ChainPurpose::MasteringChain);
-    masterChain->appendNode(m_peqNode);
-    masterChain->appendNode(m_geqNode);
-    masterChain->appendNode(m_filterNode);
-    masterChain->appendNode(m_compNode);
-    masterChain->appendNode(m_insertNode);
-    masterChain->appendNode(m_reverbNode);
-    masterChain->appendNode(m_limiterNode);
+    masterChain->appendNode(m_peqNode->clone());
+    masterChain->appendNode(m_geqNode->clone());
+    masterChain->appendNode(m_filterNode->clone());
+    masterChain->appendNode(m_compNode->clone());
+    masterChain->appendNode(m_insertNode->clone());
+    masterChain->appendNode(m_reverbNode->clone());
+    masterChain->appendNode(m_limiterNode->clone());
 
     // Listening Correction Chain strictly contains Listening Correction ONLY
     auto listeningChain = std::make_unique<engine::pipeline::AudioChain>("Listening Chain", engine::pipeline::ChainPurpose::ListeningCorrectionChain);
-    listeningChain->appendNode(m_listeningCorrectionNode);
+    listeningChain->appendNode(m_listeningCorrectionNode->clone());
 
     // 4. Initialize Audio Pipeline with Logical Render Tap
     m_pipeline = std::make_shared<engine::pipeline::AudioPipeline>(48000.0);
@@ -179,13 +179,42 @@ bool EngineController::initialize() {
         return false;
     }
 
-    // Periodic check for seamless track auto-advancement in Folder Sessions
+    // Periodic check for seamless track auto-advancement in Folder Sessions (P0-10)
     auto* trackTimer = new QTimer(this);
     connect(trackTimer, &QTimer::timeout, this, [this]() {
         if (!m_deckManager) return;
         for (char c : {'A', 'B', 'C', 'D'}) {
             auto* d = m_deckManager->deck(c);
-            if (d && d->checkAndResetTrackChanged()) {
+            if (!d) continue;
+
+            if (d->needsFolderAdvance()) {
+                d->clearNeedsFolderAdvance();
+                if (!d->isLocked()) {
+                    bool advanced = d->advanceFolderNext();
+                    if (advanced) {
+                        log::LogService::instance().log(
+                            "FolderSession",
+                            "AutoAdvance",
+                            "Success",
+                            QString("Auto-advanced to next track in Deck %1").arg(c),
+                            "Deck",
+                            QString(c)
+                        );
+                    } else {
+                        log::LogService::instance().log(
+                            "FolderSession",
+                            "AutoAdvance",
+                            "Finished",
+                            QString("Folder session completed in Deck %1").arg(c),
+                            "Deck",
+                            QString(c)
+                        );
+                    }
+                    emit deckStateChanged(QString(c));
+                }
+            }
+
+            if (d->checkAndResetTrackChanged()) {
                 emit deckStateChanged(QString(c));
             }
         }
@@ -281,18 +310,18 @@ QString EngineController::backendStatusText() const {
 }
 
 double EngineController::compressorGainReductionDb() const {
-    if (!m_compNode || m_compNode->isBypassed() || m_globalDspBypass.load(std::memory_order_relaxed)) return 0.0;
-    return m_compNode->dsp().gainReductionDb();
+    if (m_globalDspBypass.load(std::memory_order_relaxed)) return 0.0;
+    return m_pipeline ? m_pipeline->compressorGainReductionDb() : 0.0;
 }
 
 double EngineController::limiterGainReductionDb() const {
-    if (!m_limiterNode || m_limiterNode->isBypassed() || m_globalDspBypass.load(std::memory_order_relaxed)) return 0.0;
-    return m_limiterNode->dsp().gainReductionDb();
+    if (m_globalDspBypass.load(std::memory_order_relaxed)) return 0.0;
+    return m_pipeline ? m_pipeline->limiterGainReductionDb() : 0.0;
 }
 
 int EngineController::limiterLatencyFrames() const {
-    if (!m_limiterNode || m_limiterNode->isBypassed() || m_globalDspBypass.load(std::memory_order_relaxed)) return 0;
-    return static_cast<int>(m_limiterNode->latencyFrames());
+    if (m_globalDspBypass.load(std::memory_order_relaxed)) return 0;
+    return m_pipeline ? m_pipeline->limiterLatencyFrames() : 0;
 }
 
 QString EngineController::listeningPresetName() const {
@@ -427,6 +456,19 @@ void EngineController::setOutputRoutingMode(int path) {
 
 void EngineController::setGlobalDspBypass(bool bypass) {
     if (m_globalDspBypass.exchange(bypass) != bypass) {
+        if (m_pipeline) {
+            engine::dsp::DspCommand cmdMaster;
+            cmdMaster.type = engine::dsp::DspCommandType::SetGlobalBypass;
+            cmdMaster.subIndex = 0; // Master
+            cmdMaster.boolFlag1 = bypass ? 1 : 0;
+            m_pipeline->paramQueue().push(cmdMaster);
+
+            engine::dsp::DspCommand cmdListen;
+            cmdListen.type = engine::dsp::DspCommandType::SetGlobalBypass;
+            cmdListen.subIndex = 1; // Listening
+            cmdListen.boolFlag1 = bypass ? 1 : 0;
+            m_pipeline->paramQueue().push(cmdListen);
+        }
         if (m_peqNode) m_peqNode->setBypassed(bypass);
         if (m_geqNode) m_geqNode->setBypassed(bypass);
         if (m_filterNode) m_filterNode->setBypassed(bypass);
@@ -922,6 +964,7 @@ void EngineController::setCompressorParams(double thresholdDb, double ratio, dou
         cmd.param3 = static_cast<float>(attackMs);
         cmd.param4 = static_cast<float>(releaseMs);
         cmd.param5 = static_cast<float>(kneeDb);
+        cmd.param6 = static_cast<float>(makeupDb);
         m_pipeline->paramQueue().push(cmd);
     }
     if (m_compNode) {
@@ -1143,7 +1186,7 @@ QVariantMap EngineController::getDeckState(const QString& deckId) {
     map["channels"] = d->trackInfo().channels;
     map["totalFrames"] = QVariant::fromValue(d->trackInfo().totalFrames);
 
-    const auto* meta = d->metadata();
+    auto meta = d->metadata();
     if (meta) {
         map["title"] = QString::fromStdString(meta->title);
         map["artist"] = QString::fromStdString(meta->artist);
@@ -1262,18 +1305,26 @@ void EngineController::calibrateInsertLatency() {
     uint32_t repLat = m_insertNode->bridge().reportedLatencyFrames();
     uint64_t delta = (repLat > 0) ? static_cast<uint64_t>(repLat) : 128ULL;
     uint64_t returnFrame = sendFrame + delta;
-    m_insertNode->bridge().recordImpulseReturn(returnFrame);
+    m_insertNode->bridge().recordImpulseReturn(returnFrame, engine::insert::LatencySource::SimulatedMock);
+    log::LogService::instance().log(
+        "ExternalInsert",
+        "CalibrateLatency",
+        "Simulated",
+        "Calibrated latency using simulated mock loopback (NOT physical hardware measurement)",
+        "InsertBridge",
+        QString::fromStdString(m_insertNode->bridge().config().clientName)
+    );
     emit externalInsertStatusChanged();
 }
 
 void EngineController::recordInsertImpulseReturn(qint64 returnFrame) {
     if (!m_insertNode) return;
-    m_insertNode->bridge().recordImpulseReturn(static_cast<uint64_t>(returnFrame));
+    m_insertNode->bridge().recordImpulseReturn(static_cast<uint64_t>(returnFrame), engine::insert::LatencySource::HardwareMeasured);
     log::LogService::instance().log(
         "ExternalInsert",
         "RecordImpulseReturn",
         "Success",
-        QString("Measured round-trip latency: %1 frames (%2 ms).")
+        QString("Measured physical hardware round-trip latency: %1 frames (%2 ms).")
             .arg(m_insertNode->bridge().measuredLatencyFrames())
             .arg(m_insertNode->bridge().measuredLatencyMs(), 0, 'f', 2),
         "InsertBridge",
@@ -1302,6 +1353,7 @@ QVariantMap EngineController::getExternalInsertStatus() const {
     map["measuredLatencyFrames"] = static_cast<int>(b.measuredLatencyFrames());
     map["measuredLatencyMs"] = b.measuredLatencyMs();
     map["delayCompensationFrames"] = static_cast<int>(m_insertNode->delayBuffer().delayFrames());
+    map["latencySource"] = QString::fromUtf8(engine::insert::ExternalInsertBridge::latencySourceToString(b.latencySource()));
     map["xrunCount"] = static_cast<int>(b.xrunCount());
     map["lastError"] = QString::fromStdString(b.lastError());
 

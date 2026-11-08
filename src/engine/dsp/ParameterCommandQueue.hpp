@@ -19,7 +19,8 @@ enum class DspCommandType : uint8_t {
     SetCompressorParams,
     SetLimiterParams,
     SetReverbParams,
-    SetNodeBypass
+    SetNodeBypass,
+    SetGlobalBypass
 };
 
 struct DspCommand {
@@ -33,8 +34,9 @@ struct DspCommand {
     float param1 = 0.0f;     // Freq / Threshold / Ceiling / RoomSize / GainDb
     float param2 = 0.0f;     // GainDb / Ratio / ReleaseMs / Damping
     float param3 = 0.0f;     // Q / AttackMs / LookaheadMs / WetLevel
-    float param4 = 0.0f;     // ReleaseMs / MakeupGainDb / PredelayMs
+    float param4 = 0.0f;     // ReleaseMs / PredelayMs
     float param5 = 0.0f;     // KneeDb
+    float param6 = 0.0f;     // MakeupGainDb (P0-06)
 };
 
 /// Lock-free Single-Producer Single-Consumer Parameter Command Queue.

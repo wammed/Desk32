@@ -124,6 +124,26 @@ public:
         return (err == nullptr);
     }
 
+    /// Flush remaining delayed samples in SoXR at EOF (P0-11).
+    /// Pass outInterleaved buffer with outMaxFrames capacity.
+    /// Call repeatedly until outDone == 0.
+    bool flush(double* outInterleaved, size_t outMaxFrames, size_t& outDone) {
+        if (isBypass()) {
+            outDone = 0;
+            return true;
+        }
+
+        if (!m_soxr) {
+            outDone = 0;
+            return false;
+        }
+
+        soxr_error_t err = soxr_process(m_soxr,
+                                        nullptr, 0, nullptr,
+                                        outInterleaved, outMaxFrames, &outDone);
+        return (err == nullptr);
+    }
+
 private:
     void destroy() noexcept {
         if (m_soxr) {

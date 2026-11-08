@@ -18,9 +18,10 @@ namespace desk32::engine::insert {
 class ExternalInsertNode : public pipeline::AudioNode {
 public:
     explicit ExternalInsertNode(std::string name = "External Insert",
-                                pipeline::NodeAffiliation affiliation = pipeline::NodeAffiliation::RenderCommon)
+                                pipeline::NodeAffiliation affiliation = pipeline::NodeAffiliation::RenderCommon,
+                                std::shared_ptr<ExternalInsertBridge> bridge = nullptr)
         : pipeline::AudioNode(std::move(name), affiliation)
-        , m_bridge(std::make_unique<ExternalInsertBridge>())
+        , m_bridge(bridge ? std::move(bridge) : std::make_shared<ExternalInsertBridge>())
         , m_delayBuffer(std::make_unique<DelayCompensationBuffer>())
     {
         // Default to bypassed until configured and activated
@@ -47,6 +48,7 @@ public:
 
     [[nodiscard]] ExternalInsertBridge& bridge() noexcept { return *m_bridge; }
     [[nodiscard]] const ExternalInsertBridge& bridge() const noexcept { return *m_bridge; }
+    [[nodiscard]] std::shared_ptr<ExternalInsertBridge> bridgeShared() const noexcept { return m_bridge; }
 
     [[nodiscard]] DelayCompensationBuffer& delayBuffer() noexcept { return *m_delayBuffer; }
     [[nodiscard]] const DelayCompensationBuffer& delayBuffer() const noexcept { return *m_delayBuffer; }
@@ -58,6 +60,14 @@ public:
 
     [[nodiscard]] bool isBypassed() const noexcept override {
         return pipeline::AudioNode::isBypassed() || m_bridge->isBypassed();
+    }
+
+    [[nodiscard]] std::shared_ptr<pipeline::AudioNode> clone() const override {
+        auto node = std::make_shared<ExternalInsertNode>(m_name, m_affiliation, m_bridge);
+        node->setBypassed(isBypassed());
+        node->configure(m_sampleRate);
+        node->delayBuffer().setDelayFrames(m_delayBuffer->delayFrames());
+        return node;
     }
 
     /// Real-time audio processing callback.
@@ -81,7 +91,7 @@ public:
     }
 
 private:
-    std::unique_ptr<ExternalInsertBridge> m_bridge;
+    std::shared_ptr<ExternalInsertBridge> m_bridge;
     std::unique_ptr<DelayCompensationBuffer> m_delayBuffer;
 };
 

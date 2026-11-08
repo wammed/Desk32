@@ -19,6 +19,33 @@ public:
         configure(48000.0);
     }
 
+    HighLowPassFilter(const HighLowPassFilter& other)
+    {
+        *this = other;
+    }
+
+    HighLowPassFilter& operator=(const HighLowPassFilter& other)
+    {
+        if (this != &other) {
+            m_sampleRate = other.m_sampleRate;
+            m_hpfFreq = other.m_hpfFreq;
+            m_lpfFreq = other.m_lpfFreq;
+            m_hpfSlope = other.m_hpfSlope;
+            m_lpfSlope = other.m_lpfSlope;
+            m_hpfEnabled.store(other.m_hpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_lpfEnabled.store(other.m_lpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_hpfLeft1 = other.m_hpfLeft1;
+            m_hpfRight1 = other.m_hpfRight1;
+            m_hpfLeft2 = other.m_hpfLeft2;
+            m_hpfRight2 = other.m_hpfRight2;
+            m_lpfLeft1 = other.m_lpfLeft1;
+            m_lpfRight1 = other.m_lpfRight1;
+            m_lpfLeft2 = other.m_lpfLeft2;
+            m_lpfRight2 = other.m_lpfRight2;
+        }
+        return *this;
+    }
+
     void configure(double sampleRate, double hpfFreq = 20.0, double lpfFreq = 20000.0,
                    FilterSlope hpfSlope = FilterSlope::Slope12dB, FilterSlope lpfSlope = FilterSlope::Slope12dB)
     {

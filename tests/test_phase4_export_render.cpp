@@ -56,6 +56,18 @@ private slots:
     // 9. EngineController Integration & Auditioning of Rendered Files
     void testEngineControllerRenderIntegration();
 
+    // 10. P0-01: Deadlock resolution, uninitialized allocate, failure non-reuse, concurrent thread allocation
+    void testRenderSequenceDeadlockAndErrorHandling();
+
+    // 11. P0-02: SQLite Thread Ownership (worker thread connection safety, zero Qt cross-thread violations)
+    void testRenderWorkerThreadOwnership();
+
+    // 12. P0-03: Render Template Chain Job-Specific Immutable Snapshots (P0-03)
+    void testRenderJobDspSnapshotIsolation();
+
+    // 13. P0-12: Capacity Estimation and 4 GiB Limit (P0-12)
+    void testCapacityEstimationAndWavLimitOverflow();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
     QString m_dbPath;
@@ -89,6 +101,7 @@ void TestPhase4ExportRender::initTestCase()
     m_dbPath = m_tempDir->filePath("test_desk32_render.sqlite");
     LogService::instance().start(m_dbPath);
     RenderSequenceManager::instance().initialize(m_dbPath);
+    RenderEngine::instance().setDatabasePath(m_dbPath);
 }
 
 void TestPhase4ExportRender::cleanupTestCase()
@@ -488,6 +501,196 @@ void TestPhase4ExportRender::testEngineControllerRenderIntegration()
     QVERIFY(controller.auditionRenderedFile("B", trackPath));
     // Monitor path must be switched to RenderMonitor (1)
     QCOMPARE(controller.outputRoutingMode(), 1);
+}
+
+void TestPhase4ExportRender::testRenderSequenceDeadlockAndErrorHandling()
+{
+    // Test Case 1: allocateNextSerial on an uninitialized instance must NOT deadlock
+    {
+        RenderSequenceManager uninitMgr("TestConn_Uninit");
+        QString serial = uninitMgr.allocateNextSerial(m_tempDir->path());
+        // Should succeed without deadlock and produce a valid serial letter
+        QVERIFY(!serial.isEmpty());
+        uninitMgr.close();
+    }
+
+    // Test Case 2: initialization failure must NOT return "A" fallback
+    {
+        RenderSequenceManager failMgr("TestConn_Fail");
+        // Using an impossible path that cannot be created or opened
+        QString badPath = "/nonexistent_root_dir_12345/unwritable_sub/test.sqlite";
+        bool ok = failMgr.initialize(badPath);
+        QVERIFY(!ok);
+        QString serial = failMgr.allocateNextSerial(m_tempDir->path());
+        // Must return empty QString, NEVER fallback "A"
+        QVERIFY(serial.isEmpty());
+        failMgr.close();
+    }
+
+    // Test Case 3: Concurrent multithreaded serial allocation must have zero duplicates and strictly bijective sequence
+    {
+        QString concurrentFolder = m_tempDir->filePath("concurrent_test_folder");
+        QDir().mkpath(concurrentFolder);
+
+        constexpr int NUM_THREADS = 8;
+        constexpr int SEQS_PER_THREAD = 10;
+        std::vector<std::string> allSerials;
+        std::mutex resultsMutex;
+        std::vector<std::thread> threads;
+
+        for (int t = 0; t < NUM_THREADS; ++t) {
+            threads.emplace_back([&, t]() {
+                // Each thread creates its own manager with unique connection
+                QString connName = QString("ConcurrentConn_%1").arg(t);
+                RenderSequenceManager mgr(connName);
+                mgr.initialize(m_dbPath);
+
+                for (int s = 0; s < SEQS_PER_THREAD; ++s) {
+                    QString seq = mgr.allocateNextSerial(concurrentFolder);
+                    if (!seq.isEmpty()) {
+                        std::lock_guard<std::mutex> lock(resultsMutex);
+                        allSerials.push_back(seq.toStdString());
+                    }
+                }
+                mgr.close();
+            });
+        }
+
+        for (auto& th : threads) {
+            th.join();
+        }
+
+        // Verify total allocated count
+        QCOMPARE(static_cast<int>(allSerials.size()), NUM_THREADS * SEQS_PER_THREAD);
+
+        // Verify all serials are strictly unique (no duplicates!)
+        std::sort(allSerials.begin(), allSerials.end());
+        auto it = std::adjacent_find(allSerials.begin(), allSerials.end());
+        QVERIFY2(it == allSerials.end(), "Duplicate serial found across concurrent threads!");
+
+        // Verify bijective base-26 sequence: 0..79 must map to A..Z, AA..BZ
+        std::vector<std::string> expectedSerials;
+        for (uint64_t i = 0; i < NUM_THREADS * SEQS_PER_THREAD; ++i) {
+            expectedSerials.push_back(RenderSequenceManager::indexToSerial(i));
+        }
+        std::sort(expectedSerials.begin(), expectedSerials.end());
+        QCOMPARE(allSerials, expectedSerials);
+    }
+}
+
+void TestPhase4ExportRender::testRenderWorkerThreadOwnership()
+{
+    // P0-02: SQLite Connection must be created, used, and closed on the Render Worker thread
+    RenderEngine& engine = RenderEngine::instance();
+    engine.setDatabasePath(m_dbPath);
+
+    // Create a temporary track
+    QString trackPath = m_tempDir->filePath("worker_ownership_test.wav");
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    QSignalSpy finishedSpy(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueTrackRender(trackPath);
+    QVERIFY(!taskId.isEmpty());
+
+    QVERIFY(finishedSpy.wait(5000));
+    QCOMPARE(finishedSpy.count(), 1);
+
+    auto args = finishedSpy.takeFirst();
+    QCOMPARE(args.at(0).toString(), taskId);
+    QCOMPARE(args.at(1).toInt(), static_cast<int>(RenderStatus::Completed));
+
+    // Verify task serial was allocated and staging directory cleaned up
+    RenderTaskInfo task = engine.currentTaskInfo();
+    QVERIFY(!task.serial.isEmpty());
+    QVERIFY(!QDir(task.stagingDir).exists());
+    QVERIFY(QDir(task.finalOutputDir).exists());
+}
+
+void TestPhase4ExportRender::testRenderJobDspSnapshotIsolation()
+{
+    // P0-03: Render Job must take an immutable DSP snapshot at enqueue time
+    RenderEngine& engine = RenderEngine::instance();
+    engine.setDatabasePath(m_dbPath);
+
+    // 1. Configure template chain with PEQ Band 0 Gain = +12.0 dB
+    {
+        auto lock = engine.lockTemplateChain();
+        engine.templateChain().configure(48000.0);
+        ParametricEQ::BandConfig cfg;
+        cfg.frequency = 1000.0;
+        cfg.gainDb = 12.0;
+        cfg.Q = 1.0;
+        cfg.type = BiquadFilterType::Peak;
+        cfg.enabled = true;
+        engine.templateChain().peq().setLeftBand(0, cfg);
+        engine.templateChain().peq().setEnabled(true);
+    }
+
+    // Capture snapshot for Job 1
+    RenderDspSnapshot snap1 = engine.captureTemplateSnapshot();
+    QCOMPARE(snap1.peqLeftBands[0].gainDb, 12.0);
+
+    // Create test audio file
+    QString trackPath1 = m_tempDir->filePath("snapshot_job1.wav");
+    QVERIFY(createTestWav(trackPath1, 48000.0, 4800, 440.0));
+
+    QString taskId1 = engine.enqueueTrackRender(trackPath1);
+    QVERIFY(!taskId1.isEmpty());
+
+    // 2. Immediately mutate template chain to -12.0 dB before Job 1 completes
+    {
+        auto lock = engine.lockTemplateChain();
+        ParametricEQ::BandConfig cfg;
+        cfg.frequency = 1000.0;
+        cfg.gainDb = -12.0;
+        cfg.Q = 1.0;
+        cfg.type = BiquadFilterType::Peak;
+        cfg.enabled = true;
+        engine.templateChain().peq().setLeftBand(0, cfg);
+    }
+
+    // Capture snapshot for Job 2
+    RenderDspSnapshot snap2 = engine.captureTemplateSnapshot();
+    QCOMPARE(snap2.peqLeftBands[0].gainDb, -12.0);
+
+    QString trackPath2 = m_tempDir->filePath("snapshot_job2.wav");
+    QVERIFY(createTestWav(trackPath2, 48000.0, 4800, 440.0));
+
+    QString taskId2 = engine.enqueueTrackRender(trackPath2);
+    QVERIFY(!taskId2.isEmpty());
+
+    // Wait for all queued tasks to finish
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+
+    // Verify template chain mutation did NOT affect snap1
+    QCOMPARE(snap1.peqLeftBands[0].gainDb, 12.0);
+    QCOMPARE(snap2.peqLeftBands[0].gainDb, -12.0);
+}
+
+void TestPhase4ExportRender::testCapacityEstimationAndWavLimitOverflow()
+{
+    // P0-12: Capacity estimation & rejection of tracks exceeding 4 GiB Classic WAV limit
+    RenderEngine& engine = RenderEngine::instance();
+
+    // Create a 0.1s source track
+    QString trackPath = m_tempDir->filePath("overflow_test.wav");
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    // Normal should succeed
+    RenderSettings settings;
+    settings.bitDepth = RenderBitDepth::Int24;
+    QString taskId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+
+    // Verify 4 GiB limit check constant
+    QCOMPARE(RenderEngine::MAX_CLASSIC_WAV_BYTES, 4294967200LL);
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

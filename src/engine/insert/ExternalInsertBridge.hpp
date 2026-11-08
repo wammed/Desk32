@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <mutex>
 #include <functional>
+#include <memory>
 
 namespace desk32::engine::insert {
 
@@ -25,6 +26,13 @@ enum class InsertState {
     Error
 };
 
+enum class LatencySource {
+    Uncalibrated,
+    ReportedStatic,
+    SimulatedMock,
+    HardwareMeasured
+};
+
 struct ExternalPortInfo {
     std::string clientName;
     std::string sendPortL;
@@ -38,6 +46,8 @@ struct ExternalPortInfo {
 
 class ExternalInsertBridge {
 public:
+    using MockProcessorFunc = std::function<void(double*, double*, size_t)>;
+
     ExternalInsertBridge() = default;
 
     [[nodiscard]] InsertState state() const noexcept { return m_state.load(std::memory_order_acquire); }
@@ -45,6 +55,7 @@ public:
     [[nodiscard]] uint32_t reportedLatencyFrames() const noexcept { return m_reportedLatencyFrames.load(std::memory_order_acquire); }
     [[nodiscard]] double measuredLatencyMs() const noexcept { return m_measuredLatencyMs.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t measuredLatencyFrames() const noexcept { return m_measuredLatencyFrames.load(std::memory_order_acquire); }
+    [[nodiscard]] LatencySource latencySource() const noexcept { return m_latencySource.load(std::memory_order_acquire); }
     [[nodiscard]] uint32_t xrunCount() const noexcept { return m_xrunCount.load(std::memory_order_relaxed); }
     [[nodiscard]] uint64_t impulseSendFrame() const noexcept { return m_impulseSendFrame.load(std::memory_order_relaxed); }
 
@@ -75,6 +86,16 @@ public:
         return "Unknown";
     }
 
+    static const char* latencySourceToString(LatencySource src) noexcept {
+        switch (src) {
+            case LatencySource::Uncalibrated: return "Uncalibrated";
+            case LatencySource::ReportedStatic: return "Host Reported (Static)";
+            case LatencySource::SimulatedMock: return "Simulated Mock";
+            case LatencySource::HardwareMeasured: return "Hardware Measured (Physical)";
+        }
+        return "Unknown";
+    }
+
     void setBypass(bool bypass) noexcept {
         m_isBypassed.store(bypass, std::memory_order_release);
     }
@@ -88,10 +109,13 @@ public:
         m_xrunCount.store(0, std::memory_order_relaxed);
     }
 
-    /// Set mock processing function for testing or simulated plugins
-    void setMockProcessor(std::function<void(double*, double*, size_t)> processor) {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        m_mockProcessor = std::move(processor);
+    /// Set mock processing function for testing or simulated plugins (lock-free RT-safe update, P0-4.1)
+    void setMockProcessor(MockProcessorFunc processor) {
+        std::shared_ptr<MockProcessorFunc> sp;
+        if (processor) {
+            sp = std::make_shared<MockProcessorFunc>(std::move(processor));
+        }
+        m_mockProcessor.store(sp, std::memory_order_release);
     }
 
     /// Configure external insert connection ports
@@ -166,7 +190,7 @@ public:
 
     /// Audio block processing through insert
     /// If bypassed or disconnected, performs dry pass-through with no clicks.
-    /// Audio Thread execution: strictly zero dynamic allocations or blocking locks.
+    /// Audio Thread execution: strictly zero dynamic allocations or blocking locks (P0-4.1).
     void process(double* inOutLeft, double* inOutRight, size_t frames) {
         if (m_isBypassed.load(std::memory_order_acquire) || m_state.load(std::memory_order_acquire) != InsertState::Connected) {
             // Passthrough (dry)
@@ -176,9 +200,10 @@ public:
         // Active state
         m_state.store(InsertState::Active, std::memory_order_release);
 
-        // If mock processor attached, execute it (for testing/simulation)
-        if (m_mockProcessor) {
-            m_mockProcessor(inOutLeft, inOutRight, frames);
+        // If mock processor attached, execute safely without mutex on Audio Thread (P0-4.1)
+        auto mock = m_mockProcessor.load(std::memory_order_acquire);
+        if (mock && *mock) {
+            (*mock)(inOutLeft, inOutRight, frames);
         }
 
         // In active send/return, check for impulse detection during latency measurement
@@ -204,12 +229,13 @@ public:
     }
 
     /// Record received impulse frame and calculate measured roundtrip latency
-    void recordImpulseReturn(uint64_t returnFrame) {
+    void recordImpulseReturn(uint64_t returnFrame, LatencySource source = LatencySource::SimulatedMock) {
         uint64_t sendFrame = m_impulseSendFrame.load(std::memory_order_acquire);
         if (returnFrame >= sendFrame) {
             int64_t latencyFrames = static_cast<int64_t>(returnFrame - sendFrame);
             m_measuredLatencyFrames.store(latencyFrames, std::memory_order_release);
             m_measuredLatencyMs.store((static_cast<double>(latencyFrames) / m_engineSampleRate) * 1000.0, std::memory_order_release);
+            m_latencySource.store(source, std::memory_order_release);
             m_measuringLatency.store(false, std::memory_order_release);
         }
     }
@@ -222,7 +248,7 @@ private:
     double m_engineSampleRate = 48000.0;
     size_t m_engineBufferSize = 256;
     std::string m_lastError;
-    std::function<void(double*, double*, size_t)> m_mockProcessor;
+    std::atomic<std::shared_ptr<MockProcessorFunc>> m_mockProcessor{nullptr};
 
     std::atomic<uint32_t> m_xrunCount{0};
     std::atomic<bool> m_measuringLatency{false};
@@ -231,6 +257,7 @@ private:
     std::atomic<int64_t> m_measuredLatencyFrames{-1};
     std::atomic<double> m_measuredLatencyMs{-1.0};
     std::atomic<uint32_t> m_reportedLatencyFrames{0};
+    std::atomic<LatencySource> m_latencySource{LatencySource::Uncalibrated};
 };
 
 } // namespace desk32::engine::insert

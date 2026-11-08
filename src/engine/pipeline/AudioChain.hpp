@@ -24,6 +24,18 @@ public:
     [[nodiscard]] const std::string& name() const noexcept { return m_name; }
     [[nodiscard]] ChainPurpose purpose() const noexcept { return m_purpose; }
 
+    /// Deep-clone chain and all contained DSP nodes (P0-08)
+    [[nodiscard]] std::unique_ptr<AudioChain> clone() const {
+        auto copy = std::make_unique<AudioChain>(m_name, m_purpose);
+        for (const auto& node : m_nodes) {
+            if (node) {
+                copy->appendNode(node->clone());
+            }
+        }
+        copy->setBypassed(isBypassed());
+        return copy;
+    }
+
     /// Append node to chain with structural verification (Section 9.2).
     /// Returns false and rejects the node if affiliation rules are violated:
     /// - NodeAffiliation::ListeningCorrection can ONLY be added to ChainPurpose::ListeningCorrectionChain.

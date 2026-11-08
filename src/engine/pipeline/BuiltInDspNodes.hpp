@@ -36,6 +36,13 @@ public:
     [[nodiscard]] ParametricEQ& dsp() noexcept { return m_eq; }
     [[nodiscard]] const ParametricEQ& dsp() const noexcept { return m_eq; }
 
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<ParametricEqNode>(m_name, m_affiliation);
+        node->setBypassed(isBypassed());
+        node->m_eq = m_eq;
+        return node;
+    }
+
 private:
     ParametricEQ m_eq;
 };
@@ -64,6 +71,13 @@ public:
 
     [[nodiscard]] GraphicEQ& dsp() noexcept { return m_geq; }
     [[nodiscard]] const GraphicEQ& dsp() const noexcept { return m_geq; }
+
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<GraphicEqNode>(m_name);
+        node->setBypassed(isBypassed());
+        node->m_geq = m_geq;
+        return node;
+    }
 
 private:
     GraphicEQ m_geq;
@@ -94,6 +108,13 @@ public:
     [[nodiscard]] HighLowPassFilter& dsp() noexcept { return m_filter; }
     [[nodiscard]] const HighLowPassFilter& dsp() const noexcept { return m_filter; }
 
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<HighLowPassNode>(m_name);
+        node->setBypassed(isBypassed());
+        node->m_filter = m_filter;
+        return node;
+    }
+
 private:
     HighLowPassFilter m_filter;
 };
@@ -122,6 +143,16 @@ public:
 
     [[nodiscard]] Compressor& dsp() noexcept { return m_comp; }
     [[nodiscard]] const Compressor& dsp() const noexcept { return m_comp; }
+
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<CompressorNode>(m_name);
+        node->setBypassed(isBypassed());
+        node->dsp().configure(m_comp.sampleRate(), m_comp.thresholdDb(), m_comp.ratio(),
+                              m_comp.attackMs(), m_comp.releaseMs(), m_comp.makeupGainDb(),
+                              m_comp.kneeDb());
+        node->dsp().setEnabled(m_comp.isEnabled());
+        return node;
+    }
 
 private:
     Compressor m_comp;
@@ -156,6 +187,14 @@ public:
     [[nodiscard]] PeakLimiter& dsp() noexcept { return m_limiter; }
     [[nodiscard]] const PeakLimiter& dsp() const noexcept { return m_limiter; }
 
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<PeakLimiterNode>(m_name);
+        node->setBypassed(isBypassed());
+        node->dsp().configure(m_limiter.sampleRate(), m_limiter.ceilingDb(), m_limiter.releaseMs(), m_limiter.lookaheadMs());
+        node->dsp().setEnabled(m_limiter.isEnabled());
+        return node;
+    }
+
 private:
     PeakLimiter m_limiter;
 };
@@ -184,6 +223,15 @@ public:
 
     [[nodiscard]] AlgorithmicReverb& dsp() noexcept { return m_reverb; }
     [[nodiscard]] const AlgorithmicReverb& dsp() const noexcept { return m_reverb; }
+
+    [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
+        auto node = std::make_shared<ReverbNode>(m_name);
+        node->setBypassed(isBypassed());
+        node->dsp().configure(m_reverb.sampleRate(), m_reverb.roomSize(), m_reverb.damping(),
+                              m_reverb.wetLevel(), m_reverb.predelayMs(), m_reverb.isTailPreserving());
+        node->dsp().setEnabled(m_reverb.isEnabled());
+        return node;
+    }
 
 private:
     AlgorithmicReverb m_reverb;

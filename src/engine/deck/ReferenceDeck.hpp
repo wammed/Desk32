@@ -53,7 +53,7 @@ public:
         return t;
     }
 
-    [[nodiscard]] const metadata::TrackMetadata* metadata() const noexcept {
+    [[nodiscard]] std::shared_ptr<const metadata::TrackMetadata> metadata() const {
         return m_worker.metadata();
     }
 
@@ -64,7 +64,12 @@ public:
     [[nodiscard]] const session::FolderSession& folderSession() const noexcept { return m_folderSession; }
     [[nodiscard]] session::FolderSession& folderSession() noexcept { return m_folderSession; }
 
-    void setLocked(bool locked) noexcept { m_isLocked.store(locked, std::memory_order_release); }
+    void setLocked(bool locked) noexcept {
+        m_isLocked.store(locked, std::memory_order_release);
+        if (locked) {
+            m_folderSession.stopSession(); // P0-10: Deck lock terminates and discards folder session
+        }
+    }
     void setOffsetFrames(int64_t offset) noexcept { m_offsetFrames.store(offset, std::memory_order_release); }
 
     /// Reconfigure graph sample rate across worker and resamplers
@@ -146,6 +151,8 @@ public:
                     }
                     return true;
                 }
+                // P0-10: Open track failed. Stop folder session safely without skipping corrupted track.
+                m_folderSession.stopSession();
             }
         }
 

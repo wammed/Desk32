@@ -13,6 +13,7 @@ private slots:
     void testNodeAffiliationStructuralVerification();
     void testAudioPipelineFormatConversionAndClamping();
     void testOutputPathRoutingAndZeroLeakage();
+    void testAudioGraphRebuildClonesNodesWithoutSharing();
     void testEpochReclamationHotSwap();
     void testEpochReclaimerConcurrentStress();
     void cleanupTestCase();
@@ -142,6 +143,42 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
         }
     }
     QVERIFY(altered);
+}
+
+void TestAudioPipeline::testAudioGraphRebuildClonesNodesWithoutSharing()
+{
+    // P0-08: Verify AudioChain::clone() creates isolated deep copies of nodes
+    auto original = std::make_unique<AudioChain>("OriginalMaster", ChainPurpose::MasteringChain);
+    auto peqNode = std::make_shared<ParametricEqNode>("MasterPEQ");
+    auto geqNode = std::make_shared<GraphicEqNode>("MasterGEQ");
+
+    original->appendNode(peqNode);
+    original->appendNode(geqNode);
+
+    auto cloned = original->clone();
+
+    QCOMPARE(cloned->nodeCount(), 2u);
+    QVERIFY(cloned->node(0) != nullptr);
+    QVERIFY(cloned->node(1) != nullptr);
+
+    // Instances must be completely distinct pointers to avoid mutating nodes active in Audio Thread
+    QVERIFY(cloned->node(0) != peqNode.get());
+    QVERIFY(cloned->node(1) != geqNode.get());
+    QCOMPARE(cloned->node(0)->name(), peqNode->name());
+    QCOMPARE(cloned->node(1)->name(), geqNode->name());
+
+    // AudioPipeline graph rate reconfiguration test
+    AudioPipeline pipeline(48000.0);
+    pipeline.swapMasterChain(std::move(original));
+    pipeline.setGraphSampleRate(96000.0);
+    QCOMPARE(pipeline.graphSampleRate(), 96000.0);
+
+    // Verify audio rendering works seamlessly through cloned graph
+    std::vector<double> inL(128, 0.5);
+    std::vector<double> inR(128, 0.5);
+    std::vector<float> out(256, 0.0f);
+    pipeline.process(inL.data(), inR.data(), 128, out.data(), SampleFormat::Float32, false);
+    QVERIFY(out[0] != 0.0f);
 }
 
 void TestAudioPipeline::testEpochReclamationHotSwap()

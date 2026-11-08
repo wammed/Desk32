@@ -8,6 +8,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <future>
 #include <cstdint>
 #include <cmath>
 #include "engine/buffer/PcmRingBuffer.hpp"
@@ -40,6 +41,8 @@ struct WorkerCommand {
     double graphRate = 48000.0;
     int64_t targetFrame = 0;
     uint64_t sequence = 0;
+    bool isSynthetic = false;
+    std::shared_ptr<std::promise<bool>> openPromise;
 };
 
 /// Dedicated Background Decoder Worker for ReferenceDeck.
@@ -64,7 +67,7 @@ public:
     void seek(int64_t targetFrame) noexcept;
     void configureGraphRate(double graphSampleRate) noexcept;
 
-    // Status Queries (Thread-Safe)
+    // Status Queries (Thread-Safe, P0-05)
     [[nodiscard]] bool isOpen() const noexcept { return m_isOpen.load(std::memory_order_acquire); }
     [[nodiscard]] bool isPlaying() const noexcept { return m_isPlaying.load(std::memory_order_acquire); }
     [[nodiscard]] bool isEof() const noexcept { return m_isEof.load(std::memory_order_acquire); }
@@ -72,9 +75,17 @@ public:
     void clearEofDelivered() noexcept { m_eofDelivered.store(false, std::memory_order_release); }
     [[nodiscard]] int64_t playhead() const noexcept { return m_playhead.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t underrunCount() const noexcept { return m_underrunCount.load(std::memory_order_relaxed); }
-    [[nodiscard]] const WorkerTrackInfo& trackInfo() const noexcept { return m_trackInfo; }
-    [[nodiscard]] const metadata::TrackMetadata* metadata() const noexcept {
-        return m_decoder ? &m_decoder->metadata() : nullptr;
+
+    /// Thread-safe copy of track info (P0-05)
+    [[nodiscard]] WorkerTrackInfo trackInfo() const {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        return m_trackInfo;
+    }
+
+    /// Thread-safe shared snapshot of track metadata with guaranteed lifetime (P0-05)
+    [[nodiscard]] std::shared_ptr<const metadata::TrackMetadata> metadata() const {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        return m_metadata;
     }
 
     /// Audio Thread API: Read planar audio block from lock-free PCM ring buffer.
@@ -98,7 +109,9 @@ private:
     std::atomic<uint64_t> m_seekSequence{0};
     std::atomic<uint64_t> m_seekCompleted{0};
 
+    mutable std::mutex m_trackMutex;
     WorkerTrackInfo m_trackInfo;
+    std::shared_ptr<const metadata::TrackMetadata> m_metadata;
 
     // Lock-free Ring Buffer between Worker Thread (Producer) and Audio Thread (Consumer)
     buffer::PcmRingBuffer m_ringBuffer{buffer::PcmRingBuffer::DEFAULT_CAPACITY_FRAMES};

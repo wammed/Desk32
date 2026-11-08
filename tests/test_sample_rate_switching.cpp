@@ -14,6 +14,7 @@ class TestSampleRateSwitching : public QObject
 
 private slots:
     void testResamplerQualityAndBypass();
+    void testSoxrInputConsumptionAndEofFlush();
     void testItem15AndK2DeckSwitchingMuteTime();
     void testItem15DirectModeRenegotiation();
 };
@@ -47,6 +48,60 @@ void TestSampleRateSwitching::testResamplerQualityAndBypass()
     QVERIFY(upInDone > 0);
     QVERIFY(upOutDone > 0);
     QVERIFY(upResampler.latencyInInputSamples() > 0.0);
+}
+
+void TestSampleRateSwitching::testSoxrInputConsumptionAndEofFlush()
+{
+    // P0-11: Verify SoXR complete input consumption and EOF flush across rates
+    const struct {
+        double inRate;
+        double outRate;
+    } testRates[] = {
+        {44100.0, 48000.0},
+        {48000.0, 96000.0},
+        {192000.0, 44100.0}
+    };
+
+    for (const auto& pair : testRates) {
+        Resampler r;
+        QVERIFY(r.configure(pair.inRate, pair.outRate, 2, ResamplerQuality::VeryHigh));
+        QVERIFY(!r.isBypass());
+
+        const size_t inFramesTotal = 4410;
+        std::vector<double> inBuf(inFramesTotal * 2, 0.5);
+        std::vector<double> outBuf(inFramesTotal * 4 * 2, 0.0);
+
+        // Feed input in chunks ensuring complete input consumption (P0-11 loop)
+        size_t inOffset = 0;
+        size_t outTotal = 0;
+        const size_t chunkSize = 512;
+
+        while (inOffset < inFramesTotal) {
+            size_t toFeed = std::min(chunkSize, inFramesTotal - inOffset);
+            size_t inDone = 0, outDone = 0;
+            QVERIFY(r.process(inBuf.data() + inOffset * 2, toFeed, inDone,
+                              outBuf.data() + outTotal * 2, 2048, outDone));
+            inOffset += inDone;
+            outTotal += outDone;
+        }
+
+        // All input frames must be completely consumed
+        QCOMPARE(inOffset, inFramesTotal);
+
+        // EOF Flush (P0-11)
+        size_t flushOut = 0;
+        size_t flushedTotal = 0;
+        while (r.flush(outBuf.data() + (outTotal + flushedTotal) * 2, 2048, flushOut) && flushOut > 0) {
+            flushedTotal += flushOut;
+        }
+
+        // Verify that EOF flush yielded the tail latency samples that would otherwise be lost
+        QVERIFY(flushedTotal > 0);
+        size_t finalOutFrames = outTotal + flushedTotal;
+        double expectedOut = static_cast<double>(inFramesTotal) * (pair.outRate / pair.inRate);
+        // Final frame count should match expected within latency/filter tolerance (< 10 frames)
+        QVERIFY(std::abs(static_cast<double>(finalOutFrames) - expectedOut) < 10.0);
+    }
 }
 
 void TestSampleRateSwitching::testItem15AndK2DeckSwitchingMuteTime()

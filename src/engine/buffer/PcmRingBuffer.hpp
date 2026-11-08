@@ -41,17 +41,21 @@ public:
 
     /// Number of available frames to read (can be called by consumer or producer)
     [[nodiscard]] size_t availableRead() const noexcept {
-        size_t writeIdx = m_writeIndex.load(std::memory_order_acquire);
-        size_t readIdx = m_readIndex.load(std::memory_order_relaxed);
-        return (writeIdx >= readIdx) ? (writeIdx - readIdx) : 0;
+        uint64_t writeIdx = m_writeIndex.load(std::memory_order_acquire);
+        uint64_t readIdx = m_readIndex.load(std::memory_order_relaxed);
+        uint64_t discardTarget = m_discardTarget.load(std::memory_order_acquire);
+        uint64_t effectiveRead = std::max(readIdx, discardTarget);
+        return (writeIdx >= effectiveRead) ? static_cast<size_t>(writeIdx - effectiveRead) : 0;
     }
 
     /// Number of frames that can be written before buffer is full
     [[nodiscard]] size_t availableWrite() const noexcept {
-        size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
-        size_t readIdx = m_readIndex.load(std::memory_order_acquire);
-        size_t used = writeIdx - readIdx;
-        return (used < m_capacity) ? (m_capacity - used) : 0;
+        uint64_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
+        uint64_t readIdx = m_readIndex.load(std::memory_order_acquire);
+        uint64_t discardTarget = m_discardTarget.load(std::memory_order_relaxed);
+        uint64_t effectiveRead = std::max(readIdx, discardTarget);
+        uint64_t used = (writeIdx >= effectiveRead) ? (writeIdx - effectiveRead) : 0;
+        return (used < m_capacity) ? static_cast<size_t>(m_capacity - used) : 0;
     }
 
     /// PRODUCER ONLY: Write interleaved stereo frames into ring buffer.
@@ -59,15 +63,17 @@ public:
     size_t write(const StereoFrame* data, size_t frames) noexcept {
         if (!data || frames == 0) return 0;
 
-        size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
-        size_t readIdx = m_readIndex.load(std::memory_order_acquire);
-        size_t used = writeIdx - readIdx;
-        size_t available = (used < m_capacity) ? (m_capacity - used) : 0;
+        uint64_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
+        uint64_t readIdx = m_readIndex.load(std::memory_order_acquire);
+        uint64_t discardTarget = m_discardTarget.load(std::memory_order_relaxed);
+        uint64_t effectiveRead = std::max(readIdx, discardTarget);
+        uint64_t used = (writeIdx >= effectiveRead) ? (writeIdx - effectiveRead) : 0;
+        size_t available = (used < m_capacity) ? static_cast<size_t>(m_capacity - used) : 0;
         size_t toWrite = std::min(frames, available);
 
         if (toWrite == 0) return 0;
 
-        size_t part1Start = writeIdx & m_mask;
+        size_t part1Start = static_cast<size_t>(writeIdx & m_mask);
         size_t part1Len = std::min(toWrite, m_capacity - part1Start);
         std::copy_n(data, part1Len, m_buffer.data() + part1Start);
 
@@ -84,16 +90,18 @@ public:
     size_t writePlanar(const double* left, const double* right, size_t frames) noexcept {
         if (!left || !right || frames == 0) return 0;
 
-        size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
-        size_t readIdx = m_readIndex.load(std::memory_order_acquire);
-        size_t used = writeIdx - readIdx;
-        size_t available = (used < m_capacity) ? (m_capacity - used) : 0;
+        uint64_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
+        uint64_t readIdx = m_readIndex.load(std::memory_order_acquire);
+        uint64_t discardTarget = m_discardTarget.load(std::memory_order_relaxed);
+        uint64_t effectiveRead = std::max(readIdx, discardTarget);
+        uint64_t used = (writeIdx >= effectiveRead) ? (writeIdx - effectiveRead) : 0;
+        size_t available = (used < m_capacity) ? static_cast<size_t>(m_capacity - used) : 0;
         size_t toWrite = std::min(frames, available);
 
         if (toWrite == 0) return 0;
 
         for (size_t i = 0; i < toWrite; ++i) {
-            size_t pos = (writeIdx + i) & m_mask;
+            size_t pos = static_cast<size_t>((writeIdx + i) & m_mask);
             m_buffer[pos].left = left[i];
             m_buffer[pos].right = right[i];
         }
@@ -104,19 +112,25 @@ public:
 
     /// CONSUMER (AUDIO THREAD) ONLY: Read planar left and right channels.
     /// Strictly RT-safe: zero heap allocations, zero locks, zero blocking.
-    /// Returns number of frames actually read.
+    /// Observes producer discard epochs and drops stale pre-seek/pre-track frames automatically (P0-04).
     size_t readPlanar(double* outLeft, double* outRight, size_t frames) noexcept {
         if (!outLeft || !outRight || frames == 0) return 0;
 
-        size_t readIdx = m_readIndex.load(std::memory_order_relaxed);
-        size_t writeIdx = m_writeIndex.load(std::memory_order_acquire);
-        size_t available = (writeIdx >= readIdx) ? (writeIdx - readIdx) : 0;
-        size_t toRead = std::min(frames, available);
+        uint64_t readIdx = m_readIndex.load(std::memory_order_relaxed);
+        uint64_t discardTarget = m_discardTarget.load(std::memory_order_acquire);
+        if (discardTarget > readIdx) {
+            readIdx = discardTarget;
+            m_readIndex.store(readIdx, std::memory_order_release);
+        }
+
+        uint64_t writeIdx = m_writeIndex.load(std::memory_order_acquire);
+        uint64_t available = (writeIdx >= readIdx) ? (writeIdx - readIdx) : 0;
+        size_t toRead = std::min(frames, static_cast<size_t>(available));
 
         if (toRead == 0) return 0;
 
         for (size_t i = 0; i < toRead; ++i) {
-            size_t pos = (readIdx + i) & m_mask;
+            size_t pos = static_cast<size_t>((readIdx + i) & m_mask);
             outLeft[i] = m_buffer[pos].left;
             outRight[i] = m_buffer[pos].right;
         }
@@ -125,10 +139,23 @@ public:
         return toRead;
     }
 
-    /// Clear buffer (reset both indices).
-    void clear() noexcept {
+    /// PRODUCER ONLY (DecoderWorker): Request discarding of all unread frames up to current write index.
+    /// Thread-safe: strictly does NOT mutate consumer read index or require Audio Thread locks (P0-04).
+    void resetProducer() noexcept {
+        uint64_t curWrite = m_writeIndex.load(std::memory_order_relaxed);
+        m_discardTarget.store(curWrite, std::memory_order_release);
+    }
+
+    /// Reset all indices (for complete stop / non-RT teardown when both threads are quiescent).
+    void fullReset() noexcept {
+        m_discardTarget.store(0, std::memory_order_relaxed);
         m_writeIndex.store(0, std::memory_order_relaxed);
         m_readIndex.store(0, std::memory_order_release);
+    }
+
+    /// Backward compatibility alias for non-RT teardown / tests
+    void clear() noexcept {
+        resetProducer();
     }
 
 private:
@@ -142,8 +169,9 @@ private:
     const size_t m_mask;
     std::vector<StereoFrame> m_buffer;
 
-    alignas(64) std::atomic<size_t> m_writeIndex{0};
-    alignas(64) std::atomic<size_t> m_readIndex{0};
+    alignas(64) std::atomic<uint64_t> m_writeIndex{0};
+    alignas(64) std::atomic<uint64_t> m_readIndex{0};
+    alignas(64) std::atomic<uint64_t> m_discardTarget{0};
 };
 
 } // namespace desk32::engine::buffer

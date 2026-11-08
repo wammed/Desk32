@@ -79,6 +79,7 @@ public:
     void configure(double sampleRate, double roomSize = 0.7, double damp = 0.3,
                    double wetLevel = 0.2, double predelayMs = 0.0, bool tailPreserving = true)
     {
+        bool rateChanged = std::abs(m_sampleRate - sampleRate) > 0.01;
         m_sampleRate = sampleRate;
         m_roomSize = std::clamp(roomSize, 0.1, 0.98);
         m_damp = std::clamp(damp, 0.0, 1.0);
@@ -90,30 +91,41 @@ public:
         m_predelaySamples = static_cast<size_t>(std::ceil(sampleRate * (m_predelayMs * 0.001)));
         m_predelaySamples = std::clamp(m_predelaySamples, size_t(1), MAX_PREDELAY_SIZE);
 
-        const double scale = sampleRate / 44100.0;
+        if (rateChanged) {
+            const double scale = sampleRate / 44100.0;
 
-        const size_t combLengths[4] = {
-            static_cast<size_t>(1116 * scale),
-            static_cast<size_t>(1188 * scale),
-            static_cast<size_t>(1277 * scale),
-            static_cast<size_t>(1356 * scale)
-        };
-        const size_t allPassLengths[2] = {
-            static_cast<size_t>(225 * scale),
-            static_cast<size_t>(556 * scale)
-        };
+            const size_t combLengths[4] = {
+                static_cast<size_t>(1116 * scale),
+                static_cast<size_t>(1188 * scale),
+                static_cast<size_t>(1277 * scale),
+                static_cast<size_t>(1356 * scale)
+            };
+            const size_t allPassLengths[2] = {
+                static_cast<size_t>(225 * scale),
+                static_cast<size_t>(556 * scale)
+            };
 
-        for (size_t i = 0; i < 4; ++i) {
-            m_combsLeft[i].init(combLengths[i], m_roomSize, m_damp);
-            m_combsRight[i].init(combLengths[i] + static_cast<size_t>(23 * scale), m_roomSize, m_damp);
-        }
+            for (size_t i = 0; i < 4; ++i) {
+                m_combsLeft[i].init(combLengths[i], m_roomSize, m_damp);
+                m_combsRight[i].init(combLengths[i] + static_cast<size_t>(23 * scale), m_roomSize, m_damp);
+            }
 
-        for (size_t i = 0; i < 2; ++i) {
-            m_allPassLeft[i].init(allPassLengths[i], 0.5);
-            m_allPassRight[i].init(allPassLengths[i] + static_cast<size_t>(17 * scale), 0.5);
+            for (size_t i = 0; i < 2; ++i) {
+                m_allPassLeft[i].init(allPassLengths[i], 0.5);
+                m_allPassRight[i].init(allPassLengths[i] + static_cast<size_t>(17 * scale), 0.5);
+            }
+        } else {
+            // Update parameter gains in-place without zeroing active audio delay buffers (P0-07)
+            for (size_t i = 0; i < 4; ++i) {
+                m_combsLeft[i].feedback = m_roomSize;
+                m_combsLeft[i].damp = m_damp;
+                m_combsRight[i].feedback = m_roomSize;
+                m_combsRight[i].damp = m_damp;
+            }
         }
     }
 
+    [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] double roomSize() const noexcept { return m_roomSize; }
     [[nodiscard]] double damping() const noexcept { return m_damp; }
     [[nodiscard]] double wetLevel() const noexcept { return m_wet; }

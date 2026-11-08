@@ -18,6 +18,7 @@ public:
 
     void configure(double sampleRate, double ceilingDb = -0.1, double releaseMs = 50.0, double lookaheadMs = 1.0)
     {
+        bool rateChanged = std::abs(m_sampleRate - sampleRate) > 0.01;
         m_sampleRate = sampleRate;
         m_ceilingDb = std::clamp(ceilingDb, -12.0, 0.0);
         m_ceiling = std::pow(10.0, m_ceilingDb / 20.0);
@@ -27,11 +28,15 @@ public:
         m_releaseAlpha = std::exp(-1.0 / (sampleRate * (m_releaseMs * 0.001)));
 
         size_t samples = static_cast<size_t>(std::ceil(sampleRate * (m_lookaheadMs * 0.001)));
-        m_lookaheadSamples = std::clamp(samples, size_t(8), MAX_LOOKAHEAD);
+        size_t newLookahead = std::clamp(samples, size_t(8), MAX_LOOKAHEAD);
 
-        reset();
+        if (rateChanged || newLookahead != m_lookaheadSamples) {
+            m_lookaheadSamples = newLookahead;
+            reset();
+        }
     }
 
+    [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] double ceilingDb() const noexcept { return m_ceilingDb; }
     [[nodiscard]] double ceiling() const noexcept { return m_ceiling; }
     [[nodiscard]] double releaseMs() const noexcept { return m_releaseMs; }

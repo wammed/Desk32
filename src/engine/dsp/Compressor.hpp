@@ -20,14 +20,17 @@ public:
         m_sampleRate = sampleRate;
         m_thresholdDb = std::clamp(thresholdDb, -60.0, 0.0);
         m_ratio = std::clamp(ratio, 1.0, 20.0);
+        m_attackMs = std::max(0.1, attackMs);
+        m_releaseMs = std::max(1.0, releaseMs);
         m_makeupGainDb = std::clamp(makeupGainDb, -12.0, 24.0);
         m_makeupGain = std::pow(10.0, m_makeupGainDb / 20.0);
         m_kneeDb = std::clamp(kneeDb, 0.0, 20.0);
 
-        m_attackAlpha = std::exp(-1.0 / (sampleRate * std::max(0.0001, attackMs * 0.001)));
-        m_releaseAlpha = std::exp(-1.0 / (sampleRate * std::max(0.001, releaseMs * 0.001)));
+        m_attackAlpha = std::exp(-1.0 / (sampleRate * std::max(0.0001, m_attackMs * 0.001)));
+        m_releaseAlpha = std::exp(-1.0 / (sampleRate * std::max(0.001, m_releaseMs * 0.001)));
     }
 
+    [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] double thresholdDb() const noexcept { return m_thresholdDb; }
     [[nodiscard]] double ratio() const noexcept { return m_ratio; }
     [[nodiscard]] double attackMs() const noexcept { return m_attackMs; }

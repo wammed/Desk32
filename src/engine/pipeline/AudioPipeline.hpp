@@ -41,28 +41,22 @@ public:
     [[nodiscard]] double graphSampleRate() const noexcept { return m_graphSampleRate.load(std::memory_order_relaxed); }
 
     /// Reconfigure graph sample rate safely without mutating live running chains in-place.
-    /// Builds fresh chains configured at the new rate, atomically swaps via EpochReclaimer.
+    /// Builds fresh chains with deep-cloned nodes configured at the new rate, atomically swaps via EpochReclaimer (P0-08).
     void setGraphSampleRate(double sampleRate) {
         m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
 
-        // Safely reconfigure Master Chain via atomic swap
+        // Safely reconfigure Master Chain via atomic swap with cloned nodes
         auto* currentMaster = m_masterReclaimer.current();
         if (currentMaster) {
-            auto newMaster = std::make_unique<AudioChain>(currentMaster->name(), ChainPurpose::MasteringChain);
-            for (size_t i = 0; i < currentMaster->nodeCount(); ++i) {
-                newMaster->appendNode(currentMaster->nodeShared(i));
-            }
+            auto newMaster = currentMaster->clone();
             newMaster->configure(sampleRate);
             m_masterReclaimer.swapChain(std::move(newMaster));
         }
 
-        // Safely reconfigure Listening Chain via atomic swap
+        // Safely reconfigure Listening Chain via atomic swap with cloned nodes
         auto* currentListening = m_listeningReclaimer.current();
         if (currentListening) {
-            auto newListening = std::make_unique<AudioChain>(currentListening->name(), ChainPurpose::ListeningCorrectionChain);
-            for (size_t i = 0; i < currentListening->nodeCount(); ++i) {
-                newListening->appendNode(currentListening->nodeShared(i));
-            }
+            auto newListening = currentListening->clone();
             newListening->configure(sampleRate);
             m_listeningReclaimer.swapChain(std::move(newListening));
         }
@@ -76,6 +70,39 @@ public:
 
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume.load(); }
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
+
+    [[nodiscard]] double compressorGainReductionDb() const noexcept {
+        auto* master = m_masterReclaimer.current();
+        if (!master || master->isBypassed()) return 0.0;
+        for (size_t i = 0; i < master->nodeCount(); ++i) {
+            if (auto* comp = dynamic_cast<CompressorNode*>(master->node(i))) {
+                return comp->isBypassed() ? 0.0 : comp->dsp().gainReductionDb();
+            }
+        }
+        return 0.0;
+    }
+
+    [[nodiscard]] double limiterGainReductionDb() const noexcept {
+        auto* master = m_masterReclaimer.current();
+        if (!master || master->isBypassed()) return 0.0;
+        for (size_t i = 0; i < master->nodeCount(); ++i) {
+            if (auto* lim = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
+                return lim->isBypassed() ? 0.0 : lim->dsp().gainReductionDb();
+            }
+        }
+        return 0.0;
+    }
+
+    [[nodiscard]] int limiterLatencyFrames() const noexcept {
+        auto* master = m_masterReclaimer.current();
+        if (!master || master->isBypassed()) return 0;
+        for (size_t i = 0; i < master->nodeCount(); ++i) {
+            if (auto* lim = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
+                return lim->isBypassed() ? 0 : static_cast<int>(lim->latencyFrames());
+            }
+        }
+        return 0;
+    }
 
     [[nodiscard]] dsp::ParameterCommandQueue& paramQueue() noexcept { return m_paramQueue; }
 
@@ -110,12 +137,12 @@ public:
     void process(double* left, double* right, size_t frameCount,
                  void* outPcmBuffer, SampleFormat targetFormat, bool applyDither = true)
     {
-        // 0. Drain pending DSP parameter commands at the block boundary on Audio Thread
-        drainParameterCommands();
-
         // 1. Enter epoch to protect current active chains from destruction during Audio Thread execution
         auto masterGuard = m_masterReclaimer.enterRead();
         auto listeningGuard = m_listeningReclaimer.enterRead();
+
+        // 0. Drain pending DSP parameter commands at the block boundary on Audio Thread within active epoch (P0-06)
+        drainParameterCommands(masterGuard.chain, listeningGuard.chain);
 
         // 2. Upstream Master / DSP Chain (before Logical Render Tap)
         if (masterGuard.chain) {
@@ -154,17 +181,14 @@ public:
     }
 
 private:
-    void drainParameterCommands() noexcept {
+    void drainParameterCommands(AudioChain* master, AudioChain* listening) noexcept {
         dsp::DspCommand cmd;
         while (m_paramQueue.pop(cmd)) {
-            applyDspCommand(cmd);
+            applyDspCommand(cmd, master, listening);
         }
     }
 
-    void applyDspCommand(const dsp::DspCommand& cmd) noexcept {
-        auto* master = m_masterReclaimer.current();
-        auto* listening = m_listeningReclaimer.current();
-
+    void applyDspCommand(const dsp::DspCommand& cmd, AudioChain* master, AudioChain* listening) noexcept {
         switch (cmd.type) {
         case dsp::DspCommandType::SetGeqBandGain:
             if (master) {
@@ -278,7 +302,7 @@ private:
                                                   static_cast<double>(cmd.param2),
                                                   static_cast<double>(cmd.param3),
                                                   static_cast<double>(cmd.param4),
-                                                  0.0,
+                                                  static_cast<double>(cmd.param6),
                                                   static_cast<double>(cmd.param5));
                         compNode->dsp().setEnabled(cmd.boolFlag1 != 0);
                         break;
@@ -324,6 +348,17 @@ private:
             } else {
                 if (master && cmd.index < master->nodeCount()) {
                     master->node(cmd.index)->setBypassed(cmd.boolFlag1 != 0);
+                }
+            }
+            break;
+        case dsp::DspCommandType::SetGlobalBypass:
+            if (cmd.subIndex == 1) {
+                if (listening) {
+                    listening->setBypassed(cmd.boolFlag1 != 0);
+                }
+            } else {
+                if (master) {
+                    master->setBypassed(cmd.boolFlag1 != 0);
                 }
             }
             break;
