@@ -1,17 +1,22 @@
 # Minimal external library suppressions for ThreadSanitizer (P0-28 audited minimal set)
-# Broad suppression race:libQt6Core.so has been completely removed.
+# Broad suppression race:libQt6Core.so has been eliminated and replaced with strictly scoped rules:
 #
 # 1. Target: Qt6 QTest internal watchdog thread data race during QTest teardown
 #    Reason: Qt's test framework spawns an uninstrumented watchdog thread that accesses stack variables during exit.
 #    Scope : Strictly scoped to libQt6Test test harness.
 race:libQt6Test
 
-# 2. Target: Qt6 QTest internal watchdog thread leak at process exit
+# 2. Target: Qt6 QWaitCondition synchronization in precompiled Qt library
+#    Reason: Precompiled distribution libQt6Core lacks TSan instrumentation for QWaitCondition futexes (used by QTest watchdog).
+#    Scope : Strictly scoped to QWaitCondition symbol.
+race:QWaitCondition
+
+# 3. Target: Qt6 QTest internal watchdog thread leak at process exit
 #    Reason: QTest watchdog thread is intentionally detached and not joined before exit by Qt test runner.
 #    Scope : Strictly scoped to QThread::start (Desk32 production code uses std::thread exclusively).
 thread:QThread::start
 
-# 3. Target: PipeWire thread loop internal mutex unlock across threads
+# 4. Target: PipeWire thread loop internal mutex unlock across threads
 #    Reason: libpipewire-0.3 pw_thread_loop locks and unlocks mutex across internal loop/control threads by design.
 #    Scope : Strictly scoped to third-party shared library libpipewire-0.3.so.
 mutex:libpipewire-0.3.so

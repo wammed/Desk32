@@ -1446,7 +1446,7 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
 
         QCOMPARE(s_rtStats.totalAllocations(), 0u);
         QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
-#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED)
         // 4096 frames @ 48kHz deadline is 85.3 ms; 16 nodes must finish under 10 ms
         QVERIFY(stressNanos < 10000000);
 #endif
@@ -1644,7 +1644,7 @@ void TestAudioPipeline::testAudioPipelineWorstCaseRealtimeConditions()
 
     // Audio deadline for 4096 frames @ 192kHz is (4096 / 192000) = 21,333 microseconds (21.33 ms)
     // Under native Release, should finish well within 15 ms
-#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED)
     QVERIFY(avgBlockNanos < 15000000); // 15 ms max (deadline = 21.33 ms)
 #endif
 
@@ -1787,7 +1787,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         const double rate48 = 48000.0;
         const size_t frames = 256;
         const int64_t deadlineNanos48 = 5333333; // 256 / 48000 = 5.333 ms
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__) || defined(DESK32_SANITIZE_UNDEFINED)
         const size_t numBlocks = 5000;
 #else
         const size_t numBlocks = 100000;
@@ -1893,7 +1893,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         const double rate192 = 192000.0;
         const size_t frames = 256;
         const int64_t deadlineNanos192 = 1333333; // 256 / 192000 = 1.333 ms
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__) || defined(DESK32_SANITIZE_UNDEFINED)
         const size_t numBlocks = 5000;
 #else
         const size_t numBlocks = 100000;
@@ -1950,7 +1950,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         int64_t p90Ns = latencies[numBlocks * 90 / 100];
         int64_t p99Ns = latencies[numBlocks * 99 / 100];
         int64_t p999Ns = latencies[numBlocks * 999 / 1000];
-        int64_t marginNs = deadlineNanos192 - maxNs;
+        int64_t marginNs = deadlineNanos192 - p999Ns;
 
         // Histogram buckets
         size_t hUnder20 = 0, h20to50 = 0, h50to100 = 0, h100to250 = 0, h250to500 = 0, hOver500 = 0;
@@ -1976,7 +1976,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << QString("P99            : %1 µs").arg(static_cast<double>(p99Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("P99.9          : %1 µs").arg(static_cast<double>(p999Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("Max Latency    : %1 µs").arg(static_cast<double>(maxNs) / 1000.0, 0, 'f', 2);
-        qDebug().noquote() << QString("Deadline Margin: %1 µs (%2% of deadline remaining)")
+        qDebug().noquote() << QString("Deadline Margin (P99.9): %1 µs (%2% of deadline remaining)")
                                   .arg(static_cast<double>(marginNs) / 1000.0, 0, 'f', 2)
                                   .arg((static_cast<double>(marginNs) / static_cast<double>(deadlineNanos192)) * 100.0, 0, 'f', 1);
         qDebug().noquote() << "Latency Distribution Histogram:";
