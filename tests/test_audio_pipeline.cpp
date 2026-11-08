@@ -13,6 +13,9 @@
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
+#include "core/log/BoundedLogQueue.hpp"
+#include <numeric>
+#include <algorithm>
 
 struct RtAllocationTracker {
     std::atomic<size_t> opNewCount{0};
@@ -21,6 +24,11 @@ struct RtAllocationTracker {
     std::atomic<size_t> opNewAlignedCount{0};
     std::atomic<size_t> opDeleteCount{0};
     std::atomic<size_t> opDeleteArrayCount{0};
+    std::atomic<size_t> cMallocCount{0};
+    std::atomic<size_t> cCallocCount{0};
+    std::atomic<size_t> cReallocCount{0};
+    std::atomic<size_t> cFreeCount{0};
+    std::atomic<size_t> cMemalignCount{0};
     std::atomic<size_t> rtBlockingCount{0};
 
     void reset() noexcept {
@@ -30,16 +38,80 @@ struct RtAllocationTracker {
         opNewAlignedCount.store(0);
         opDeleteCount.store(0);
         opDeleteArrayCount.store(0);
+        cMallocCount.store(0);
+        cCallocCount.store(0);
+        cReallocCount.store(0);
+        cFreeCount.store(0);
+        cMemalignCount.store(0);
         rtBlockingCount.store(0);
     }
 
     [[nodiscard]] size_t totalAllocations() const noexcept {
-        return opNewCount.load() + opNewArrayCount.load() + opNewNothrowCount.load() + opNewAlignedCount.load();
+        return opNewCount.load() + opNewArrayCount.load() + opNewNothrowCount.load() +
+               opNewAlignedCount.load() + cMallocCount.load() + cCallocCount.load() +
+               cReallocCount.load() + cMemalignCount.load();
+    }
+
+    [[nodiscard]] size_t totalDeallocations() const noexcept {
+        return opDeleteCount.load() + opDeleteArrayCount.load() + cFreeCount.load();
     }
 };
 
 static RtAllocationTracker s_rtStats;
 static thread_local bool t_isAudioThread{false};
+
+extern "C" {
+void* __libc_malloc(size_t);
+void* __libc_calloc(size_t, size_t);
+void* __libc_realloc(void*, size_t);
+void __libc_free(void*);
+void* __libc_memalign(size_t, size_t);
+
+void* malloc(size_t size) {
+    if (t_isAudioThread) {
+        s_rtStats.cMallocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return __libc_malloc(size);
+}
+
+void* calloc(size_t nmemb, size_t size) {
+    if (t_isAudioThread) {
+        s_rtStats.cCallocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return __libc_calloc(nmemb, size);
+}
+
+void* realloc(void* ptr, size_t size) {
+    if (t_isAudioThread) {
+        s_rtStats.cReallocCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return __libc_realloc(ptr, size);
+}
+
+void free(void* ptr) {
+    if (t_isAudioThread) {
+        s_rtStats.cFreeCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    __libc_free(ptr);
+}
+
+int posix_memalign(void** memptr, size_t alignment, size_t size) {
+    if (t_isAudioThread) {
+        s_rtStats.cMemalignCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = __libc_memalign(alignment, size);
+    if (!ptr) return 12; // ENOMEM
+    *memptr = ptr;
+    return 0;
+}
+
+void* aligned_alloc(size_t alignment, size_t size) {
+    if (t_isAudioThread) {
+        s_rtStats.cMemalignCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return __libc_memalign(alignment, size);
+}
+} // extern "C"
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -50,36 +122,36 @@ void* operator new(size_t size) {
     if (t_isAudioThread) {
         s_rtStats.opNewCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return malloc(size);
+    return __libc_malloc(size);
 }
 
 void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opNewNothrowCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return malloc(size);
+    return __libc_malloc(size);
 }
 
 void* operator new[](size_t size) {
     if (t_isAudioThread) {
         s_rtStats.opNewArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return malloc(size);
+    return __libc_malloc(size);
 }
 
 void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opNewNothrowCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return malloc(size);
+    return __libc_malloc(size);
 }
 
 void* operator new(size_t size, std::align_val_t al) {
     if (t_isAudioThread) {
         s_rtStats.opNewAlignedCount.fetch_add(1, std::memory_order_relaxed);
     }
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+    void* ptr = __libc_memalign(static_cast<size_t>(al), size);
+    if (!ptr) {
         throw std::bad_alloc();
     }
     return ptr;
@@ -89,8 +161,8 @@ void* operator new[](size_t size, std::align_val_t al) {
     if (t_isAudioThread) {
         s_rtStats.opNewAlignedCount.fetch_add(1, std::memory_order_relaxed);
     }
-    void* ptr = nullptr;
-    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+    void* ptr = __libc_memalign(static_cast<size_t>(al), size);
+    if (!ptr) {
         throw std::bad_alloc();
     }
     return ptr;
@@ -100,56 +172,56 @@ void operator delete(void* ptr) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete[](void* ptr) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete(void* ptr, size_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete[](void* ptr, size_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete(void* ptr, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete[](void* ptr, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete(void* ptr, size_t, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 void operator delete[](void* ptr, size_t, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    free(ptr);
+    __libc_free(ptr);
 }
 
 #if defined(__GNUC__)
@@ -172,6 +244,14 @@ int pthread_mutex_trylock(pthread_mutex_t* mutex) {
         s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
     }
     return orig(mutex);
+}
+
+int pthread_mutex_timedlock(pthread_mutex_t* mutex, const struct timespec* abstime) {
+    static auto orig = reinterpret_cast<int(*)(pthread_mutex_t*, const struct timespec*)>(dlsym(RTLD_NEXT, "pthread_mutex_timedlock"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(mutex, abstime);
 }
 
 int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
@@ -198,6 +278,14 @@ int sem_wait(sem_t* sem) {
     return orig(sem);
 }
 
+int sem_trywait(sem_t* sem) {
+    static auto orig = reinterpret_cast<int(*)(sem_t*)>(dlsym(RTLD_NEXT, "sem_trywait"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(sem);
+}
+
 int nanosleep(const struct timespec* req, struct timespec* rem) {
     static auto orig = reinterpret_cast<int(*)(const struct timespec*, struct timespec*)>(dlsym(RTLD_NEXT, "nanosleep"));
     if (t_isAudioThread) {
@@ -212,6 +300,22 @@ int usleep(useconds_t usec) {
         s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
     }
     return orig(usec);
+}
+
+unsigned int sleep(unsigned int seconds) {
+    static auto orig = reinterpret_cast<unsigned int(*)(unsigned int)>(dlsym(RTLD_NEXT, "sleep"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(seconds);
+}
+
+int sched_yield() {
+    static auto orig = reinterpret_cast<int(*)()>(dlsym(RTLD_NEXT, "sched_yield"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig();
 }
 
 } // extern "C"
@@ -244,6 +348,7 @@ private slots:
     void testRealtimeSafetyNegativeDetection();
     void testAudioPipelineWorstCaseRealtimeConditions();
     void testAudioChainMaxNodesAndBoundedCommandDrain();
+    void testAudioThreadRealtimeLogQueueAndLatencyDistribution();
     void cleanupTestCase();
 };
 
@@ -1208,11 +1313,12 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
     s_rtStats.reset();
 
     std::thread audioThread([&]() {
-        t_isAudioThread = true;
         while (!stopAudio.load(std::memory_order_relaxed)) {
+            t_isAudioThread = true;
             auto t0 = std::chrono::steady_clock::now();
             pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
             auto t1 = std::chrono::steady_clock::now();
+            t_isAudioThread = false;
 
             int64_t elapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
             int64_t curMax = maxProcessNanos.load(std::memory_order_relaxed);
@@ -1221,7 +1327,6 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
             blocksRendered.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
-        t_isAudioThread = false; // Reset before exiting thread routine
     });
 
     // Control Thread: Concurrently mutate Mailbox, swap DSP instances, push discrete commands, swap mock processor, read telemetry, and reclaim memory
@@ -1355,7 +1460,7 @@ void TestAudioPipeline::testRealtimeSafetyNegativeDetection()
 
     t_isAudioThread = true;
 
-    // 1. Intentionally trigger heap scalar and array allocations (using explicit operator new to prevent compiler elision)
+    // 1. Intentionally trigger C++ heap scalar and array allocations (using explicit operator new to prevent compiler elision)
     void* scalar = ::operator new(64);
     asm volatile("" : "+r"(scalar) : : "memory");
     ::operator delete(scalar);
@@ -1364,13 +1469,38 @@ void TestAudioPipeline::testRealtimeSafetyNegativeDetection()
     asm volatile("" : "+r"(arr) : : "memory");
     ::operator delete[](arr);
 
-    // 2. Intentionally trigger POSIX mutex lock (via std::mutex)
+    // 2. Intentionally trigger C ABI heap allocations (malloc, calloc, realloc, posix_memalign, aligned_alloc, free)
+    void* cPtr1 = malloc(64);
+    asm volatile("" : "+r"(cPtr1) : : "memory");
+    free(cPtr1);
+
+    void* cPtr2 = calloc(2, 32);
+    asm volatile("" : "+r"(cPtr2) : : "memory");
+    cPtr2 = realloc(cPtr2, 128);
+    asm volatile("" : "+r"(cPtr2) : : "memory");
+    free(cPtr2);
+
+    void* cPtr3 = nullptr;
+    posix_memalign(&cPtr3, 64, 128);
+    asm volatile("" : "+r"(cPtr3) : : "memory");
+    free(cPtr3);
+
+    void* cPtr4 = aligned_alloc(64, 128);
+    asm volatile("" : "+r"(cPtr4) : : "memory");
+    free(cPtr4);
+
+    // 3. Intentionally trigger POSIX mutex lock (via std::mutex)
     std::mutex mtx;
     mtx.lock();
     mtx.unlock();
 
-    // 3. Intentionally trigger POSIX sleep blocking call
+    // 4. Intentionally trigger POSIX sleep and yield blocking calls
     usleep(50);
+    sched_yield();
+
+    pthread_mutex_t pmtx = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_trylock(&pmtx);
+    pthread_mutex_unlock(&pmtx);
 
     t_isAudioThread = false;
 
@@ -1379,7 +1509,12 @@ void TestAudioPipeline::testRealtimeSafetyNegativeDetection()
     QVERIFY(s_rtStats.opDeleteCount.load() >= 1);
     QVERIFY(s_rtStats.opNewArrayCount.load() >= 1);
     QVERIFY(s_rtStats.opDeleteArrayCount.load() >= 1);
-    QVERIFY(s_rtStats.rtBlockingCount.load() >= 2); // mutex lock + usleep
+    QVERIFY(s_rtStats.cMallocCount.load() >= 1);
+    QVERIFY(s_rtStats.cCallocCount.load() >= 1);
+    QVERIFY(s_rtStats.cReallocCount.load() >= 1);
+    QVERIFY(s_rtStats.cMemalignCount.load() >= 2);
+    QVERIFY(s_rtStats.cFreeCount.load() >= 4);
+    QVERIFY(s_rtStats.rtBlockingCount.load() >= 4); // mutex lock + usleep + sched_yield + trylock
 
     // Clean up tracker
     s_rtStats.reset();
@@ -1595,6 +1730,253 @@ void TestAudioPipeline::testAudioChainMaxNodesAndBoundedCommandDrain()
     QVERIFY(pipeline.paramQueue().empty());
     QCOMPARE(s_rtStats.totalAllocations(), 0u);
     QCOMPARE(s_rtStats.opDeleteCount.load() + s_rtStats.opDeleteArrayCount.load(), 0u);
+}
+
+void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
+{
+    // P0-23 Phase D: Audio Thread Safety & Latency Profiling
+    // D-3: RT Log Queue Verification (BoundedLogQueue try_push non-blocking, drop on overflow, 0 allocation)
+    // D-4: Audio Thread Latency Profiling across >= 100,000 blocks at 48kHz and 192kHz
+
+    // =========================================================================
+    // 1. D-3: RT Log Queue Safety & Non-blocking Guarantee
+    // =========================================================================
+    {
+        desk32::core::log::BoundedLogQueue<int, 4> queue;
+        QCOMPARE(queue.size(), 0u);
+        QCOMPARE(queue.overflowCount(), 0u);
+
+        // Fill queue to capacity (4 items)
+        QVERIFY(queue.try_push(101));
+        QVERIFY(queue.try_push(102));
+        QVERIFY(queue.try_push(103));
+        QVERIFY(queue.try_push(104));
+        QCOMPARE(queue.size(), 4u);
+        QCOMPARE(queue.overflowCount(), 0u);
+
+        // Attempt to push 5th item when full -> MUST fail immediately without blocking or throwing
+        s_rtStats.reset();
+        t_isAudioThread = true;
+        bool pushOk = queue.try_push(105);
+        t_isAudioThread = false;
+
+        QVERIFY(!pushOk);
+        QCOMPARE(queue.size(), 4u);
+        QCOMPARE(queue.overflowCount(), 1u);
+        QCOMPARE(s_rtStats.totalAllocations(), 0u);
+        QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
+
+        // Drain queue
+        auto drained = queue.drain();
+        QCOMPARE(drained.size(), 4u);
+        QCOMPARE(queue.size(), 0u);
+        QCOMPARE(queue.resetOverflowCount(), 1u);
+        QCOMPARE(queue.overflowCount(), 0u);
+    }
+
+    // =========================================================================
+    // 2. D-4: 100,000-Block Latency Distribution at 48 kHz (Deadline = 5.333 ms)
+    // =========================================================================
+    {
+        const double rate48 = 48000.0;
+        const size_t frames = 256;
+        const int64_t deadlineNanos48 = 5333333; // 256 / 48000 = 5.333 ms
+        const size_t numBlocks = 100000;
+
+        AudioPipeline pipeline48(rate48);
+        auto chain = std::make_unique<AudioChain>("Master48", ChainPurpose::MasteringChain);
+
+        auto peq = std::make_shared<ParametricEqNode>("PEQ");
+        auto comp = std::make_shared<CompressorNode>("COMP");
+        auto lim = std::make_shared<PeakLimiterNode>("LIM");
+        auto rev = std::make_shared<ReverbNode>("REV");
+
+        chain->appendNode(peq);
+        chain->appendNode(comp);
+        chain->appendNode(lim);
+        chain->appendNode(rev);
+        pipeline48.swapMasterChain(std::move(chain));
+
+        std::vector<double> inL(frames, 0.35), inR(frames, -0.35);
+        std::vector<float> pcmOut(frames * 2, 0.0f);
+        std::vector<int64_t> latencies(numBlocks);
+
+        // Warm up 1,000 blocks
+        for (size_t w = 0; w < 1000; ++w) {
+            pipeline48.process(inL.data(), inR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+        }
+
+        s_rtStats.reset();
+        t_isAudioThread = true;
+
+        for (size_t i = 0; i < numBlocks; ++i) {
+            auto t0 = std::chrono::steady_clock::now();
+            pipeline48.process(inL.data(), inR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+            auto t1 = std::chrono::steady_clock::now();
+            latencies[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        }
+
+        t_isAudioThread = false;
+
+        // Zero heap allocations & zero blocking calls across all 100,000 blocks
+        QCOMPARE(s_rtStats.totalAllocations(), 0u);
+        QCOMPARE(s_rtStats.totalDeallocations(), 0u);
+        QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
+
+        // Sort latencies to compute percentiles
+        std::sort(latencies.begin(), latencies.end());
+
+        int64_t minNs = latencies.front();
+        int64_t maxNs = latencies.back();
+        int64_t sumNs = std::accumulate(latencies.begin(), latencies.end(), 0LL);
+        double meanNs = static_cast<double>(sumNs) / static_cast<double>(numBlocks);
+        int64_t p50Ns = latencies[numBlocks * 50 / 100];
+        int64_t p90Ns = latencies[numBlocks * 90 / 100];
+        int64_t p99Ns = latencies[numBlocks * 99 / 100];
+        int64_t p999Ns = latencies[numBlocks * 999 / 1000];
+        int64_t marginNs = deadlineNanos48 - maxNs;
+
+        // Histogram buckets
+        size_t hUnder20 = 0, h20to50 = 0, h50to100 = 0, h100to250 = 0, h250to500 = 0, hOver500 = 0;
+        for (int64_t ns : latencies) {
+            double us = static_cast<double>(ns) / 1000.0;
+            if (us < 20.0) ++hUnder20;
+            else if (us < 50.0) ++h20to50;
+            else if (us < 100.0) ++h50to100;
+            else if (us < 250.0) ++h100to250;
+            else if (us < 500.0) ++h250to500;
+            else ++hOver500;
+        }
+
+        qDebug().noquote() << "\n========================================================";
+        qDebug().noquote() << "AUDIO THREAD LATENCY PROFILE: 48,000 Hz (256 frames)";
+        qDebug().noquote() << "========================================================";
+        qDebug().noquote() << QString("Sample Count   : %1 blocks").arg(static_cast<qlonglong>(numBlocks));
+        qDebug().noquote() << QString("Audio Deadline : %1 µs (%2 ms)").arg(deadlineNanos48 / 1000).arg(static_cast<double>(deadlineNanos48) / 1000000.0, 0, 'f', 3);
+        qDebug().noquote() << QString("Min Latency    : %1 µs").arg(static_cast<double>(minNs) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Mean Latency   : %1 µs").arg(meanNs / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P50 (Median)   : %1 µs").arg(static_cast<double>(p50Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P90            : %1 µs").arg(static_cast<double>(p90Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P99            : %1 µs").arg(static_cast<double>(p99Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P99.9          : %1 µs").arg(static_cast<double>(p999Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Max Latency    : %1 µs").arg(static_cast<double>(maxNs) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Deadline Margin: %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginNs) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginNs) / static_cast<double>(deadlineNanos48)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << "Latency Distribution Histogram:";
+        qDebug().noquote() << QString("  < 20 µs      : %1 (%2%)").arg(static_cast<qlonglong>(hUnder20)).arg(static_cast<double>(hUnder20) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  20 - 50 µs   : %1 (%2%)").arg(static_cast<qlonglong>(h20to50)).arg(static_cast<double>(h20to50) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  50 - 100 µs  : %1 (%2%)").arg(static_cast<qlonglong>(h50to100)).arg(static_cast<double>(h50to100) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  100 - 250 µs : %1 (%2%)").arg(static_cast<qlonglong>(h100to250)).arg(static_cast<double>(h100to250) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  250 - 500 µs : %1 (%2%)").arg(static_cast<qlonglong>(h250to500)).arg(static_cast<double>(h250to500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  > 500 µs     : %1 (%2%)").arg(static_cast<qlonglong>(hOver500)).arg(static_cast<double>(hOver500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << "========================================================\n";
+
+        QVERIFY(marginNs > 0);
+        QVERIFY(p999Ns < deadlineNanos48);
+    }
+
+    // =========================================================================
+    // 3. D-4: 100,000-Block Latency Distribution at 192 kHz (Deadline = 1.333 ms)
+    // =========================================================================
+    {
+        const double rate192 = 192000.0;
+        const size_t frames = 256;
+        const int64_t deadlineNanos192 = 1333333; // 256 / 192000 = 1.333 ms
+        const size_t numBlocks = 100000;
+
+        AudioPipeline pipeline192(rate192);
+        auto chain = std::make_unique<AudioChain>("Master192", ChainPurpose::MasteringChain);
+
+        auto peq = std::make_shared<ParametricEqNode>("PEQ");
+        auto comp = std::make_shared<CompressorNode>("COMP");
+        auto lim = std::make_shared<PeakLimiterNode>("LIM");
+        auto rev = std::make_shared<ReverbNode>("REV");
+
+        chain->appendNode(peq);
+        chain->appendNode(comp);
+        chain->appendNode(lim);
+        chain->appendNode(rev);
+        pipeline192.swapMasterChain(std::move(chain));
+
+        std::vector<double> inL(frames, 0.35), inR(frames, -0.35);
+        std::vector<float> pcmOut(frames * 2, 0.0f);
+        std::vector<int64_t> latencies(numBlocks);
+
+        // Warm up 1,000 blocks
+        for (size_t w = 0; w < 1000; ++w) {
+            pipeline192.process(inL.data(), inR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+        }
+
+        s_rtStats.reset();
+        t_isAudioThread = true;
+
+        for (size_t i = 0; i < numBlocks; ++i) {
+            auto t0 = std::chrono::steady_clock::now();
+            pipeline192.process(inL.data(), inR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+            auto t1 = std::chrono::steady_clock::now();
+            latencies[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        }
+
+        t_isAudioThread = false;
+
+        // Zero heap allocations & zero blocking calls across all 100,000 blocks
+        QCOMPARE(s_rtStats.totalAllocations(), 0u);
+        QCOMPARE(s_rtStats.totalDeallocations(), 0u);
+        QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
+
+        // Sort latencies to compute percentiles
+        std::sort(latencies.begin(), latencies.end());
+
+        int64_t minNs = latencies.front();
+        int64_t maxNs = latencies.back();
+        int64_t sumNs = std::accumulate(latencies.begin(), latencies.end(), 0LL);
+        double meanNs = static_cast<double>(sumNs) / static_cast<double>(numBlocks);
+        int64_t p50Ns = latencies[numBlocks * 50 / 100];
+        int64_t p90Ns = latencies[numBlocks * 90 / 100];
+        int64_t p99Ns = latencies[numBlocks * 99 / 100];
+        int64_t p999Ns = latencies[numBlocks * 999 / 1000];
+        int64_t marginNs = deadlineNanos192 - maxNs;
+
+        // Histogram buckets
+        size_t hUnder20 = 0, h20to50 = 0, h50to100 = 0, h100to250 = 0, h250to500 = 0, hOver500 = 0;
+        for (int64_t ns : latencies) {
+            double us = static_cast<double>(ns) / 1000.0;
+            if (us < 20.0) ++hUnder20;
+            else if (us < 50.0) ++h20to50;
+            else if (us < 100.0) ++h50to100;
+            else if (us < 250.0) ++h100to250;
+            else if (us < 500.0) ++h250to500;
+            else ++hOver500;
+        }
+
+        qDebug().noquote() << "\n========================================================";
+        qDebug().noquote() << "AUDIO THREAD LATENCY PROFILE: 192,000 Hz (256 frames)";
+        qDebug().noquote() << "========================================================";
+        qDebug().noquote() << QString("Sample Count   : %1 blocks").arg(static_cast<qlonglong>(numBlocks));
+        qDebug().noquote() << QString("Audio Deadline : %1 µs (%2 ms)").arg(deadlineNanos192 / 1000).arg(static_cast<double>(deadlineNanos192) / 1000000.0, 0, 'f', 3);
+        qDebug().noquote() << QString("Min Latency    : %1 µs").arg(static_cast<double>(minNs) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Mean Latency   : %1 µs").arg(meanNs / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P50 (Median)   : %1 µs").arg(static_cast<double>(p50Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P90            : %1 µs").arg(static_cast<double>(p90Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P99            : %1 µs").arg(static_cast<double>(p99Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("P99.9          : %1 µs").arg(static_cast<double>(p999Ns) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Max Latency    : %1 µs").arg(static_cast<double>(maxNs) / 1000.0, 0, 'f', 2);
+        qDebug().noquote() << QString("Deadline Margin: %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginNs) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginNs) / static_cast<double>(deadlineNanos192)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << "Latency Distribution Histogram:";
+        qDebug().noquote() << QString("  < 20 µs      : %1 (%2%)").arg(static_cast<qlonglong>(hUnder20)).arg(static_cast<double>(hUnder20) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  20 - 50 µs   : %1 (%2%)").arg(static_cast<qlonglong>(h20to50)).arg(static_cast<double>(h20to50) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  50 - 100 µs  : %1 (%2%)").arg(static_cast<qlonglong>(h50to100)).arg(static_cast<double>(h50to100) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  100 - 250 µs : %1 (%2%)").arg(static_cast<qlonglong>(h100to250)).arg(static_cast<double>(h100to250) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  250 - 500 µs : %1 (%2%)").arg(static_cast<qlonglong>(h250to500)).arg(static_cast<double>(h250to500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << QString("  > 500 µs     : %1 (%2%)").arg(static_cast<qlonglong>(hOver500)).arg(static_cast<double>(hOver500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
+        qDebug().noquote() << "========================================================\n";
+
+        QVERIFY(marginNs > 0);
+        QVERIFY(p999Ns < deadlineNanos192);
+    }
 }
 
 void TestAudioPipeline::cleanupTestCase()

@@ -2,6 +2,7 @@
 
 #include "LogEvent.hpp"
 #include "LogRepository.hpp"
+#include "BoundedLogQueue.hpp"
 #include <QObject>
 #include <QVariantList>
 #include <QVariantMap>
@@ -15,64 +16,6 @@
 #include <memory>
 
 namespace desk32::core::log {
-
-/// Bounded Log Queue for RT-safe log transfer
-template <typename T, size_t Capacity = 4096>
-class BoundedLogQueue {
-public:
-    /// Non-blocking push for Real-time Audio Thread
-    /// Returns false immediately if lock cannot be acquired or queue is full.
-    bool try_push(const T& item) {
-        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-        if (!lock.owns_lock()) {
-            m_overflowCount.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        if (m_queue.size() >= Capacity) {
-            m_overflowCount.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        m_queue.push_back(item);
-        return true;
-    }
-
-    /// Normal thread push (GUI / worker threads)
-    bool push(const T& item) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_queue.size() >= Capacity) {
-            m_overflowCount.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        m_queue.push_back(item);
-        return true;
-    }
-
-    /// Drain all pending items into a vector
-    std::vector<T> drain() {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        std::vector<T> result;
-        result.swap(m_queue);
-        return result;
-    }
-
-    [[nodiscard]] size_t size() const {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        return m_queue.size();
-    }
-
-    [[nodiscard]] size_t overflowCount() const noexcept {
-        return m_overflowCount.load(std::memory_order_relaxed);
-    }
-
-    size_t resetOverflowCount() noexcept {
-        return m_overflowCount.exchange(0, std::memory_order_relaxed);
-    }
-
-private:
-    mutable std::mutex m_mutex;
-    std::vector<T> m_queue;
-    std::atomic<size_t> m_overflowCount{0};
-};
 
 /// LogService: Asynchronous, Non-blocking Audio-safe Logging Engine
 /// Fulfills Section 10.5, Decision D-1 (180 days / 300,000 events), and Decision D-3.
