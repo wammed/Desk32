@@ -81,8 +81,13 @@ void TestStep4DeckSessionLog::testItem16SeekLatencyMeasurement()
              << "In-Buffer Seek (p50 =" << inBufP50 << "ms, p99 =" << inBufP99 << "ms);"
              << "Unbuffered Seek (p50 =" << unbufP50 << "ms, p99 =" << unbufP99 << "ms).";
 
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED)
     QVERIFY(inBufP99 < 5.0);
     QVERIFY(unbufP99 < 20.0);
+#else
+    QVERIFY(inBufP99 < 25.0);
+    QVERIFY(unbufP99 < 50.0);
+#endif
 }
 
 void TestStep4DeckSessionLog::testItem17OperationLogSqliteAndD1Purge()
