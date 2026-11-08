@@ -418,7 +418,7 @@ private:
     }
 
     /// Audio Thread: Mutex-free, non-blocking lock-free Telemetry publication (P0-29).
-    /// Inspects up to N DSP nodes (bounded O(N) traversal, zero dynamic allocation, zero locks)
+    /// Inspects up to AudioChain::MAX_NODES (strictly bounded O(N) where N <= 16, zero dynamic allocation, zero locks)
     /// and publishes the snapshot buffer via a single O(1) atomic exchange.
     void publishTelemetry(AudioChain* master, size_t frames) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];

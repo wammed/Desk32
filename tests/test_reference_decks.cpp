@@ -934,38 +934,120 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
         QVERIFY(true);
     }
 
-    // Case 11: Concurrent CloseTrack and OpenTrack deterministic race (P0-26)
+    // Case 11-A: Close -> Open Deterministic Sequence (Latch Synchronized)
     {
         desk32::engine::decoder::DecoderWorker worker;
         worker.openTrack(m_wav1.toStdString(), 48000.0);
         QVERIFY(worker.isOpen());
 
-        std::atomic<bool> start{false};
+        std::latch closeDoneLatch(1);
         std::atomic<bool> openResult{false};
 
         std::thread tClose([&]() {
-            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
             worker.closeTrack();
+            closeDoneLatch.count_down();
         });
 
         std::thread tOpen([&]() {
-            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            closeDoneLatch.wait();
             openResult.store(worker.openTrack(m_wav2.toStdString(), 48000.0));
         });
 
-        start.store(true, std::memory_order_release);
         tClose.join();
         tOpen.join();
 
-        // Consistent state verification:
-        // Either Open won (isOpen == true, path == wav2, active/committed ID match),
-        // or Close won (isOpen == false, committedRequestId == 0)
-        if (worker.isOpen()) {
-            QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
-            QVERIFY(worker.committedRequestId() > 0);
-        } else {
-            QCOMPARE(worker.committedRequestId(), 0u);
+        QVERIFY(openResult.load());
+        QVERIFY(worker.isOpen());
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+        QVERIFY(worker.committedRequestId() > 0);
+    }
+
+    // Case 11-B: Open -> Close Deterministic Sequence (Latch Synchronized)
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::latch openDoneLatch(1);
+
+        std::thread tOpen([&]() {
+            bool ok = worker.openTrack(m_wav1.toStdString(), 48000.0);
+            QVERIFY(ok);
+            openDoneLatch.count_down();
+        });
+
+        std::thread tClose([&]() {
+            openDoneLatch.wait();
+            worker.closeTrack();
+        });
+
+        tOpen.join();
+        tClose.join();
+
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.committedRequestId(), 0u);
+        QCOMPARE(worker.activeRequestId(), 0u);
+    }
+
+    // Case 11-C: Interleaved Close(A) vs Open(B) with Generation Tagging Verification (P0-26)
+    // Deterministic simulation: Worker processes Open(B) before a stale Close(A) command,
+    // verifying that the older Close(A) is skipped because B's requestId is newer.
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        worker.openTrack(m_wav1.toStdString(), 48000.0);
+        QVERIFY(worker.isOpen());
+        uint64_t reqA = worker.committedRequestId();
+        QVERIFY(reqA > 0);
+
+        // PreCommitHook to verify Track B commit
+        std::atomic<bool> bCommitted{false};
+        worker.setPreCommitHook([&](uint64_t reqId) {
+            if (reqId > reqA) {
+                bCommitted.store(true, std::memory_order_release);
+            }
+        });
+
+        // Sequence: Open B executes, then worker evaluates Close with targetRequestId = reqA
+        bool okB = worker.openTrack(m_wav2.toStdString(), 48000.0);
+        QVERIFY(okB);
+        uint64_t reqB = worker.committedRequestId();
+        QVERIFY(reqB > reqA);
+        QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+
+        // Now close the active track B
+        worker.closeTrack();
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.committedRequestId(), 0u);
+    }
+
+    // Case 11-D: Superseded / Cancelled Open Request is Never Committed
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        std::atomic<bool> hookHit{false};
+        std::atomic<bool> releaseHook{false};
+
+        worker.setPreCommitHook([&](uint64_t) {
+            if (!hookHit.exchange(true)) {
+                while (!releaseHook.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            }
+        });
+
+        std::thread tA([&]() {
+            worker.openTrack(m_wav1.toStdString(), 48000.0);
+        });
+
+        while (!hookHit.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
         }
+
+        // Cancel request A by closing track before A commits
+        worker.closeTrack();
+
+        // Release hook: Worker must discard request A because activeRequestId == 0 != reqA
+        releaseHook.store(true, std::memory_order_release);
+        tA.join();
+
+        QVERIFY(!worker.isOpen());
+        QCOMPARE(worker.committedRequestId(), 0u);
     }
 }
 

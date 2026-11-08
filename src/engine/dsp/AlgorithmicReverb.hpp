@@ -56,6 +56,14 @@ public:
             buffer.fill(0.0);
             filterStore = 0.0;
         }
+
+        [[nodiscard]] double energy() const noexcept {
+            double sum = filterStore * filterStore;
+            for (size_t i = 0; i < size; ++i) {
+                sum += buffer[i] * buffer[i];
+            }
+            return sum;
+        }
     };
 
     struct AllPassFilter {
@@ -81,6 +89,14 @@ public:
 
         void reset() {
             buffer.fill(0.0);
+        }
+
+        [[nodiscard]] double energy() const noexcept {
+            double sum = 0.0;
+            for (size_t i = 0; i < size; ++i) {
+                sum += buffer[i] * buffer[i];
+            }
+            return sum;
         }
     };
 
@@ -203,6 +219,30 @@ public:
     [[nodiscard]] double predelayMs() const noexcept { return m_predelayMs; }
     [[nodiscard]] bool isTailPreserving() const noexcept { return m_tailPreserving; }
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
+
+    /// Calculate total energy accumulated in all internal comb/allpass delay buffers (P0-22).
+    /// Used by Audio Thread to verify that reverberation inside the network has completely decayed (< -100 dB).
+    [[nodiscard]] double totalInternalEnergy() const noexcept {
+        double e = 0.0;
+        for (const auto& c : m_combsLeft) e += c.energy();
+        for (const auto& c : m_combsRight) e += c.energy();
+        for (const auto& a : m_allPassLeft) e += a.energy();
+        for (const auto& a : m_allPassRight) e += a.energy();
+        for (size_t i = 0; i < m_predelaySamples; ++i) {
+            double v = m_predelayBuffer[i];
+            e += v * v;
+        }
+        return e;
+    }
+
+    /// Acoustic physical decay lower bound (1.5 * RT60 frames) to reach -80 dB safely (P0-22).
+    [[nodiscard]] size_t theoreticalDecayFrames() const noexcept {
+        double g = std::clamp(m_roomSize, 0.1, 0.98);
+        double tau = 0.03; // ~30ms average comb loop
+        double rt60Sec = -3.0 * tau / std::log10(g);
+        double decaySec = std::clamp(rt60Sec * 1.5, 0.5, 9.0);
+        return static_cast<size_t>(decaySec * m_sampleRate);
+    }
 
     /// Inherit active reverberation tail state from another instance (P0-22).
     /// STRICTLY Non-RT / Control Thread only: Never call on Audio Thread (v1.6).

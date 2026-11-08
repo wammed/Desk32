@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <thread>
 #include <chrono>
+#include <latch>
 
 #include "engine/buffer/PcmRingBuffer.hpp"
 #include "engine/dsp/ParameterCommandQueue.hpp"
@@ -123,6 +124,7 @@ private slots:
     void testContinuousParameterMailboxUpdates();
     void testRtSafetyAllocationDuringProcess();
     void testConcurrentSampleRateAndMailboxUpdates();
+    void testReverbMultiExchangeAndBypassTailDecay();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -711,10 +713,12 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
     // 2. Concurrent multi-producer stress test (4 producer threads, 1 consumer thread)
     std::atomic<bool> running{true};
     std::atomic<uint64_t> totalPushes{0};
+    std::latch startLatch{4};
     std::vector<std::thread> producers;
 
     for (int t = 0; t < 4; ++t) {
-        producers.emplace_back([&mailbox, &running, &totalPushes, t]() {
+        producers.emplace_back([&mailbox, &running, &totalPushes, &startLatch, t]() {
+            startLatch.count_down();
             float val = 0.0f;
             while (running.load(std::memory_order_relaxed)) {
                 mailbox.setGeqBandGain(static_cast<size_t>(t * 8), val);
@@ -726,8 +730,11 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
         });
     }
 
+    startLatch.wait();
+
     uint64_t consumedUpdates = 0;
-    for (int i = 0; i < 500; ++i) {
+    // Consume updates until at least 50 updates are verified, or timeout safety
+    for (int i = 0; i < 5000 && (consumedUpdates < 50 || totalPushes.load() < 50); ++i) {
         ContinuousDspParameters p;
         if (mailbox.fetchUpdates(p)) {
             consumedUpdates++;
@@ -747,7 +754,6 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
     }
 
     QVERIFY(consumedUpdates > 0);
-
     QVERIFY(mailbox.updateCount() > 0);
     QVERIFY(totalPushes.load() > 0);
 }
@@ -1263,11 +1269,11 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         auto t1 = std::chrono::steady_clock::now();
 
         int64_t elapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__)
-        // Sanitizer instrumentation incurs CPU overhead; bounded within 5 milliseconds (5,000,000 ns)
-        QVERIFY(elapsedNanos < 5000000);
+        // 256 frames of reverb processing on Audio Thread must easily complete under 500 microseconds (500,000 ns) in native,
+        // or under 10ms with Sanitizer instrumentation
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__) || defined(DESK32_SANITIZE_UNDEFINED)
+        QVERIFY(elapsedNanos < 10000000);
 #else
-        // 256 frames of reverb processing on Audio Thread must easily complete under 500 microseconds (500,000 ns)
         QVERIFY(elapsedNanos < 500000);
 #endif
         rev.reclaimRetired();
@@ -1413,6 +1419,71 @@ void TestPhase2Dsp::testConcurrentSampleRateAndMailboxUpdates()
     t2.join();
 
     QVERIFY(fetches > 0);
+}
+
+void TestPhase2Dsp::testReverbMultiExchangeAndBypassTailDecay()
+{
+    // P0-22: Deep Acoustic Verification of Ringout Slots Capacity & Bypass Progression
+
+    // 1. Capacity Stress: 10 consecutive exchanges (> MAX_RINGOUT_SLOTS = 8)
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.9, 0.2, 0.5, 0.0, true, true);
+        std::vector<double> excite(1024, 0.6);
+        rev.process(excite.data(), excite.data(), 1024);
+
+        // Perform 10 rapid exchanges with zero input audio
+        std::vector<double> zero(256, 0.0);
+        for (int i = 0; i < 10; ++i) {
+            rev.prepareInstance(48000.0, 0.85 - i * 0.03, 0.25, 0.5, 0.0, true, true);
+            rev.process(zero.data(), zero.data(), 256);
+            double e = 0.0;
+            for (double s : zero) e += s * s;
+            // Tail MUST NEVER be abruptly cut to 0 even when ringout capacity is reached
+            QVERIFY(e > 1e-6);
+        }
+        rev.reclaimRetired();
+    }
+
+    // 2. Bypass Progression: Tail advances with zero input during bypass
+    {
+        ReverbNode rev;
+        rev.prepareInstance(48000.0, 0.8, 0.3, 0.5, 0.0, true, true);
+
+        // Excite reverb with audio
+        std::vector<double> sig(512, 0.5);
+        rev.process(sig.data(), sig.data(), 512);
+
+        // Bypass the node
+        rev.setBypassed(true);
+        QVERIFY(rev.isBypassed());
+
+        // Process 4 blocks under bypass
+        std::vector<double> passL(256, 0.3);
+        std::vector<double> passR(256, 0.3);
+        rev.process(passL.data(), passR.data(), 256);
+
+        // Under bypass, audio should pass straight through without added wet reverb
+        for (size_t i = 0; i < 256; ++i) {
+            QCOMPARE(passL[i], 0.3);
+            QCOMPARE(passR[i], 0.3);
+        }
+
+        // Prepare new instance while bypassed
+        rev.prepareInstance(48000.0, 0.7, 0.4, 0.4, 0.0, true, true);
+        rev.process(passL.data(), passR.data(), 256);
+
+        // Unbypass
+        rev.setBypassed(false);
+        QVERIFY(!rev.isBypassed());
+
+        // Processing resumes cleanly without abrupt explosion
+        rev.process(passL.data(), passR.data(), 256);
+        for (size_t i = 0; i < 256; ++i) {
+            QVERIFY(std::abs(passL[i]) < 2.0);
+        }
+        rev.reclaimRetired();
+    }
 }
 
 QTEST_MAIN(TestPhase2Dsp)

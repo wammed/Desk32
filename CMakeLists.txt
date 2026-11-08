@@ -27,6 +27,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=undefined")
+    add_compile_definitions(DESK32_SANITIZE_UNDEFINED)
+endif()
+
 # Find Qt 6 Packages (Compatible with Ubuntu 24.04 LTS Qt 6.4.2+ and rolling Linux)
 find_package(Qt6 6.4 REQUIRED COMPONENTS
     Core

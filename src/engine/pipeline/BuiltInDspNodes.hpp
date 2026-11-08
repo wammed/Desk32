@@ -459,8 +459,15 @@ public:
         AlgorithmicReverb* reverb{nullptr};
         size_t ageFrames{0};
         size_t silentBlocks{0};
+        double lastMeasuredEnergy{0.0};
     };
-    static constexpr size_t MAX_RINGOUT_SLOTS = 3;
+    static constexpr size_t MAX_RINGOUT_SLOTS = 8;
+
+    enum class RetireReason {
+        None,
+        NaturalDecayComplete,      // Internal buffer energy < 1e-7 AND age >= 1.5*RT60
+        MaxRetentionSafetyCeiling  // Fallback safety timeout (10 seconds @ 48kHz)
+    };
 
     explicit ReverbNode(std::string name = "Reverb")
         : AudioNode(std::move(name), NodeAffiliation::RenderCommon)
@@ -517,37 +524,59 @@ public:
         for (auto& slot : m_ringoutSlots) {
             if (slot.reverb) {
                 retireInstance(slot.reverb);
-                slot.reverb = nullptr;
-                slot.ageFrames = 0;
-                slot.silentBlocks = 0;
+                slot = RingoutSlot{};
             }
         }
+    }
+
+    [[nodiscard]] RetireReason evaluateRetireCondition(const RingoutSlot& slot, double maxBlockTail) const noexcept {
+        if (!slot.reverb) return RetireReason::None;
+
+        // 1. Max Retention Safety Ceiling (10 seconds @ 48kHz = 480,000 frames)
+        if (slot.ageFrames >= 480000) {
+            return RetireReason::MaxRetentionSafetyCeiling;
+        }
+
+        // 2. Natural decay complete: Output amplitude < -80 dB (< 1e-4),
+        // elapsed frames >= 1.5 * RT60 lower bound, AND internal comb/allpass buffer energy < 1e-7 (-100 dB)
+        if (maxBlockTail < 1e-4 &&
+            slot.silentBlocks >= 8 &&
+            slot.ageFrames >= slot.reverb->theoreticalDecayFrames()) {
+            double internalEnergy = slot.reverb->totalInternalEnergy();
+            if (internalEnergy < 1e-7) {
+                return RetireReason::NaturalDecayComplete;
+            }
+        }
+
+        return RetireReason::None;
     }
 
     void process(double* left, double* right, size_t frameCount) override {
         // 1. Check for prepared instance at block boundary (RT-safe atomic exchange)
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
             if (m_active) {
-                // Tail Preservation (P0-22, v1.6): No buffer copying on Audio Thread!
-                // Migrate current active instance to a ringout slot so its reverberation tail
-                // decays naturally until silence (< -80dB), while m_active renders new audio.
+                // Tail Preservation (P0-22): Migrate active instance to ringout slot for natural tail decay
                 bool placed = false;
                 for (auto& slot : m_ringoutSlots) {
                     if (!slot.reverb) {
-                        slot.reverb = m_active;
-                        slot.ageFrames = 0;
-                        slot.silentBlocks = 0;
+                        slot = RingoutSlot{m_active, 0, 0, m_active->totalInternalEnergy()};
                         placed = true;
                         break;
                     }
                 }
                 if (!placed) {
-                    // All ringout slots full: retire oldest slot and shift
-                    retireInstance(m_ringoutSlots[0].reverb);
-                    for (size_t s = 1; s < MAX_RINGOUT_SLOTS; ++s) {
-                        m_ringoutSlots[s - 1] = m_ringoutSlots[s];
+                    // All slots occupied: find the slot with the lowest internal energy (most decayed)
+                    size_t minIdx = 0;
+                    double minEnergy = 1e18;
+                    for (size_t s = 0; s < MAX_RINGOUT_SLOTS; ++s) {
+                        double e = m_ringoutSlots[s].reverb->totalInternalEnergy();
+                        if (e < minEnergy) {
+                            minEnergy = e;
+                            minIdx = s;
+                        }
                     }
-                    m_ringoutSlots[MAX_RINGOUT_SLOTS - 1] = RingoutSlot{m_active, 0, 0};
+                    retireInstance(m_ringoutSlots[minIdx].reverb);
+                    m_ringoutSlots[minIdx] = RingoutSlot{m_active, 0, 0, m_active->totalInternalEnergy()};
                 }
                 m_active = prepared;
             } else {
@@ -555,16 +584,47 @@ public:
             }
         }
 
-        if (isBypassed()) return;
+        // 2. Bypass handling (P0-22): When bypassed, audio passes through clean without wet reverb.
+        // However, we MUST advance ringout slots and active reverb with zero input (0.0)
+        // so that internal delay states decay naturally rather than freezing indefinitely!
+        if (isBypassed()) {
+            for (auto& slot : m_ringoutSlots) {
+                if (!slot.reverb) continue;
+                double maxTail = 0.0;
+                for (size_t i = 0; i < frameCount; ++i) {
+                    double dummyL = 0.0, dummyR = 0.0;
+                    slot.reverb->process(dummyL, dummyR);
+                    double absL = std::abs(dummyL);
+                    double absR = std::abs(dummyR);
+                    if (absL > maxTail) maxTail = absL;
+                    if (absR > maxTail) maxTail = absR;
+                }
+                slot.ageFrames += frameCount;
+                if (maxTail < 1e-4) slot.silentBlocks++; else slot.silentBlocks = 0;
 
-        // 2. Active audio processing with new parameters
+                RetireReason reason = evaluateRetireCondition(slot, maxTail);
+                if (reason != RetireReason::None) {
+                    retireInstance(slot.reverb);
+                    slot = RingoutSlot{};
+                }
+            }
+            if (m_active) {
+                for (size_t i = 0; i < frameCount; ++i) {
+                    double dummyL = 0.0, dummyR = 0.0;
+                    m_active->process(dummyL, dummyR);
+                }
+            }
+            return;
+        }
+
+        // 3. Active audio processing with new parameters
         if (m_active) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_active->process(left[i], right[i]);
             }
         }
 
-        // 3. Ringout slots processing: input 0.0 to render decaying reverberation tails naturally
+        // 4. Ringout slots processing: input 0.0 to render decaying reverberation tails naturally
         for (auto& slot : m_ringoutSlots) {
             if (!slot.reverb) continue;
 
@@ -584,20 +644,16 @@ public:
 
             slot.ageFrames += frameCount;
 
-            // Tail decay check: < -80dB (1e-4) or safety ceiling (e.g. 10 seconds @ 48kHz = 480,000 frames)
             if (maxBlockTail < 1e-4) {
                 slot.silentBlocks++;
             } else {
                 slot.silentBlocks = 0;
             }
 
-            // Retire when tail has decayed into silence (e.g. 8 consecutive silent blocks)
-            // or after maximum ringout duration limit
-            if (slot.silentBlocks >= 8 || slot.ageFrames >= 480000) {
+            RetireReason reason = evaluateRetireCondition(slot, maxBlockTail);
+            if (reason != RetireReason::None) {
                 retireInstance(slot.reverb);
-                slot.reverb = nullptr;
-                slot.ageFrames = 0;
-                slot.silentBlocks = 0;
+                slot = RingoutSlot{};
             }
         }
     }

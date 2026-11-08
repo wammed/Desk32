@@ -16,6 +16,8 @@ enum class ChainPurpose {
 
 class AudioChain {
 public:
+    static constexpr size_t MAX_NODES = 16; ///< Upper bound on DSP nodes per chain for bounded O(N) traversal (P0-29)
+
     explicit AudioChain(std::string name, ChainPurpose purpose)
         : m_name(std::move(name))
         , m_purpose(purpose)
@@ -42,6 +44,7 @@ public:
     /// - NodeAffiliation::RenderMonitorOnly can ONLY be added to ChainPurpose::RenderMonitorChain.
     bool appendNode(std::shared_ptr<AudioNode> node) {
         if (!node) return false;
+        if (m_nodes.size() >= MAX_NODES) return false; // Enforce bounded chain size (P0-29)
 
         if (m_purpose == ChainPurpose::MasteringChain) {
             if (node->affiliation() == NodeAffiliation::ListeningCorrection ||

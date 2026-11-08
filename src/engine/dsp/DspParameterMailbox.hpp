@@ -65,25 +65,27 @@ struct ContinuousDspParameters {
     uint64_t sequenceNumber = 0;
 };
 
-/// Lock-free Triple-Buffered Continuous Parameter Mailbox (P0-24, P0-25, P0-27)
-/// Design & Concurrency Contract (v1.6):
-/// - Lock-Free vs Wait-Free: The atomic operations on m_sharedState are compile-time verified
-///   to be always lock-free. Consumer fetchUpdates() operates strictly in bounded O(1) non-blocking
+/// Mutex-Free / Non-Blocking Lock-Free Triple-Buffered Continuous Parameter Mailbox (P0-24, P0-25, P0-27, P0-29)
+/// Design & Concurrency Contract (v1.7 Unified):
+/// - Mutex-Free & Lock-Free: The atomic operations on m_sharedState are compile-time verified
+///   to be natively lock-free. Consumer fetchUpdates() operates strictly in bounded O(1) non-blocking
 ///   steps without mutexes, conditions, or loops.
 /// - Multi-Producer Safe: Control Threads serialize staging updates using m_producerMutex.
-/// - Single-Consumer Audio Thread: Strictly Mutex-Free, Non-Blocking, Lock-Free Triple Buffer read.
+/// - Single-Consumer Audio Thread: Strictly Mutex-Free, Non-Blocking Lock-Free Triple Buffer retrieval.
 /// - Linearization Point: An atomic exchange on m_sharedState simultaneously transfers ownership
 ///   of the latest written buffer and clears the dirty flag.
 /// - Bounded Execution: Copying the fixed-size ContinuousDspParameters snapshot (~3.8 KB) takes
 ///   sub-microsecond execution time (< 300 ns), well within real-time budget.
-///   of the newly written buffer to the shared slot and receives the previously shared buffer.
-/// - Audio Thread Wait-Free: Audio Thread performs exactly one atomic exchange to acquire the published
-///   buffer and release its previous buffer. No locks, no loops, no heap allocations.
+/// - Audio Thread Non-Blocking: Audio Thread performs exactly one atomic load and at most one atomic exchange
+///   to acquire the published buffer. Zero locks, zero loops, zero heap allocations.
 /// - Strict Ownership Invariant:
 ///   { m_writeIndex, m_consumerIndex, m_sharedState & INDEX_MASK } is strictly a permutation of {0, 1, 2}.
 ///   Producer can NEVER overwrite the buffer currently held or being read by Consumer.
 class DspParameterMailbox {
 public:
+    static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                  "Mailbox shared state must be natively lock-free on this platform");
+
     static constexpr uint32_t DIRTY_FLAG = 0x4;
     static constexpr uint32_t INDEX_MASK = 0x3;
 
@@ -319,7 +321,7 @@ public:
         return true;
     }
 
-    /// Audio Thread: Non-blocking, wait-free retrieval of published parameters.
+    /// Audio Thread: Mutex-free, non-blocking lock-free retrieval of published parameters (P0-29).
     /// Strictly O(1): at most one atomic load and one atomic exchange.
     /// Returns true and populates `outParams` if new parameters were published since last fetch.
     bool fetchUpdates(ContinuousDspParameters& outParams) noexcept {
