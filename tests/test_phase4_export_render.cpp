@@ -14,13 +14,101 @@
 #include "engine/render/RenderChain.hpp"
 #include "engine/render/RenderEngine.hpp"
 #include "engine/decoder/FFmpegAudioDecoder.hpp"
+#include "engine/deck/DeckManager.hpp"
+#include "engine/session/FolderSession.hpp"
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
+#include <sys/stat.h>
+#include <sys/xattr.h>
+#include <QCryptographicHash>
+#include <map>
 
 using namespace desk32::engine::render;
 using namespace desk32::engine::decoder;
+using namespace desk32::engine::deck;
+using namespace desk32::engine::session;
 using namespace desk32::core;
 using namespace desk32::core::log;
+
+struct FileSnapshot {
+    QByteArray sha256;
+    int64_t size = 0;
+    int64_t mtimeSec = 0;
+    int64_t mtimeNsec = 0;
+    mode_t mode = 0;
+    uid_t uid = 0;
+    gid_t gid = 0;
+    std::map<std::string, std::string> xattrs;
+
+    static FileSnapshot capture(const QString& path) {
+        FileSnapshot s;
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) {
+            QCryptographicHash hash(QCryptographicHash::Sha256);
+            if (hash.addData(&f)) {
+                s.sha256 = hash.result();
+            }
+            s.size = f.size();
+            f.close();
+        }
+
+        struct stat st;
+        if (::stat(path.toStdString().c_str(), &st) == 0) {
+            s.mtimeSec = st.st_mtim.tv_sec;
+            s.mtimeNsec = st.st_mtim.tv_nsec;
+            s.mode = st.st_mode;
+            s.uid = st.st_uid;
+            s.gid = st.st_gid;
+        }
+
+        ssize_t listLen = ::listxattr(path.toStdString().c_str(), nullptr, 0);
+        if (listLen > 0) {
+            std::vector<char> listBuf(static_cast<size_t>(listLen));
+            ::listxattr(path.toStdString().c_str(), listBuf.data(), static_cast<size_t>(listLen));
+            const char* ptr = listBuf.data();
+            while (ptr < listBuf.data() + listLen) {
+                ssize_t valLen = ::getxattr(path.toStdString().c_str(), ptr, nullptr, 0);
+                if (valLen > 0) {
+                    std::vector<char> valBuf(static_cast<size_t>(valLen));
+                    ::getxattr(path.toStdString().c_str(), ptr, valBuf.data(), static_cast<size_t>(valLen));
+                    s.xattrs[ptr] = std::string(valBuf.data(), static_cast<size_t>(valLen));
+                } else if (valLen == 0) {
+                    s.xattrs[ptr] = "";
+                }
+                ptr += std::strlen(ptr) + 1;
+            }
+        }
+        return s;
+    }
+
+    bool matches(const FileSnapshot& other, QString& reason) const {
+        if (sha256 != other.sha256) {
+            reason = "SHA-256 hash changed";
+            return false;
+        }
+        if (size != other.size) {
+            reason = QString("Size changed (%1 vs %2)").arg(size).arg(other.size);
+            return false;
+        }
+        if (mtimeSec != other.mtimeSec || mtimeNsec != other.mtimeNsec) {
+            reason = QString("mtime changed (%1.%2 vs %3.%4)").arg(mtimeSec).arg(mtimeNsec).arg(other.mtimeSec).arg(other.mtimeNsec);
+            return false;
+        }
+        if (mode != other.mode) {
+            reason = QString("mode changed (%1 vs %2)").arg(mode).arg(other.mode);
+            return false;
+        }
+        if (uid != other.uid || gid != other.gid) {
+            reason = "uid or gid changed";
+            return false;
+        }
+        if (xattrs != other.xattrs) {
+            reason = "xattr changed";
+            return false;
+        }
+        return true;
+    }
+};
 
 class TestPhase4ExportRender : public QObject {
     Q_OBJECT
@@ -67,6 +155,9 @@ private slots:
 
     // 13. P0-12: Capacity Estimation and 4 GiB Limit (P0-12)
     void testCapacityEstimationAndWavLimitOverflow();
+
+    // 14. SYS-08: Non-destructive Original Sound Source Immutability (Phase C)
+    void testSys08OriginalSoundSourceImmutability();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -696,6 +787,167 @@ void TestPhase4ExportRender::testCapacityEstimationAndWavLimitOverflow()
 
     // Verify 4 GiB limit check constant
     QCOMPARE(RenderEngine::MAX_CLASSIC_WAV_BYTES, 4294967200LL);
+}
+
+void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
+{
+    // SYS-08 Requirement:
+    // Original sound source files must remain strictly immutable across all Desk32 operations:
+    // - Decoding (open, read, seek, close)
+    // - Deck loading & playback
+    // - FolderSession scanning & iteration
+    // - Render (success, failure, cancellation)
+    // Verification includes: SHA-256, size, mtime (nanosecond precision), mode, uid/gid, xattr.
+    // Also verifies that external modification/corruption is detected without automatic repair.
+
+    QString srcDir = m_tempDir->filePath("sys08_source_dir");
+    QDir().mkpath(srcDir);
+    QString trackFile = "original_master_track.wav";
+    QString trackPath = srcDir + "/" + trackFile;
+
+    QVERIFY(createTestWav(trackPath, 48000.0, 48000 * 2, 440.0)); // 2s 24-bit stereo WAV
+
+    // Explicitly set mode and extended attribute
+    ::chmod(trackPath.toStdString().c_str(), 0644);
+    ::setxattr(trackPath.toStdString().c_str(), "user.desk32_audit", "sys08_immutable_tag", 20, 0);
+
+    // 1. Capture baseline snapshot
+    FileSnapshot baseline = FileSnapshot::capture(trackPath);
+    QVERIFY(!baseline.sha256.isEmpty());
+    QVERIFY(baseline.size > 0);
+    QCOMPARE(baseline.mode & 0777, 0644);
+    QVERIFY(baseline.xattrs.count("user.desk32_audit") > 0);
+
+    QString diff;
+
+    // 2. Decoder operations (open, read, seek, close)
+    {
+        FFmpegAudioDecoder decoder;
+        QVERIFY(decoder.open(trackPath.toStdString()));
+        std::vector<double> left(512);
+        std::vector<double> right(512);
+        size_t readCount = decoder.readFrames(left.data(), right.data(), 512);
+        QVERIFY(readCount > 0);
+        QVERIFY(decoder.seek(1000));
+        readCount = decoder.readFrames(left.data(), right.data(), 512);
+        QVERIFY(readCount > 0);
+        decoder.close();
+
+        FileSnapshot afterDecode = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterDecode.matches(baseline, diff), qPrintable("Decoder modified original file: " + diff));
+    }
+
+    // 3. Deck load & playback
+    {
+        DeckManager deckMgr(48000.0);
+        TrackInfo trackInfo{trackPath.toStdString(), 48000.0, 2, 48000 * 2};
+        QVERIFY(deckMgr.deck('A')->loadTrack(trackInfo, 48000.0));
+        deckMgr.deck('A')->play();
+        std::vector<double> block(256 * 2);
+        for (int b = 0; b < 10; ++b) {
+            deckMgr.deck('A')->renderBlock(block.data(), 256);
+        }
+        deckMgr.deck('A')->stop();
+
+        FileSnapshot afterDeck = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterDeck.matches(baseline, diff), qPrintable("Deck modified original file: " + diff));
+    }
+
+    // 4. FolderSession scan & track iteration
+    {
+        FolderSession session;
+        QVERIFY(session.startSession(srcDir.toStdString(), {trackFile.toStdString()}));
+        QCOMPARE(session.totalTracks(), 1u);
+        QVERIFY(session.currentTrack() != nullptr);
+        QCOMPARE(session.currentTrack()->fileName, trackFile.toStdString());
+
+        FileSnapshot afterSession = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterSession.matches(baseline, diff), qPrintable("FolderSession modified original file: " + diff));
+    }
+
+    // 5. Successful Single Track & Album Render
+    {
+        RenderEngine& engine = RenderEngine::instance();
+        RenderSettings settings;
+        settings.bitDepth = RenderBitDepth::Int24;
+
+        // Track Render
+        QString tId = engine.enqueueTrackRender(trackPath, settings);
+        QVERIFY(!tId.isEmpty());
+        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+            QTest::qWait(10);
+        }
+
+        FileSnapshot afterTrackRender = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterTrackRender.matches(baseline, diff), qPrintable("Track render modified original file: " + diff));
+
+        // Album Render
+        QString albId = engine.enqueueAlbumRender(srcDir, settings);
+        QVERIFY(!albId.isEmpty());
+        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+            QTest::qWait(10);
+        }
+
+        FileSnapshot afterAlbumRender = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterAlbumRender.matches(baseline, diff), qPrintable("Album render modified original file: " + diff));
+    }
+
+    // 6. Cancelled Render & Staging Rollback
+    {
+        RenderEngine& engine = RenderEngine::instance();
+        RenderSettings settings;
+
+        QString cId = engine.enqueueTrackRender(trackPath, settings);
+        engine.cancelCurrentRender();
+        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+            QTest::qWait(10);
+        }
+
+        FileSnapshot afterCancel = FileSnapshot::capture(trackPath);
+        QVERIFY2(afterCancel.matches(baseline, diff), qPrintable("Cancelled render modified original file: " + diff));
+
+        // Staging directory must be strictly removed
+        QDir srcQDir(srcDir);
+        QStringList stagings = srcQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+        QCOMPARE(stagings.count(), 0);
+    }
+
+    // 7. External Modification Detection & Strict Non-Repair / Non-Recreation
+    {
+        QString tamperedPath = srcDir + "/tampered_track.wav";
+        QVERIFY(createTestWav(tamperedPath, 48000.0, 48000, 440.0));
+
+        // External corruption
+        {
+            QFile f(tamperedPath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            f.write("CORRUPTED_NON_AUDIO_BYTES_HEADER");
+            f.close();
+        }
+
+        FileSnapshot tamperedBaseline = FileSnapshot::capture(tamperedPath);
+
+        // Attempt decode on corrupted file
+        FFmpegAudioDecoder decoder;
+        bool opened = decoder.open(tamperedPath.toStdString());
+        if (opened) {
+            decoder.close();
+        }
+
+        // Verify Desk32 did not auto-repair, overwrite, or mutate the corrupted file
+        FileSnapshot afterAttempt = FileSnapshot::capture(tamperedPath);
+        QVERIFY2(afterAttempt.matches(tamperedBaseline, diff),
+                 qPrintable("Desk32 modified corrupted file (violating no-auto-repair rule): " + diff));
+
+        // External deletion
+        QVERIFY(QFile::remove(tamperedPath));
+        QVERIFY(!QFile::exists(tamperedPath));
+
+        // Attempt to decode deleted file: must fail cleanly without creating or touching files
+        bool openDeleted = decoder.open(tamperedPath.toStdString());
+        QVERIFY(!openDeleted);
+        QVERIFY(!QFile::exists(tamperedPath));
+    }
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)
