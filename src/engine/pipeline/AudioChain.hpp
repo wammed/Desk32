@@ -71,6 +71,15 @@ public:
         }
     }
 
+    /// Reclaim retired DSP instances across all nodes outside Audio Thread (P0-21)
+    void reclaimRetiredNodes() noexcept {
+        for (auto& node : m_nodes) {
+            if (node) {
+                node->reclaimRetired();
+            }
+        }
+    }
+
     [[nodiscard]] size_t nodeCount() const noexcept { return m_nodes.size(); }
     [[nodiscard]] const std::vector<std::shared_ptr<AudioNode>>& nodes() const noexcept { return m_nodes; }
     [[nodiscard]] AudioNode* node(size_t index) noexcept { return index < m_nodes.size() ? m_nodes[index].get() : nullptr; }

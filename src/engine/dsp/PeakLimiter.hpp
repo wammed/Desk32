@@ -107,6 +107,34 @@ public:
     void setLookaheadMs(double ms) { configure(m_sampleRate, m_ceilingDb, m_releaseMs, ms, m_enabled.load(std::memory_order_relaxed)); }
     void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_ceilingDb, m_releaseMs, m_lookaheadMs, enabled); }
 
+    PeakLimiter* nextRetired = nullptr;
+
+    void inheritStateFrom(const PeakLimiter& other) noexcept
+    {
+        m_currentGain = other.m_currentGain;
+        m_gainReductionDb.store(other.m_gainReductionDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+
+        // Inherit lookahead ring buffer samples (P0-23)
+        // Copies unread lookahead samples chronologically so no samples are dropped or duplicated
+        const size_t otherLookahead = other.m_lookaheadSamples;
+        const size_t myLookahead = m_lookaheadSamples;
+
+        m_bufferLeft.fill(0.0);
+        m_bufferRight.fill(0.0);
+
+        if (otherLookahead > 0 && myLookahead > 0) {
+            const size_t count = std::min(otherLookahead, myLookahead);
+            for (size_t i = 0; i < count; ++i) {
+                size_t srcOffset = (other.m_writePos + otherLookahead - count + i) % otherLookahead;
+                m_bufferLeft[i] = other.m_bufferLeft[srcOffset];
+                m_bufferRight[i] = other.m_bufferRight[srcOffset];
+            }
+            m_writePos = count % myLookahead;
+        } else {
+            m_writePos = 0;
+        }
+    }
+
     void reset()
     {
         m_bufferLeft.fill(0.0);

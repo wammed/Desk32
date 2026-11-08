@@ -211,6 +211,8 @@ public:
     void setTailPreserving(bool tail) noexcept { configure(m_sampleRate, m_roomSize, m_damp, m_wet, m_predelayMs, tail, m_enabled.load(std::memory_order_relaxed)); }
     void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_roomSize, m_damp, m_wet, m_predelayMs, m_tailPreserving, enabled); }
 
+    AlgorithmicReverb* nextRetired = nullptr;
+
     void reset()
     {
         for (auto& c : m_combsLeft) c.reset();

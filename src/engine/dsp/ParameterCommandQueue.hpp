@@ -39,14 +39,17 @@ struct DspCommand {
     float param6 = 0.0f;     // MakeupGainDb (P0-06)
 };
 
-/// Lock-free Single-Producer Single-Consumer Parameter Command Queue (P0-16).
-/// Producer (Control / UI Thread) pushes validated parameter change commands.
+/// Lock-free Single-Producer Single-Consumer Parameter Command Queue (P0-24).
+/// Producer (Control / UI Thread) pushes validated parameter change commands (ordered discrete events).
 /// Consumer (Audio Thread) drains commands at audio block boundaries.
 /// Strictly RT-Safe: zero dynamic allocation, zero locks, non-blocking.
-/// Capacity & Coalescing Guarantees:
-/// - Producer-side coalescing merges rapid redundant continuous updates (e.g., slider drags)
-///   when the queue approaches capacity, preventing unneeded queue overflow without losing the latest state.
-/// - Overflow tracking records any dropped commands and signals callers for UI notification.
+/// SPSC Ownership Guarantees (Section 7, P0-24):
+/// - SPSC single-ownership strictly maintained: Producer never searches or mutates elements
+///   already enqueued for Consumer consumption (in-place coalescing is completely removed).
+/// - Discrete, ordered events (DSP Enable/Disable, Preset application, Bypass, Mode switches)
+///   preserve strict FIFO sequential ordering.
+/// - Continuous parameters (sliders) are dispatched via DspParameterMailbox (P0-25).
+/// - Overflow tracking records any queue full drops and signals callers for UI notification.
 class ParameterCommandQueue {
 public:
     static constexpr size_t CAPACITY = 512;
@@ -62,40 +65,16 @@ public:
     ParameterCommandQueue(const ParameterCommandQueue&) = delete;
     ParameterCommandQueue& operator=(const ParameterCommandQueue&) = delete;
 
-    /// Checks if a command type represents continuous idempotent state that can safely be coalesced
-    static constexpr bool isCoalesceable(DspCommandType type) noexcept {
-        return type == DspCommandType::SetGeqBandGain ||
-               type == DspCommandType::SetPeqBand ||
-               type == DspCommandType::SetFilterParams ||
-               type == DspCommandType::SetNodeBypass;
-    }
-
     /// Control Thread: Push command into queue.
-    /// If full, attempts to coalesce with existing unread matching command.
-    /// If full and cannot coalesce, records overflow and returns false.
+    /// Strictly appends at the write tail. If full, increments overflow counter and returns false.
     bool push(const DspCommand& cmd) noexcept {
         size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
         size_t readIdx = m_readIndex.load(std::memory_order_acquire);
 
-        // Standard case: queue has room
         if (writeIdx - readIdx < CAPACITY) {
             m_buffer[writeIdx & MASK] = cmd;
             m_writeIndex.store(writeIdx + 1, std::memory_order_release);
             return true;
-        }
-
-        // Queue full: Attempt coalescing into newest unread matching command
-        if (isCoalesceable(cmd.type)) {
-            for (size_t i = writeIdx; i > readIdx; --i) {
-                size_t idx = (i - 1) & MASK;
-                if (m_buffer[idx].type == cmd.type &&
-                    m_buffer[idx].index == cmd.index &&
-                    m_buffer[idx].subIndex == cmd.subIndex) {
-                    m_buffer[idx] = cmd;
-                    m_coalesceCount.fetch_add(1, std::memory_order_relaxed);
-                    return true;
-                }
-            }
         }
 
         m_overflowCount.fetch_add(1, std::memory_order_relaxed);
@@ -128,13 +107,8 @@ public:
         return m_overflowCount.load(std::memory_order_relaxed);
     }
 
-    [[nodiscard]] uint64_t coalesceCount() const noexcept {
-        return m_coalesceCount.load(std::memory_order_relaxed);
-    }
-
     void resetStatistics() noexcept {
         m_overflowCount.store(0, std::memory_order_relaxed);
-        m_coalesceCount.store(0, std::memory_order_relaxed);
     }
 
 private:
@@ -143,7 +117,6 @@ private:
     alignas(64) std::atomic<size_t> m_readIndex{0};
 
     alignas(64) std::atomic<uint64_t> m_overflowCount{0};
-    alignas(64) std::atomic<uint64_t> m_coalesceCount{0};
 };
 
 } // namespace desk32::engine::dsp

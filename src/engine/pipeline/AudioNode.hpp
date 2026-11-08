@@ -40,6 +40,9 @@ public:
     [[nodiscard]] virtual int64_t latencyFrames() const noexcept { return 0; }
     virtual void reset() {}
 
+    /// Non-RT reclamation of retired DSP instances (P0-21)
+    virtual void reclaimRetired() noexcept {}
+
     /// Real-time safe deep clone of node state for graph reconstruction (P0-08)
     [[nodiscard]] virtual std::shared_ptr<AudioNode> clone() const = 0;
 

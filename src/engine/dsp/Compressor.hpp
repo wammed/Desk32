@@ -105,6 +105,14 @@ public:
     void setKneeDb(double db) { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, m_releaseMs, m_makeupGainDb, db, m_enabled.load(std::memory_order_relaxed)); }
     void setEnabled(bool enabled) noexcept { configure(m_sampleRate, m_thresholdDb, m_ratio, m_attackMs, m_releaseMs, m_makeupGainDb, m_kneeDb, enabled); }
 
+    Compressor* nextRetired = nullptr;
+
+    void inheritStateFrom(const Compressor& other) noexcept
+    {
+        m_envelope = other.m_envelope;
+        m_gainReductionDb.store(other.m_gainReductionDb.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+
     void reset()
     {
         m_envelope = 0.0;

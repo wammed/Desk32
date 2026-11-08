@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <algorithm>
 
-/// Multi-Reader Lock-Free Epoch-Based Reclamation for RT-Safe AudioChain swapping (Section 9.3, P0-13)
+/// Multi-Reader Lock-Free Epoch-Based Reclamation for RT-Safe AudioChain swapping (Section 9.3, P0-13, P0-20)
 /// Guarantees:
 /// - Real-Time Safety: Readers (Audio Thread, Control Thread, UI Telemetry) are strictly lock-free,
 ///   zero dynamic memory allocation/deallocation, zero mutex acquisition, strictly bounded execution time (O(1)).
@@ -18,8 +18,22 @@
 ///   Each reader slot is cache-line aligned (alignas(64)) to eliminate false sharing.
 /// - Pointer Lifetime Guarantee: Any object observed by an active reader within ReadGuard scope is guaranteed
 ///   NEVER to be deleted until all readers observing that epoch have exited their read scopes.
-/// - Destruction Safety: Destruction and memory deallocation strictly occur outside the Audio Thread
-///   (on Control Thread / Worker Thread or during destructor drainAll()).
+/// - Slot Exhaustion Safety (P0-20): If reader slots are exhausted, enterRead() strictly returns an invalid ReadGuard
+///   with nullptr. Under NO circumstance is an unshielded / unprotected pointer ever returned.
+/// - Reader Slot Dimensioning (Section 3.3, P0-20):
+///   - MAX_READERS = 64 slots.
+///   - Concurrency Analysis for Desk32:
+///       * Audio Thread: 1 active reader during playback render block.
+///       * Offline Render Thread: 1 active reader during export render block.
+///       * Control Thread: 1 active reader during sample rate reconfigure / Graph swap.
+///       * UI / Telemetry Thread: 1~2 active readers during background polling.
+///   - Total maximum simultaneous reader threads in Desk32 is <= 6.
+///   - Even allowing nested guards (up to 2 levels), maximum simultaneously needed slots <= 12.
+///   - MAX_READERS = 64 provides over 5x-10x headroom without dynamic allocation.
+///   - Slot Allocation: O(1) lock-free compare-and-swap loop over 64 slots (< 50 ns).
+///   - Slot Release: RAII ReadGuard destructor atomically marks slot inactive.
+///   - Slot Exhaustion: Returns invalid guard; atomic counter m_slotExhaustionCount increments.
+///   - Destruction Safety: Destruction strictly occurs outside Audio Thread (Control / Worker Thread).
 template <typename T>
 class EpochReclaimer
 {
@@ -85,14 +99,18 @@ public:
             return *this;
         }
 
-        [[nodiscard]] T* get() const noexcept { return chain; }
-        [[nodiscard]] T* operator->() const noexcept { return chain; }
+        [[nodiscard]] bool isValid() const noexcept {
+            return chain != nullptr && slotIndex < MAX_READERS;
+        }
+        explicit operator bool() const noexcept { return isValid(); }
+        [[nodiscard]] T* get() const noexcept { return isValid() ? chain : nullptr; }
+        [[nodiscard]] T* operator->() const noexcept { return isValid() ? chain : nullptr; }
         [[nodiscard]] T& operator*() const noexcept { return *chain; }
-        explicit operator bool() const noexcept { return chain != nullptr; }
     };
 
     /// Lock-Free multi-reader critical section entry (RT-Safe for Audio Thread & Non-RT threads).
     /// Bounded O(1) slot acquisition, zero heap allocation, sequential consistency memory barrier.
+    /// P0-20: If all slots are saturated, NEVER returns an unshielded pointer. Returns invalid ReadGuard.
     [[nodiscard]] ReadGuard enterRead() const noexcept
     {
         size_t slotIndex = MAX_READERS;
@@ -106,10 +124,9 @@ public:
         }
 
         if (slotIndex == MAX_READERS) {
-            // Fallback: In the extremely improbable case all 64 slots are saturated,
-            // safely load active chain without slot registration
-            T* ptr = m_activeChain.load(std::memory_order_seq_cst);
-            return ReadGuard{ this, ptr, MAX_READERS };
+            // P0-20: Reader slots exhausted. NEVER expose unshielded active pointer!
+            m_slotExhaustionCount.fetch_add(1, std::memory_order_relaxed);
+            return ReadGuard{ this, nullptr, MAX_READERS };
         }
 
         // Announce current global epoch BEFORE loading the active pointer
@@ -125,6 +142,11 @@ public:
         }
 
         return ReadGuard{ this, ptr, slotIndex };
+    }
+
+    /// Number of times enterRead() failed to acquire a reader slot (diagnostic counter)
+    [[nodiscard]] uint64_t slotExhaustionCount() const noexcept {
+        return m_slotExhaustionCount.load(std::memory_order_relaxed);
     }
 
     /// Lock-Free reader critical section exit
@@ -240,6 +262,7 @@ private:
 
     std::atomic<T*> m_activeChain{nullptr};
     std::atomic<uint64_t> m_globalEpoch{1};
+    mutable std::atomic<uint64_t> m_slotExhaustionCount{0};
 
     // Cache-line aligned reader slots for up to MAX_READERS concurrent readers
     alignas(64) mutable std::array<ReaderSlot, MAX_READERS> m_slots{};

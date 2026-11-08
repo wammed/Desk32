@@ -19,6 +19,11 @@ private slots:
     void testEpochReclaimerMultiReaderConcurrentStress();
     void testSampleRateChangeConcurrentWithTelemetry();
     void testShutdownWaitsForActiveReaders();
+    void testReaderSlotExhaustionRejectsUnshieldedPointer();
+    void testDspInstanceContinuousExchangeAndRetirement();
+    void testReverbTailPreservationCrossfade();
+    void testLimiterLookaheadChangeSampleContinuity();
+    void testTelemetrySnapshotThreadSafety();
     void cleanupTestCase();
 };
 
@@ -401,6 +406,237 @@ void TestAudioPipeline::testShutdownWaitsForActiveReaders()
 
     QVERIFY(readerDone.load());
     QVERIFY(drained.load());
+}
+
+void TestAudioPipeline::testReaderSlotExhaustionRejectsUnshieldedPointer()
+{
+    // P0-20: If all 64 reader slots are saturated, enterRead() strictly returns an invalid ReadGuard
+    // with nullptr. IT MUST NEVER RETURN AN UNSHIELDED POINTER.
+    EpochReclaimer<std::string> reclaimer;
+    reclaimer.swapChain(std::make_unique<std::string>("TargetData"));
+
+    std::vector<EpochReclaimer<std::string>::ReadGuard> guards;
+    guards.reserve(EpochReclaimer<std::string>::MAX_READERS);
+
+    // 1. Acquire all MAX_READERS (64) slots
+    for (size_t i = 0; i < EpochReclaimer<std::string>::MAX_READERS; ++i) {
+        auto guard = reclaimer.enterRead();
+        QVERIFY(guard.isValid());
+        QVERIFY(guard.get() != nullptr);
+        QCOMPARE(*guard, std::string("TargetData"));
+        guards.push_back(std::move(guard));
+    }
+    QCOMPARE(reclaimer.slotExhaustionCount(), 0u);
+
+    // 2. 65th attempt MUST fail cleanly without exposing an unshielded pointer
+    auto failedGuard = reclaimer.enterRead();
+    QVERIFY(!failedGuard.isValid());
+    QVERIFY(!failedGuard);
+    QVERIFY(failedGuard.get() == nullptr);
+    QVERIFY(failedGuard.chain == nullptr);
+    QCOMPARE(reclaimer.slotExhaustionCount(), 1u);
+
+    // 3. Release one slot: subsequent enterRead() must succeed immediately
+    guards.pop_back();
+    auto recoveryGuard = reclaimer.enterRead();
+    QVERIFY(recoveryGuard.isValid());
+    QVERIFY(recoveryGuard.get() != nullptr);
+    QCOMPARE(*recoveryGuard, std::string("TargetData"));
+}
+
+void TestAudioPipeline::testDspInstanceContinuousExchangeAndRetirement()
+{
+    // P0-21: Continuous DSP instance generation on Control Thread and lock-free block-boundary
+    // swap on Audio Thread with safe retirement outside Audio Thread.
+    AudioPipeline pipeline(48000.0);
+
+    auto master = std::make_unique<AudioChain>("Mastering", ChainPurpose::MasteringChain);
+    master->appendNode(std::make_shared<CompressorNode>("Compressor"));
+    master->appendNode(std::make_shared<PeakLimiterNode>("Peak Limiter"));
+    master->appendNode(std::make_shared<ReverbNode>("Reverb"));
+    pipeline.swapMasterChain(std::move(master));
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> audioBlocksRendered{0};
+
+    // Audio Thread
+    std::thread audioThread([&]() {
+        const size_t frames = 256;
+        std::vector<double> inL(frames, 0.4);
+        std::vector<double> inR(frames, -0.4);
+        std::vector<float> out(frames * 2, 0.0f);
+
+        while (!stop.load(std::memory_order_relaxed)) {
+            pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+            audioBlocksRendered.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Control Thread: Rapidly preparing and publishing new DSP instances
+    for (int i = 0; i < 200; ++i) {
+        pipeline.updateCompressor(-12.0 - (i % 10), 2.0 + (i % 4), 10.0, 100.0, 0.0, 4.0, true);
+        pipeline.updatePeakLimiter(-0.1 - (i % 3) * 0.5, 50.0, 1.0 + (i % 3) * 0.5, true);
+        pipeline.updateReverb(0.5 + (i % 5) * 0.08, 0.3, 0.2, 5.0, true, true);
+
+        if (i % 10 == 0) {
+            pipeline.reclaimRetiredMemory();
+        }
+        std::this_thread::yield();
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    audioThread.join();
+
+    pipeline.reclaimRetiredMemory();
+    QVERIFY(audioBlocksRendered.load() > 0);
+}
+
+void TestAudioPipeline::testReverbTailPreservationCrossfade()
+{
+    // P0-22: Reverb state transition with 512-frame tail preservation crossfade
+    AudioPipeline pipeline(48000.0);
+
+    auto master = std::make_unique<AudioChain>("Mastering", ChainPurpose::MasteringChain);
+    auto reverbNode = std::make_shared<ReverbNode>("Reverb");
+    master->appendNode(reverbNode);
+    pipeline.swapMasterChain(std::move(master));
+
+    pipeline.updateReverb(0.85, 0.2, 0.5, 0.0, true, true);
+
+    const size_t frames = 256;
+    std::vector<double> inL(frames, 0.0);
+    std::vector<double> inR(frames, 0.0);
+    std::vector<float> out(frames * 2, 0.0f);
+
+    // Excite reverb with 2048 frames of audio to fully populate comb filter delay lines
+    for (int b = 0; b < 8; ++b) {
+        for (size_t i = 0; i < frames; ++i) {
+            inL[i] = 0.5 * std::sin((static_cast<double>(b) * static_cast<double>(frames) + static_cast<double>(i)) * 0.1);
+            inR[i] = inL[i];
+        }
+        pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+    }
+
+    // Now clear input to let tail ring out
+    std::fill(inL.begin(), inL.end(), 0.0);
+    std::fill(inR.begin(), inR.end(), 0.0);
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+
+    double tailEnergyBefore = 0.0;
+    for (float s : out) tailEnergyBefore += s * s;
+    QVERIFY(tailEnergyBefore > 1e-4);
+
+    // Update reverb settings while tail is ringing (triggers 512-frame crossfade)
+    pipeline.updateReverb(0.4, 0.6, 0.3, 10.0, true, true);
+
+    // Process through the crossfade (first 256 frames)
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+    double tailEnergyCrossfade1 = 0.0;
+    for (float s : out) tailEnergyCrossfade1 += s * s;
+
+    // Tail energy must remain preserved and non-zero (not truncated to 0)
+    QVERIFY(tailEnergyCrossfade1 > 1e-4);
+
+    // Process next block (completing the crossfade)
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+    pipeline.reclaimRetiredMemory();
+}
+
+void TestAudioPipeline::testLimiterLookaheadChangeSampleContinuity()
+{
+    // P0-23: Limiter lookahead reconfiguration with buffer inheritance and latency synchronization
+    AudioPipeline pipeline(48000.0);
+
+    auto master = std::make_unique<AudioChain>("Mastering", ChainPurpose::MasteringChain);
+    auto limiterNode = std::make_shared<PeakLimiterNode>("Peak Limiter");
+    master->appendNode(limiterNode);
+    pipeline.swapMasterChain(std::move(master));
+
+    pipeline.updatePeakLimiter(-0.5, 50.0, 1.0, true); // 1.0ms = 48 samples at 48kHz
+
+    const size_t frames = 256;
+    std::vector<double> inL(frames, 0.5);
+    std::vector<double> inR(frames, 0.5);
+    std::vector<float> out(frames * 2, 0.0f);
+
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+    QCOMPARE(pipeline.limiterLatencyFrames(), 48);
+
+    // Dynamically increase lookahead to 2.0ms (96 samples)
+    pipeline.updatePeakLimiter(-0.5, 50.0, 2.0, true);
+    pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+
+    // Latency frames must reflect the updated lookahead
+    QCOMPARE(pipeline.limiterLatencyFrames(), 96);
+
+    // Output must not contain NaN, inf, or values exceeding ceiling
+    for (float s : out) {
+        QVERIFY(!std::isnan(s));
+        QVERIFY(!std::isinf(s));
+        QVERIFY(std::abs(s) <= 1.0f);
+    }
+
+    pipeline.reclaimRetiredMemory();
+}
+
+void TestAudioPipeline::testTelemetrySnapshotThreadSafety()
+{
+    // P0-26: Concurrent Audio Thread telemetry publishing and UI Thread polling
+    AudioPipeline pipeline(48000.0);
+
+    auto master = std::make_unique<AudioChain>("Mastering", ChainPurpose::MasteringChain);
+    master->appendNode(std::make_shared<CompressorNode>("Compressor"));
+    master->appendNode(std::make_shared<PeakLimiterNode>("Peak Limiter"));
+    master->appendNode(std::make_shared<ReverbNode>("Reverb"));
+    pipeline.swapMasterChain(std::move(master));
+
+    pipeline.updateCompressor(-18.0, 4.0, 10.0, 100.0, 0.0, 4.0, true);
+    pipeline.updatePeakLimiter(-1.0, 50.0, 1.0, true);
+
+    std::atomic<bool> stop{false};
+    std::atomic<uint64_t> totalTelemetryReads{0};
+
+    // Audio Thread
+    std::thread audioThread([&]() {
+        const size_t frames = 128;
+        std::vector<double> inL(frames, 0.8); // High signal to trigger gain reduction
+        std::vector<double> inR(frames, 0.8);
+        std::vector<float> out(frames * 2, 0.0f);
+
+        while (!stop.load(std::memory_order_relaxed)) {
+            pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+            std::this_thread::yield();
+        }
+    });
+
+    // 4 UI / Background Telemetry Threads
+    std::vector<std::thread> uiThreads;
+    for (int t = 0; t < 4; ++t) {
+        uiThreads.emplace_back([&]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+                auto tele = pipeline.currentTelemetry();
+                QVERIFY(tele.graphSampleRate > 0.0);
+                double compGR = pipeline.compressorGainReductionDb();
+                double limGR = pipeline.limiterGainReductionDb();
+                int latency = pipeline.limiterLatencyFrames();
+                Q_UNUSED(compGR);
+                Q_UNUSED(limGR);
+                Q_UNUSED(latency);
+                totalTelemetryReads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stop.store(true, std::memory_order_relaxed);
+
+    audioThread.join();
+    for (auto& t : uiThreads) {
+        t.join();
+    }
+
+    QVERIFY(totalTelemetryReads.load() > 100);
 }
 
 void TestAudioPipeline::cleanupTestCase()

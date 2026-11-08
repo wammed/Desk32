@@ -4,6 +4,7 @@
 #include "BuiltInDspNodes.hpp"
 #include "engine/dsp/Resampler.hpp"
 #include "engine/dsp/ParameterCommandQueue.hpp"
+#include "engine/dsp/DspParameterMailbox.hpp"
 #include "engine/format/FormatConverter.hpp"
 #include "engine/memory/EpochReclaimer.hpp"
 #include "engine/routing/OutputPathRouter.hpp"
@@ -18,11 +19,29 @@ using routing::OutputPathMode;
 using format::SampleFormat;
 using format::FormatConverter;
 
+/// DSP Telemetry Snapshot published lock-free from Audio Thread to UI Thread (P0-26)
+struct DspTelemetry {
+    double compressorGainReductionDb = 0.0;
+    double limiterGainReductionDb = 0.0;
+    int64_t limiterLatencyFrames = 0;
+    double reverbWetLevel = 0.0;
+    bool compressorEnabled = false;
+    bool limiterEnabled = false;
+    bool reverbEnabled = false;
+    double graphSampleRate = 48000.0;
+    uint64_t processedFrameCount = 0;
+};
+
 class AudioPipeline {
 public:
     explicit AudioPipeline(double graphSampleRate = 48000.0)
         : m_graphSampleRate(graphSampleRate)
     {
+        m_cachedTelemetry.graphSampleRate = graphSampleRate;
+        for (auto& buf : m_telemetryBuffers) {
+            buf.graphSampleRate = graphSampleRate;
+        }
+
         // Initialize default empty chains
         auto masterChain = std::make_unique<AudioChain>("Default Master Chain", ChainPurpose::MasteringChain);
         masterChain->configure(m_graphSampleRate);
@@ -81,40 +100,38 @@ public:
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume.load(); }
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
-    [[nodiscard]] double compressorGainReductionDb() const noexcept {
-        auto guard = m_masterReclaimer.enterRead();
-        if (!guard || guard->isBypassed()) return 0.0;
-        for (size_t i = 0; i < guard->nodeCount(); ++i) {
-            if (auto* comp = dynamic_cast<CompressorNode*>(guard->node(i))) {
-                return comp->isBypassed() ? 0.0 : comp->dsp().gainReductionDb();
-            }
+    /// Lock-free, wait-free Telemetry Snapshot retrieval (P0-26)
+    /// UI Thread strictly reads published snapshots; NEVER accesses active DSP instances directly.
+    [[nodiscard]] DspTelemetry currentTelemetry() const noexcept {
+        std::lock_guard<std::mutex> lock(m_telemetryReadMutex);
+        uint32_t cur = m_sharedTelemetryState.load(std::memory_order_acquire);
+        if (cur & TELEMETRY_NEW_DATA) {
+            uint32_t toExchange = static_cast<uint32_t>(m_readerTelemetryIndex & 3);
+            uint32_t oldShared = m_sharedTelemetryState.exchange(toExchange, std::memory_order_acq_rel);
+            m_readerTelemetryIndex = static_cast<int>(oldShared & 3);
+            m_cachedTelemetry = m_telemetryBuffers[static_cast<size_t>(m_readerTelemetryIndex)];
         }
-        return 0.0;
+        return m_cachedTelemetry;
+    }
+
+    [[nodiscard]] double compressorGainReductionDb() const noexcept {
+        return currentTelemetry().compressorGainReductionDb;
     }
 
     [[nodiscard]] double limiterGainReductionDb() const noexcept {
-        auto guard = m_masterReclaimer.enterRead();
-        if (!guard || guard->isBypassed()) return 0.0;
-        for (size_t i = 0; i < guard->nodeCount(); ++i) {
-            if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
-                return lim->isBypassed() ? 0.0 : lim->dsp().gainReductionDb();
-            }
-        }
-        return 0.0;
+        return currentTelemetry().limiterGainReductionDb;
     }
 
     [[nodiscard]] int limiterLatencyFrames() const noexcept {
-        auto guard = m_masterReclaimer.enterRead();
-        if (!guard || guard->isBypassed()) return 0;
-        for (size_t i = 0; i < guard->nodeCount(); ++i) {
-            if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
-                return lim->isBypassed() ? 0 : static_cast<int>(lim->latencyFrames());
-            }
-        }
-        return 0;
+        return static_cast<int>(currentTelemetry().limiterLatencyFrames);
+    }
+
+    [[nodiscard]] uint64_t readerExhaustionDrops() const noexcept {
+        return m_readerExhaustionDrops.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] dsp::ParameterCommandQueue& paramQueue() noexcept { return m_paramQueue; }
+    [[nodiscard]] dsp::DspParameterMailbox& paramMailbox() noexcept { return m_paramMailbox; }
 
     /// Hot-swap Mastering Chain (Control Thread execution).
     /// Safe, lock-free swap verified by EpochReclaimer.
@@ -131,15 +148,16 @@ public:
         m_listeningReclaimer.swapChain(std::move(newChain));
     }
 
-    /// Control Thread DSP configuration methods (P0-14):
-    /// Calculations, exponentiation, buffer sizing, and state publication occur strictly on Control Thread.
+    /// Control Thread DSP configuration methods (P0-14, P0-21):
+    /// Calculations, exponentiation, buffer sizing, and instance construction occur strictly on Control Thread.
+    /// Audio Thread switches to prepared instances at block boundaries without mutating running DSPs.
     void updateCompressor(double thresholdDb, double ratio, double attackMs, double releaseMs,
                           double makeupDb, double kneeDb, bool enabled) {
         auto guard = m_masterReclaimer.enterRead();
         if (guard) {
             for (size_t i = 0; i < guard->nodeCount(); ++i) {
                 if (auto* comp = dynamic_cast<CompressorNode*>(guard->node(i))) {
-                    comp->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                    comp->prepareInstance(m_graphSampleRate.load(std::memory_order_relaxed),
                                           thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
                     break;
                 }
@@ -152,7 +170,7 @@ public:
         if (guard) {
             for (size_t i = 0; i < guard->nodeCount(); ++i) {
                 if (auto* lim = dynamic_cast<PeakLimiterNode*>(guard->node(i))) {
-                    lim->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                    lim->prepareInstance(m_graphSampleRate.load(std::memory_order_relaxed),
                                          ceilingDb, releaseMs, lookaheadMs, enabled);
                     break;
                 }
@@ -166,7 +184,7 @@ public:
         if (guard) {
             for (size_t i = 0; i < guard->nodeCount(); ++i) {
                 if (auto* rev = dynamic_cast<ReverbNode*>(guard->node(i))) {
-                    rev->dsp().configure(m_graphSampleRate.load(std::memory_order_relaxed),
+                    rev->prepareInstance(m_graphSampleRate.load(std::memory_order_relaxed),
                                          roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
                     break;
                 }
@@ -178,6 +196,14 @@ public:
     void reclaimRetiredMemory() {
         m_masterReclaimer.reclaimRetired();
         m_listeningReclaimer.reclaimRetired();
+        {
+            auto guard = m_masterReclaimer.enterRead();
+            if (guard) guard->reclaimRetiredNodes();
+        }
+        {
+            auto guard = m_listeningReclaimer.enterRead();
+            if (guard) guard->reclaimRetiredNodes();
+        }
     }
 
     /// Real-time audio rendering call (Audio Thread execution).
@@ -194,8 +220,20 @@ public:
         auto masterGuard = m_masterReclaimer.enterRead();
         auto listeningGuard = m_listeningReclaimer.enterRead();
 
-        // 0. Drain pending DSP parameter commands at the block boundary on Audio Thread within active epoch (P0-06)
+        if (!masterGuard) {
+            // P0-20: Reader slot exhaustion. NEVER access unshielded pointers!
+            m_readerExhaustionDrops.fetch_add(1, std::memory_order_relaxed);
+            std::fill_n(left, frameCount, 0.0);
+            std::fill_n(right, frameCount, 0.0);
+            FormatConverter::convertPlanarFloat64ToPcm(
+                left, right, frameCount, outPcmBuffer, targetFormat, false
+            );
+            return;
+        }
+
+        // 0. Drain pending discrete parameter commands and continuous mailbox updates at block boundary
         drainParameterCommands(masterGuard.chain, listeningGuard.chain);
+        drainParameterMailbox(masterGuard.chain, listeningGuard.chain);
 
         // 2. Upstream Master / DSP Chain (before Logical Render Tap)
         if (masterGuard.chain) {
@@ -231,6 +269,9 @@ public:
         FormatConverter::convertPlanarFloat64ToPcm(
             left, right, frameCount, outPcmBuffer, targetFormat, applyDither
         );
+
+        // 5. Publish Telemetry Snapshot to UI Thread (P0-26)
+        publishTelemetry(masterGuard.chain, frameCount);
     }
 
 private:
@@ -407,12 +448,125 @@ private:
         }
     }
 
+    void drainParameterMailbox(AudioChain* master, [[maybe_unused]] AudioChain* listening) noexcept {
+        dsp::ContinuousDspParameters params;
+        if (!m_paramMailbox.fetchUpdates(params)) {
+            return;
+        }
+
+        if (master) {
+            // 1. Graphic EQ band gains
+            if (params.geqModifiedMask != 0) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
+                        for (size_t b = 0; b < 32; ++b) {
+                            if (params.geqModifiedMask & (1u << b)) {
+                                geqNode->dsp().setBandGain(b, static_cast<double>(params.geqGains[b]));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 2. Parametric EQ band configs
+            if (params.peqLeftModifiedMask != 0 || params.peqRightModifiedMask != 0) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
+                        for (size_t b = 0; b < 24; ++b) {
+                            if (params.peqLeftModifiedMask & (1u << b)) {
+                                const auto& src = params.peqLeftBands[b];
+                                ParametricEQ::BandConfig cfg;
+                                cfg.frequency = static_cast<double>(src.frequency);
+                                cfg.gainDb = static_cast<double>(src.gainDb);
+                                cfg.Q = static_cast<double>(src.Q);
+                                cfg.type = static_cast<BiquadFilterType>(src.type);
+                                cfg.enabled = (src.enabled != 0);
+                                peqNode->dsp().setLeftBand(b, cfg);
+                            }
+                            if (params.peqRightModifiedMask & (1u << b)) {
+                                const auto& src = params.peqRightBands[b];
+                                ParametricEQ::BandConfig cfg;
+                                cfg.frequency = static_cast<double>(src.frequency);
+                                cfg.gainDb = static_cast<double>(src.gainDb);
+                                cfg.Q = static_cast<double>(src.Q);
+                                cfg.type = static_cast<BiquadFilterType>(src.type);
+                                cfg.enabled = (src.enabled != 0);
+                                peqNode->dsp().setRightBand(b, cfg);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 3. Filter parameters
+            if (params.filterModified) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
+                        filterNode->dsp().setHpfFrequency(static_cast<double>(params.hpfFrequency));
+                        filterNode->dsp().setLpfFrequency(static_cast<double>(params.lpfFrequency));
+                        filterNode->dsp().setHpfSlope(static_cast<HighLowPassFilter::FilterSlope>(params.hpfSlope));
+                        filterNode->dsp().setLpfSlope(static_cast<HighLowPassFilter::FilterSlope>(params.lpfSlope));
+                        filterNode->dsp().setHpfEnabled(params.hpfEnabled != 0);
+                        filterNode->dsp().setLpfEnabled(params.lpfEnabled != 0);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    void publishTelemetry(AudioChain* master, size_t frames) noexcept {
+        DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
+        t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
+        t.processedFrameCount += frames;
+
+        if (master && !master->isBypassed()) {
+            for (size_t i = 0; i < master->nodeCount(); ++i) {
+                auto* node = master->node(i);
+                if (!node) continue;
+                if (auto* comp = dynamic_cast<CompressorNode*>(node)) {
+                    t.compressorGainReductionDb = comp->isBypassed() ? 0.0 : comp->gainReductionDb();
+                    t.compressorEnabled = !comp->isBypassed() && comp->dsp().isEnabled();
+                } else if (auto* lim = dynamic_cast<PeakLimiterNode*>(node)) {
+                    t.limiterGainReductionDb = lim->isBypassed() ? 0.0 : lim->gainReductionDb();
+                    t.limiterLatencyFrames = lim->isBypassed() ? 0 : lim->latencyFrames();
+                    t.limiterEnabled = !lim->isBypassed() && lim->dsp().isEnabled();
+                } else if (auto* rev = dynamic_cast<ReverbNode*>(node)) {
+                    t.reverbWetLevel = rev->isBypassed() ? 0.0 : rev->wetLevel();
+                    t.reverbEnabled = !rev->isBypassed() && rev->dsp().isEnabled();
+                }
+            }
+        } else {
+            t.compressorGainReductionDb = 0.0;
+            t.limiterGainReductionDb = 0.0;
+            t.limiterLatencyFrames = 0;
+            t.reverbWetLevel = 0.0;
+        }
+
+        uint32_t newState = static_cast<uint32_t>(m_writerTelemetryIndex & 3) | TELEMETRY_NEW_DATA;
+        uint32_t oldShared = m_sharedTelemetryState.exchange(newState, std::memory_order_acq_rel);
+        m_writerTelemetryIndex = static_cast<int>(oldShared & 3);
+    }
+
+    static constexpr uint32_t TELEMETRY_NEW_DATA = 0x4;
+
     std::atomic<double> m_graphSampleRate;
     std::atomic<OutputPathMode> m_outputMode{OutputPathMode::ListeningPath};
     std::atomic<double> m_listeningVolume{1.0};
     std::atomic<double> m_renderMonitorVolume{1.0};
 
     dsp::ParameterCommandQueue m_paramQueue;
+    dsp::DspParameterMailbox m_paramMailbox;
+
+    alignas(64) std::array<DspTelemetry, 3> m_telemetryBuffers{};
+    alignas(64) mutable std::atomic<uint32_t> m_sharedTelemetryState{1};
+    int m_writerTelemetryIndex{0};
+    mutable int m_readerTelemetryIndex{2};
+    mutable DspTelemetry m_cachedTelemetry{};
+    mutable std::mutex m_telemetryReadMutex; // UI Thread ONLY
+    alignas(64) std::atomic<uint64_t> m_readerExhaustionDrops{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;

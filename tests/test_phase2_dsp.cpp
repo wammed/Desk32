@@ -90,6 +90,7 @@ private slots:
     void testPcmRingBufferConcurrentSPSCAndUnderrun();
     void testParameterCommandQueueSPSCAndCapacity();
     void testParameterCommandQueueCoalescingAndOverflowStats();
+    void testDspParameterMailboxMultiProducerAndContinuousUpdates();
     void testDspContinuousParameterUpdateRtSafety();
 };
 
@@ -567,49 +568,112 @@ void TestPhase2Dsp::testParameterCommandQueueSPSCAndCapacity()
 
 void TestPhase2Dsp::testParameterCommandQueueCoalescingAndOverflowStats()
 {
-    // P0-16: Command queue coalescing, overflow detection, and statistics
+    // P0-24: Strict SPSC Queue without in-place mutation, FIFO ordering, and overflow tracking
     ParameterCommandQueue queue;
     QCOMPARE(queue.overflowCount(), 0u);
-    QCOMPARE(queue.coalesceCount(), 0u);
+    QCOMPARE(queue.size(), 0u);
+    QVERIFY(queue.empty());
 
-    // Fill queue to capacity (512 items) with SetGeqBandGain
+    // 1. Fill queue to capacity (512 items)
     for (size_t i = 0; i < ParameterCommandQueue::CAPACITY; ++i) {
         DspCommand cmd;
         cmd.type = DspCommandType::SetGeqBandGain;
         cmd.index = static_cast<uint8_t>(i % 32);
         cmd.subIndex = 0;
-        cmd.param1 = 1.0f;
+        cmd.param1 = static_cast<float>(i);
         QVERIFY(queue.push(cmd));
     }
     QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
 
-    // Push redundant updates for existing band when full: Should coalesce in-place!
-    DspCommand updateCmd;
-    updateCmd.type = DspCommandType::SetGeqBandGain;
-    updateCmd.index = 5;
-    updateCmd.subIndex = 0;
-    updateCmd.param1 = 6.0f; // New gain
-    QVERIFY(queue.push(updateCmd)); // Must return true via coalescing!
-    QCOMPARE(queue.coalesceCount(), 1u);
-    QCOMPARE(queue.overflowCount(), 0u);
+    // 2. Queue full: Pushes must fail cleanly without corrupting existing elements (P0-24)
+    DspCommand overflowCmd;
+    overflowCmd.type = DspCommandType::SetGeqBandGain;
+    overflowCmd.index = 5;
+    overflowCmd.param1 = 999.0f;
+    QVERIFY(!queue.push(overflowCmd)); // Must return false
+    QCOMPARE(queue.overflowCount(), 1u);
     QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
 
-    // Non-coalesceable command on full queue must fail and increment overflowCount
-    DspCommand nonCoalesce;
-    nonCoalesce.type = DspCommandType::ApplyPeqPreset;
-    nonCoalesce.index = 1;
-    QVERIFY(!queue.push(nonCoalesce));
-    QCOMPARE(queue.overflowCount(), 1u);
-
-    // Drain and verify coalesced value is present
-    bool foundCoalesced = false;
-    DspCommand out;
-    while (queue.pop(out)) {
-        if (out.type == DspCommandType::SetGeqBandGain && out.index == 5 && out.param1 == 6.0f) {
-            foundCoalesced = true;
-        }
+    // 3. Verify strict FIFO ordering of all items (first-in, first-out)
+    for (size_t i = 0; i < ParameterCommandQueue::CAPACITY; ++i) {
+        DspCommand out;
+        QVERIFY(queue.pop(out));
+        QCOMPARE(out.type, DspCommandType::SetGeqBandGain);
+        QCOMPARE(out.index, static_cast<uint8_t>(i % 32));
+        QCOMPARE(out.param1, static_cast<float>(i));
     }
-    QVERIFY(foundCoalesced);
+    QVERIFY(queue.empty());
+
+    // 4. After draining, queue accepts pushes again
+    DspCommand nextCmd;
+    nextCmd.type = DspCommandType::SetNodeBypass;
+    nextCmd.index = 1;
+    QVERIFY(queue.push(nextCmd));
+    QCOMPARE(queue.size(), 1u);
+}
+
+void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
+{
+    // P0-25: Multi-Producer safe continuous parameter mailbox with lock-free consumer
+    DspParameterMailbox mailbox;
+    QCOMPARE(mailbox.updateCount(), 0u);
+
+    ContinuousDspParameters params;
+    QVERIFY(!mailbox.fetchUpdates(params)); // Initially empty
+
+    // 1. Single producer update
+    mailbox.setGeqBandGain(3, 4.5f);
+    QCOMPARE(mailbox.updateCount(), 1u);
+
+    QVERIFY(mailbox.fetchUpdates(params));
+    QCOMPARE(params.geqGains[3], 4.5f);
+    QVERIFY((params.geqModifiedMask & (1u << 3)) != 0);
+
+    // Second fetch without new updates must return false
+    QVERIFY(!mailbox.fetchUpdates(params));
+
+    // 2. Concurrent multi-producer stress test (4 producer threads, 1 consumer thread)
+    std::atomic<bool> running{true};
+    std::atomic<uint64_t> totalPushes{0};
+    std::vector<std::thread> producers;
+
+    for (int t = 0; t < 4; ++t) {
+        producers.emplace_back([&mailbox, &running, &totalPushes, t]() {
+            float val = 0.0f;
+            while (running.load(std::memory_order_relaxed)) {
+                mailbox.setGeqBandGain(static_cast<size_t>(t * 8), val);
+                mailbox.setPeqBand(static_cast<size_t>(t * 5), 0, 1000.0f + val, val, 1.0f, 0, true);
+                mailbox.setFilterParams(20.0f + val, 20000.0f - val, 1, 1, true, true);
+                val += 0.1f;
+                totalPushes.fetch_add(3, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    uint64_t consumedUpdates = 0;
+    for (int i = 0; i < 500; ++i) {
+        ContinuousDspParameters p;
+        if (mailbox.fetchUpdates(p)) {
+            consumedUpdates++;
+        }
+        std::this_thread::yield();
+    }
+
+    running.store(false);
+    for (auto& p : producers) {
+        p.join();
+    }
+
+    // Final drain
+    ContinuousDspParameters finalParams;
+    if (mailbox.fetchUpdates(finalParams)) {
+        consumedUpdates++;
+    }
+
+    QVERIFY(consumedUpdates > 0);
+
+    QVERIFY(mailbox.updateCount() > 0);
+    QVERIFY(totalPushes.load() > 0);
 }
 
 void TestPhase2Dsp::testDspContinuousParameterUpdateRtSafety()

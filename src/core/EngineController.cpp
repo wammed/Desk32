@@ -729,6 +729,9 @@ bool EngineController::retreatFolderPrevious(const QString& deckId) {
 
 void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
     if (m_pipeline) {
+        // P0-25: Continuous slider parameter update via lock-free DspParameterMailbox
+        m_pipeline->paramMailbox().setGeqBandGain(static_cast<size_t>(bandIndex), static_cast<float>(gainDb));
+
         engine::dsp::DspCommand cmd;
         cmd.type = engine::dsp::DspCommandType::SetGeqBandGain;
         cmd.index = static_cast<uint8_t>(bandIndex);
@@ -817,6 +820,11 @@ void EngineController::setPeqBand(bool isRightChannel, int bandIndex, double fre
     if (!m_peqNode || bandIndex < 0 || bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) return;
 
     if (m_pipeline) {
+        // P0-25: Continuous parameter update via lock-free DspParameterMailbox
+        m_pipeline->paramMailbox().setPeqBand(static_cast<size_t>(bandIndex), isRightChannel ? 1 : 0,
+                                              static_cast<float>(frequency), static_cast<float>(gainDb),
+                                              static_cast<float>(q), static_cast<uint8_t>(filterType), enabled);
+
         engine::dsp::DspCommand cmd;
         cmd.type = engine::dsp::DspCommandType::SetPeqBand;
         cmd.index = static_cast<uint8_t>(bandIndex);
@@ -919,6 +927,11 @@ void EngineController::applyPeqPreset(const QString& presetName) {
 
 void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope) {
     if (m_pipeline) {
+        // P0-25: Continuous parameter update via lock-free DspParameterMailbox
+        m_pipeline->paramMailbox().setFilterParams(static_cast<float>(hpfFreq), static_cast<float>(lpfFreq),
+                                                   static_cast<uint8_t>(hpfSlope), static_cast<uint8_t>(lpfSlope),
+                                                   hpfOn, lpfOn);
+
         engine::dsp::DspCommand cmd;
         cmd.type = engine::dsp::DspCommandType::SetFilterParams;
         cmd.boolFlag1 = hpfOn ? 1 : 0;
@@ -981,12 +994,12 @@ QVariantList EngineController::getFilterCurve(int numPoints) {
 void EngineController::setCompressorParams(double thresholdDb, double ratio, double attackMs, double releaseMs, double makeupDb, double kneeDb) {
     bool enabled = (m_compNode && !m_compNode->isBypassed());
     if (m_compNode) {
-        m_compNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
+        m_compNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
                                     thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
         emit compressorParametersChanged();
     }
     if (m_pipeline) {
-        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        // P0-14, P0-21: Configure executed on Control Thread and published lock-free via EpochReclaimer
         m_pipeline->updateCompressor(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
     }
 }
@@ -994,26 +1007,26 @@ void EngineController::setCompressorParams(double thresholdDb, double ratio, dou
 QVariantMap EngineController::getCompressorParams() {
     QVariantMap map;
     if (!m_compNode) return map;
-    map["thresholdDb"] = m_compNode->dsp().thresholdDb();
-    map["ratio"] = m_compNode->dsp().ratio();
-    map["attackMs"] = m_compNode->dsp().attackMs();
-    map["releaseMs"] = m_compNode->dsp().releaseMs();
-    map["makeupGainDb"] = m_compNode->dsp().makeupGainDb();
-    map["kneeDb"] = m_compNode->dsp().kneeDb();
-    map["enabled"] = m_compNode->dsp().isEnabled();
-    map["gainReductionDb"] = m_compNode->dsp().gainReductionDb();
+    map["thresholdDb"] = m_compNode->thresholdDb();
+    map["ratio"] = m_compNode->ratio();
+    map["attackMs"] = m_compNode->attackMs();
+    map["releaseMs"] = m_compNode->releaseMs();
+    map["makeupGainDb"] = m_compNode->makeupGainDb();
+    map["kneeDb"] = m_compNode->kneeDb();
+    map["enabled"] = m_compNode->isEnabled();
+    map["gainReductionDb"] = m_pipeline ? m_pipeline->compressorGainReductionDb() : 0.0;
     return map;
 }
 
 void EngineController::setLimiterParams(double ceilingDb, double releaseMs, double lookaheadMs) {
     bool enabled = (m_limiterNode && !m_limiterNode->isBypassed());
     if (m_limiterNode) {
-        m_limiterNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
-                                      ceilingDb, releaseMs, lookaheadMs, enabled);
+        m_limiterNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
+                                       ceilingDb, releaseMs, lookaheadMs, enabled);
         emit limiterParametersChanged();
     }
     if (m_pipeline) {
-        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        // P0-14, P0-21: Configure and instance preparation executed on Control Thread
         m_pipeline->updatePeakLimiter(ceilingDb, releaseMs, lookaheadMs, enabled);
     }
 }
@@ -1021,24 +1034,24 @@ void EngineController::setLimiterParams(double ceilingDb, double releaseMs, doub
 QVariantMap EngineController::getLimiterParams() {
     QVariantMap map;
     if (!m_limiterNode) return map;
-    map["ceilingDb"] = m_limiterNode->dsp().ceilingDb();
-    map["releaseMs"] = m_limiterNode->dsp().releaseMs();
-    map["lookaheadMs"] = m_limiterNode->dsp().lookaheadMs();
-    map["latencyFrames"] = static_cast<int>(m_limiterNode->latencyFrames());
-    map["enabled"] = m_limiterNode->dsp().isEnabled();
-    map["gainReductionDb"] = m_limiterNode->dsp().gainReductionDb();
+    map["ceilingDb"] = m_limiterNode->ceilingDb();
+    map["releaseMs"] = m_limiterNode->releaseMs();
+    map["lookaheadMs"] = m_limiterNode->lookaheadMs();
+    map["latencyFrames"] = m_pipeline ? m_pipeline->limiterLatencyFrames() : static_cast<int>(m_limiterNode->latencyFrames());
+    map["enabled"] = m_limiterNode->isEnabled();
+    map["gainReductionDb"] = m_pipeline ? m_pipeline->limiterGainReductionDb() : 0.0;
     return map;
 }
 
 void EngineController::setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving) {
     bool enabled = (m_reverbNode && !m_reverbNode->isBypassed());
     if (m_reverbNode) {
-        m_reverbNode->dsp().configure(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
+        m_reverbNode->prepareInstance(m_pipeline ? m_pipeline->graphSampleRate() : 48000.0,
                                       roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
         emit reverbParametersChanged();
     }
     if (m_pipeline) {
-        // P0-14: Configure executed on Control Thread and published lock-free via EpochReclaimer
+        // P0-14, P0-21: Configure and instance preparation executed on Control Thread
         m_pipeline->updateReverb(roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
     }
 }
@@ -1046,12 +1059,12 @@ void EngineController::setReverbParams(double roomSize, double damping, double w
 QVariantMap EngineController::getReverbParams() {
     QVariantMap map;
     if (!m_reverbNode) return map;
-    map["roomSize"] = m_reverbNode->dsp().roomSize();
-    map["damping"] = m_reverbNode->dsp().damping();
-    map["wetLevel"] = m_reverbNode->dsp().wetLevel();
-    map["predelayMs"] = m_reverbNode->dsp().predelayMs();
-    map["tailPreserving"] = m_reverbNode->dsp().isTailPreserving();
-    map["enabled"] = m_reverbNode->dsp().isEnabled();
+    map["roomSize"] = m_reverbNode->roomSize();
+    map["damping"] = m_reverbNode->damping();
+    map["wetLevel"] = m_pipeline ? m_pipeline->currentTelemetry().reverbWetLevel : m_reverbNode->wetLevel();
+    map["predelayMs"] = m_reverbNode->predelayMs();
+    map["tailPreserving"] = m_reverbNode->isTailPreserving();
+    map["enabled"] = m_reverbNode->isEnabled();
     return map;
 }
 
