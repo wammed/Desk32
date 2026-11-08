@@ -66,7 +66,10 @@ void* __libc_calloc(size_t, size_t);
 void* __libc_realloc(void*, size_t);
 void __libc_free(void*);
 void* __libc_memalign(size_t, size_t);
+}
 
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+extern "C" {
 void* malloc(size_t size) {
     if (t_isAudioThread) {
         s_rtStats.cMallocCount.fetch_add(1, std::memory_order_relaxed);
@@ -112,6 +115,7 @@ void* aligned_alloc(size_t alignment, size_t size) {
     return __libc_memalign(alignment, size);
 }
 } // extern "C"
+#endif
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -122,36 +126,36 @@ void* operator new(size_t size) {
     if (t_isAudioThread) {
         s_rtStats.opNewCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return __libc_malloc(size);
+    return malloc(size);
 }
 
 void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opNewNothrowCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return __libc_malloc(size);
+    return malloc(size);
 }
 
 void* operator new[](size_t size) {
     if (t_isAudioThread) {
         s_rtStats.opNewArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return __libc_malloc(size);
+    return malloc(size);
 }
 
 void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opNewNothrowCount.fetch_add(1, std::memory_order_relaxed);
     }
-    return __libc_malloc(size);
+    return malloc(size);
 }
 
 void* operator new(size_t size, std::align_val_t al) {
     if (t_isAudioThread) {
         s_rtStats.opNewAlignedCount.fetch_add(1, std::memory_order_relaxed);
     }
-    void* ptr = __libc_memalign(static_cast<size_t>(al), size);
-    if (!ptr) {
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
         throw std::bad_alloc();
     }
     return ptr;
@@ -161,8 +165,8 @@ void* operator new[](size_t size, std::align_val_t al) {
     if (t_isAudioThread) {
         s_rtStats.opNewAlignedCount.fetch_add(1, std::memory_order_relaxed);
     }
-    void* ptr = __libc_memalign(static_cast<size_t>(al), size);
-    if (!ptr) {
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
         throw std::bad_alloc();
     }
     return ptr;
@@ -172,56 +176,56 @@ void operator delete(void* ptr) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete[](void* ptr) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete(void* ptr, size_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete[](void* ptr, size_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete(void* ptr, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete[](void* ptr, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete(void* ptr, size_t, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 void operator delete[](void* ptr, size_t, std::align_val_t) noexcept {
     if (t_isAudioThread) {
         s_rtStats.opDeleteArrayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    __libc_free(ptr);
+    free(ptr);
 }
 
 #if defined(__GNUC__)
@@ -1509,11 +1513,13 @@ void TestAudioPipeline::testRealtimeSafetyNegativeDetection()
     QVERIFY(s_rtStats.opDeleteCount.load() >= 1);
     QVERIFY(s_rtStats.opNewArrayCount.load() >= 1);
     QVERIFY(s_rtStats.opDeleteArrayCount.load() >= 1);
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
     QVERIFY(s_rtStats.cMallocCount.load() >= 1);
     QVERIFY(s_rtStats.cCallocCount.load() >= 1);
     QVERIFY(s_rtStats.cReallocCount.load() >= 1);
     QVERIFY(s_rtStats.cMemalignCount.load() >= 2);
     QVERIFY(s_rtStats.cFreeCount.load() >= 4);
+#endif
     QVERIFY(s_rtStats.rtBlockingCount.load() >= 4); // mutex lock + usleep + sched_yield + trylock
 
     // Clean up tracker
@@ -1781,7 +1787,11 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         const double rate48 = 48000.0;
         const size_t frames = 256;
         const int64_t deadlineNanos48 = 5333333; // 256 / 48000 = 5.333 ms
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+        const size_t numBlocks = 5000;
+#else
         const size_t numBlocks = 100000;
+#endif
 
         AudioPipeline pipeline48(rate48);
         auto chain = std::make_unique<AudioChain>("Master48", ChainPurpose::MasteringChain);
@@ -1883,7 +1893,11 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         const double rate192 = 192000.0;
         const size_t frames = 256;
         const int64_t deadlineNanos192 = 1333333; // 256 / 192000 = 1.333 ms
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+        const size_t numBlocks = 5000;
+#else
         const size_t numBlocks = 100000;
+#endif
 
         AudioPipeline pipeline192(rate192);
         auto chain = std::make_unique<AudioChain>("Master192", ChainPurpose::MasteringChain);
@@ -1974,8 +1988,10 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << QString("  > 500 µs     : %1 (%2%)").arg(static_cast<qlonglong>(hOver500)).arg(static_cast<double>(hOver500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
         qDebug().noquote() << "========================================================\n";
 
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
         QVERIFY(marginNs > 0);
         QVERIFY(p999Ns < deadlineNanos192);
+#endif
     }
 }
 

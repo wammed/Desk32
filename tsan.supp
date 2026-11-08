@@ -1,12 +1,17 @@
-# External library suppressions for ThreadSanitizer (P0-28 audited minimal set)
-# 1. System libQt6Core.so is compiled without TSan instrumentation; its internal atomic refcounting
-#    (QArrayData/QString COW) and futex-based QBasicMutex/QWaitCondition are invisible to TSan.
-#    Note: Desk32's audio engine (pipeline, DSP, mailbox, SPSC queue, reclaimer, decoder, decks)
-#    uses pure C++20 stdtypes and passes TSan with this rule removed.
-race:libQt6Core.so
-# 2. Qt6 QTest Watchdog thread internal stack variable race during QTest::qExec teardown
+# Minimal external library suppressions for ThreadSanitizer (P0-28 audited minimal set)
+# Broad suppression race:libQt6Core.so has been completely removed.
+#
+# 1. Target: Qt6 QTest internal watchdog thread data race during QTest teardown
+#    Reason: Qt's test framework spawns an uninstrumented watchdog thread that accesses stack variables during exit.
+#    Scope : Strictly scoped to libQt6Test test harness.
 race:libQt6Test
-# 3. Qt6 QTest Watchdog QThread leak at process exit (Desk32 uses std::thread exclusively)
+
+# 2. Target: Qt6 QTest internal watchdog thread leak at process exit
+#    Reason: QTest watchdog thread is intentionally detached and not joined before exit by Qt test runner.
+#    Scope : Strictly scoped to QThread::start (Desk32 production code uses std::thread exclusively).
 thread:QThread::start
-# 4. PipeWire pw_thread_loop internal mutex unlock across loop/control threads
+
+# 3. Target: PipeWire thread loop internal mutex unlock across threads
+#    Reason: libpipewire-0.3 pw_thread_loop locks and unlocks mutex across internal loop/control threads by design.
+#    Scope : Strictly scoped to third-party shared library libpipewire-0.3.so.
 mutex:libpipewire-0.3.so
