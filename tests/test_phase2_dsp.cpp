@@ -1953,8 +1953,12 @@ void TestPhase2Dsp::testReverbO1StateTrackingAccuracyAndTailWaveformComparison()
     auto t1 = std::chrono::steady_clock::now();
     auto elapsedMicros = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
     qDebug() << "192kHz 4096-frame Reverb O(1) process time:" << elapsedMicros << "microseconds";
-    // 4096 frames at 192kHz deadline is 21.3 ms (21,333 us); pure O(1) DSP runs in < 2ms
+    // 4096 frames at 192kHz deadline is 21.3 ms (21,333 us); native Release runs in < 2ms
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED) && defined(NDEBUG)
     QVERIFY(elapsedMicros < 10000);
+#else
+    QVERIFY(elapsedMicros < 21333);
+#endif
 }
 
 void TestPhase2Dsp::testActiveDspDirectModificationImpossibility()
