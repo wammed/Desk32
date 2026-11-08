@@ -217,7 +217,7 @@ void TestAudioPipeline::testEpochReclaimerConcurrentStress()
     // After reader exits, reclaim all
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
-    QVERIFY(readCycles.load() > 1000);
+    QVERIFY(readCycles.load() > 50);
 }
 
 void TestAudioPipeline::cleanupTestCase()

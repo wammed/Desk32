@@ -32,14 +32,8 @@ struct SwitchResult {
 /// Implements Section 2.1 - 2.3 & Exit Criteria.
 class DeckManager {
 public:
-    explicit DeckManager(double graphRate = 48000.0)
-        : m_graphRate(graphRate)
-    {
-        for (size_t i = 0; i < 4; ++i) {
-            char id = static_cast<char>('A' + i);
-            m_decks[i] = std::make_unique<ReferenceDeck>(id);
-        }
-    }
+    explicit DeckManager(double graphRate = 48000.0);
+    ~DeckManager();
 
     [[nodiscard]] double graphRate() const noexcept { return m_graphRate.load(std::memory_order_relaxed); }
     void setGraphRate(double rate) {

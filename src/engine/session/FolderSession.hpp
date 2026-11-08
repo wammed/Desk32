@@ -119,7 +119,8 @@ public:
 
 class FolderSession {
 public:
-    FolderSession() = default;
+    FolderSession();
+    ~FolderSession();
 
     [[nodiscard]] bool isActive() const noexcept { return m_isActive; }
     [[nodiscard]] const std::string& folderPath() const noexcept { return m_folderPath; }

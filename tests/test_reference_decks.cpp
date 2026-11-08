@@ -29,6 +29,28 @@ void* operator new[](size_t size) {
     return std::malloc(size);
 }
 
+void* operator new(size_t size, std::align_val_t al) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+
+void* operator new[](size_t size, std::align_val_t al) {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+
 void operator delete(void* p) noexcept {
     std::free(p);
 }
@@ -42,6 +64,22 @@ void operator delete(void* p, size_t) noexcept {
 }
 
 void operator delete[](void* p, size_t) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, std::align_val_t) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, std::align_val_t) noexcept {
+    std::free(p);
+}
+
+void operator delete(void* p, size_t, std::align_val_t) noexcept {
+    std::free(p);
+}
+
+void operator delete[](void* p, size_t, std::align_val_t) noexcept {
     std::free(p);
 }
 

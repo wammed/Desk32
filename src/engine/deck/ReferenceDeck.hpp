@@ -34,12 +34,8 @@ class ReferenceDeck {
 public:
     static constexpr size_t RT_BUFFER_CAPACITY = 4096;
 
-    explicit ReferenceDeck(char id = 'A')
-        : m_id(id)
-    {
-    }
-
-    ~ReferenceDeck() = default;
+    explicit ReferenceDeck(char id = 'A');
+    ~ReferenceDeck();
 
     [[nodiscard]] char id() const noexcept { return m_id; }
     [[nodiscard]] TransportState state() const noexcept { return m_state.load(std::memory_order_acquire); }

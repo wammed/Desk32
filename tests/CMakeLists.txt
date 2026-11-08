@@ -101,6 +101,9 @@ add_executable(test_sample_rate_switching
     test_sample_rate_switching.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_sample_rate_switching PRIVATE
@@ -148,6 +151,9 @@ add_executable(test_step4_deck_session_log
     test_step4_deck_session_log.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_step4_deck_session_log PRIVATE
@@ -250,6 +256,9 @@ add_executable(test_reference_decks
     test_reference_decks.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_reference_decks PRIVATE
@@ -321,6 +330,9 @@ add_executable(test_phase3_external_insert
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_phase3_external_insert PRIVATE
@@ -364,6 +376,9 @@ add_executable(test_phase4_export_render
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_phase4_export_render PRIVATE

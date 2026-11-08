@@ -69,6 +69,12 @@ qt_add_executable(desk32
     src/engine/decoder/FFmpegAudioDecoder.cpp
     src/engine/decoder/DecoderWorker.hpp
     src/engine/decoder/DecoderWorker.cpp
+    src/engine/session/FolderSession.hpp
+    src/engine/session/FolderSession.cpp
+    src/engine/deck/ReferenceDeck.hpp
+    src/engine/deck/ReferenceDeck.cpp
+    src/engine/deck/DeckManager.hpp
+    src/engine/deck/DeckManager.cpp
     src/engine/insert/DelayCompensationBuffer.hpp
     src/engine/insert/ExternalInsertBridge.hpp
     src/engine/insert/ExternalInsertNode.hpp
