@@ -19,6 +19,7 @@ private slots:
     void testSeekFunctionality();
     void testArtworkExclusionDiscipline();
     void testInvalidFilesAndErrorResilience();
+    void testNonStereoAudioRejectionAud10();
     void cleanupTestCase();
 
 private:
@@ -196,6 +197,51 @@ void TestFFmpegDecoder::testInvalidFilesAndErrorResilience()
 
     QVERIFY(!decoder.open(corruptPath.toStdString()));
     QVERIFY(!decoder.isOpen());
+}
+
+void TestFFmpegDecoder::testNonStereoAudioRejectionAud10()
+{
+    // AUD-10: Stereo Only Specification Verification
+    // Desk32 explicitly rejects mono (1ch), quad (4ch), 5.1/7.1 surround (>2ch) audio files upfront.
+    // Implicit downmixing/upmixing via SwrContext is strictly prohibited per Section 2.3 and AUD-10.
+
+    FFmpegAudioDecoder decoder;
+
+    // 1. Mono (1 channel) input must be rejected
+    QString monoPath = createSyntheticWav(48000.0, 1, 24000);
+    QVERIFY(!monoPath.isEmpty());
+    QVERIFY(!decoder.open(monoPath.toStdString()));
+    QVERIFY(!decoder.isOpen());
+    QVERIFY(!decoder.lastError().empty());
+    QVERIFY(decoder.lastError().find("AUD-10") != std::string::npos);
+    QFile::remove(monoPath);
+
+    // 2. Quadraphonic (4 channels) input must be rejected
+    QString quadPath = createSyntheticWav(48000.0, 4, 24000);
+    QVERIFY(!quadPath.isEmpty());
+    QVERIFY(!decoder.open(quadPath.toStdString()));
+    QVERIFY(!decoder.isOpen());
+    QVERIFY(!decoder.lastError().empty());
+    QVERIFY(decoder.lastError().find("AUD-10") != std::string::npos);
+    QFile::remove(quadPath);
+
+    // 3. 5.1 Surround (6 channels) input must be rejected
+    QString surroundPath = createSyntheticWav(48000.0, 6, 24000);
+    QVERIFY(!surroundPath.isEmpty());
+    QVERIFY(!decoder.open(surroundPath.toStdString()));
+    QVERIFY(!decoder.isOpen());
+    QVERIFY(!decoder.lastError().empty());
+    QVERIFY(decoder.lastError().find("AUD-10") != std::string::npos);
+    QFile::remove(surroundPath);
+
+    // 4. Stereo (2 channels) input must succeed normally
+    QString stereoPath = createSyntheticWav(48000.0, 2, 24000);
+    QVERIFY(!stereoPath.isEmpty());
+    QVERIFY(decoder.open(stereoPath.toStdString()));
+    QVERIFY(decoder.isOpen());
+    QCOMPARE(decoder.formatInfo().channels, 2u);
+    decoder.close();
+    QFile::remove(stereoPath);
 }
 
 void TestFFmpegDecoder::cleanupTestCase()

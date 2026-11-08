@@ -25,6 +25,7 @@ public:
     bool open(const std::string& filePath) override;
     void close() override;
     [[nodiscard]] bool isOpen() const noexcept override { return m_isOpen; }
+    [[nodiscard]] std::string lastError() const override { return m_lastError; }
 
     [[nodiscard]] const AudioFormatInfo& formatInfo() const noexcept override { return m_formatInfo; }
     [[nodiscard]] const metadata::TrackMetadata& metadata() const noexcept override { return m_metadata; }
@@ -40,6 +41,7 @@ private:
 
     bool m_isOpen = false;
     std::string m_filePath;
+    std::string m_lastError;
 
     AVFormatContext* m_formatCtx = nullptr;
     AVCodecContext* m_codecCtx = nullptr;

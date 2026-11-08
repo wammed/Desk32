@@ -199,46 +199,134 @@ public:
         return 0;
     }
 
-    /// Enforce retention policy per Decision D-1:
-    /// 180 days or 300,000 events, whichever is reached first.
-    int purgeOldEvents(int maxRetentionDays = 180, int64_t maxEvents = 300000) {
+    /// Count distinct root operations (SYS-05)
+    int64_t countOperations() {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_db.isOpen()) return 0;
 
-        int purgedCount = 0;
+        QSqlQuery q(m_db);
+        if (q.exec("SELECT COUNT(DISTINCT operation_id) FROM operation_logs WHERE parent_operation_id IS NULL OR parent_operation_id = ''") && q.next()) {
+            return q.value(0).toLongLong();
+        }
+        return 0;
+    }
 
-        // 1. Purge events older than maxRetentionDays (180 days)
+    /// Enforce retention policy per Decision D-1 and SYS-05:
+    /// 180 days or 300,000 logical operations, whichever is reached first.
+    /// Purges are performed atomically per root operation tree via recursive CTE cascade.
+    int purgeOldOperations(int maxRetentionDays = 180, int64_t maxOperations = 300000) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_db.isOpen()) return 0;
+
+        if (!m_db.transaction()) {
+            m_lastError = m_db.lastError().text().toStdString();
+            return 0;
+        }
+
+        std::vector<QString> rootsToPurge;
+
+        // 1. Collect root operations older than maxRetentionDays
         QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(-maxRetentionDays);
         QString cutoffStr = cutoff.toString(Qt::ISODateWithMs);
 
         QSqlQuery qDate(m_db);
-        qDate.prepare("DELETE FROM operation_logs WHERE timestamp_utc < ?");
+        qDate.prepare(R"(
+            SELECT operation_id
+            FROM operation_logs
+            WHERE parent_operation_id IS NULL OR parent_operation_id = ''
+            GROUP BY operation_id
+            HAVING MIN(timestamp_utc) < ?
+        )");
         qDate.addBindValue(cutoffStr);
         if (qDate.exec()) {
-            purgedCount += qDate.numRowsAffected();
+            while (qDate.next()) {
+                rootsToPurge.push_back(qDate.value(0).toString());
+            }
+        } else {
+            m_lastError = qDate.lastError().text().toStdString();
+            m_db.rollback();
+            return 0;
         }
 
-        // 2. Purge events exceeding maxEvents (300,000 limit) from oldest
+        // 2. Collect excess root operations over maxOperations
         QSqlQuery qCount(m_db);
-        if (qCount.exec("SELECT COUNT(*) FROM operation_logs") && qCount.next()) {
-            int64_t currentCount = qCount.value(0).toLongLong();
-            if (currentCount > maxEvents) {
-                int64_t excess = currentCount - maxEvents;
-                QSqlQuery qPurge(m_db);
-                qPurge.prepare(R"(
-                    DELETE FROM operation_logs
-                    WHERE event_id IN (
-                        SELECT event_id FROM operation_logs ORDER BY event_id ASC LIMIT ?
-                    )
+        if (qCount.exec("SELECT COUNT(DISTINCT operation_id) FROM operation_logs WHERE parent_operation_id IS NULL OR parent_operation_id = ''") && qCount.next()) {
+            int64_t totalRoots = qCount.value(0).toLongLong();
+            if (totalRoots > maxOperations) {
+                int64_t excess = totalRoots - maxOperations;
+                QSqlQuery qExcess(m_db);
+                qExcess.prepare(R"(
+                    SELECT operation_id
+                    FROM operation_logs
+                    WHERE parent_operation_id IS NULL OR parent_operation_id = ''
+                    GROUP BY operation_id
+                    ORDER BY MIN(timestamp_utc) ASC, MIN(event_id) ASC
+                    LIMIT ?
                 )");
-                qPurge.addBindValue(static_cast<qlonglong>(excess));
-                if (qPurge.exec()) {
-                    purgedCount += qPurge.numRowsAffected();
+                qExcess.addBindValue(static_cast<qlonglong>(excess));
+                if (qExcess.exec()) {
+                    while (qExcess.next()) {
+                        QString opId = qExcess.value(0).toString();
+                        if (std::find(rootsToPurge.begin(), rootsToPurge.end(), opId) == rootsToPurge.end()) {
+                            rootsToPurge.push_back(opId);
+                        }
+                    }
+                } else {
+                    m_lastError = qExcess.lastError().text().toStdString();
+                    m_db.rollback();
+                    return 0;
                 }
             }
+        } else {
+            m_lastError = qCount.lastError().text().toStdString();
+            m_db.rollback();
+            return 0;
         }
 
-        return purgedCount;
+        if (rootsToPurge.empty()) {
+            m_db.commit();
+            return 0;
+        }
+
+        // 3. Atomically delete all events belonging to the root operations and all child operations via recursive CTE
+        int purgedRows = 0;
+        QSqlQuery qDelete(m_db);
+        qDelete.prepare(R"(
+            WITH RECURSIVE op_tree(op) AS (
+                SELECT ? AS op
+                UNION
+                SELECT l.operation_id
+                FROM operation_logs l
+                JOIN op_tree t ON l.parent_operation_id = t.op
+            )
+            DELETE FROM operation_logs
+            WHERE operation_id IN (SELECT op FROM op_tree)
+               OR parent_operation_id IN (SELECT op FROM op_tree)
+        )");
+
+        for (const auto& rootOp : rootsToPurge) {
+            qDelete.bindValue(0, rootOp);
+            if (!qDelete.exec()) {
+                m_lastError = qDelete.lastError().text().toStdString();
+                m_db.rollback();
+                return 0;
+            }
+            purgedRows += qDelete.numRowsAffected();
+        }
+
+        if (!m_db.commit()) {
+            m_lastError = m_db.lastError().text().toStdString();
+            m_db.rollback();
+            return 0;
+        }
+
+        return purgedRows;
+    }
+
+    /// Enforce retention policy per Decision D-1 and SYS-05.
+    /// Operates at logical operation granularity.
+    int purgeOldEvents(int maxRetentionDays = 180, int64_t maxEvents = 300000) {
+        return purgeOldOperations(maxRetentionDays, maxEvents);
     }
 
     /// Query logs with filtering, sorting, and pagination

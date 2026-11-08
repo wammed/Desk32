@@ -185,9 +185,19 @@ int64_t LogService::countEvents() {
     return m_queryRepo->countEvents();
 }
 
+int64_t LogService::countOperations() {
+    if (!m_queryRepo) return 0;
+    return m_queryRepo->countOperations();
+}
+
 int LogService::purgeOldEvents(int maxRetentionDays, int64_t maxEvents) {
     if (!m_queryRepo) return 0;
     return m_queryRepo->purgeOldEvents(maxRetentionDays, maxEvents);
+}
+
+int LogService::purgeOldOperations(int maxRetentionDays, int64_t maxOperations) {
+    if (!m_queryRepo) return 0;
+    return m_queryRepo->purgeOldOperations(maxRetentionDays, maxOperations);
 }
 
 void LogService::log(
@@ -198,6 +208,20 @@ void LogService::log(
     const QString& targetType,
     const QString& target,
     const QString& detailsJson)
+{
+    log(category, operation, status, message, targetType, target, detailsJson, "", "");
+}
+
+void LogService::log(
+    const QString& category,
+    const QString& operation,
+    const QString& status,
+    const QString& message,
+    const QString& targetType,
+    const QString& target,
+    const QString& detailsJson,
+    const QString& operationId,
+    const QString& parentOperationId)
 {
     LogLevel lvl = LogLevel::Info;
     if (status == "Failed" || status == "Error") lvl = LogLevel::Error;
@@ -212,7 +236,11 @@ void LogService::log(
         detailsJson.toStdString(),
         operation.toStdString(),
         targetType.toStdString(),
-        target.toStdString()
+        target.toStdString(),
+        0,
+        0.0,
+        operationId.toStdString(),
+        parentOperationId.toStdString()
     );
     postLog(ev);
 }

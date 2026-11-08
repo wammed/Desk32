@@ -106,7 +106,9 @@ public:
     bool exportJsonl(const QString& filePath, const LogFilter& filter = {});
 
     int64_t countEvents();
+    int64_t countOperations();
     int purgeOldEvents(int maxRetentionDays = 180, int64_t maxEvents = 300000);
+    int purgeOldOperations(int maxRetentionDays = 180, int64_t maxOperations = 300000);
 
     [[nodiscard]] size_t droppedLogCount() const noexcept {
         return m_queue.overflowCount();
@@ -121,6 +123,17 @@ public:
         const QString& targetType = "System",
         const QString& target = "",
         const QString& detailsJson = "{}");
+
+    void log(
+        const QString& category,
+        const QString& operation,
+        const QString& status,
+        const QString& message,
+        const QString& targetType,
+        const QString& target,
+        const QString& detailsJson,
+        const QString& operationId,
+        const QString& parentOperationId = "");
 
     Q_INVOKABLE QVariantList fetchLogs(const QVariantMap& filter);
     Q_INVOKABLE bool exportToJsonl(const QString& filePath);

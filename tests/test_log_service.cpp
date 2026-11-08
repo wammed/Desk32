@@ -23,6 +23,7 @@ private slots:
     void testRealtimeQueueOverflowSafety();
     void testStructuredJsonlExport();
     void testQueryFilterAndSearch();
+    void testSys05OperationRetentionAndCascadePurge();
     void cleanupTestCase();
 
 private:
@@ -334,6 +335,172 @@ void TestLogService::testQueryFilterAndSearch()
     auto searchLogs = repo.queryEvents(fSearch);
     QCOMPARE(searchLogs.size(), 1u);
     QCOMPARE(searchLogs[0].category, std::string("ExternalInsert"));
+
+    repo.close();
+}
+
+void TestLogService::testSys05OperationRetentionAndCascadePurge()
+{
+    QString dbPath = m_tempDir.path() + "/test_sys05.db";
+    LogRepository repo("TestSys05Conn");
+    QVERIFY(repo.open(dbPath));
+
+    // =========================================================================
+    // 1. 180-Day Boundary Test
+    // =========================================================================
+    {
+        QDateTime now = QDateTime::currentDateTimeUtc();
+        
+        // Operation A: 181 days old (Expired)
+        std::string opExpired = "op-expired-181d";
+        LogEvent evA1 = LogEvent::create(LogLevel::Info, "System", "Expired op start", "{}", "OpStart", "System", "", 0, 0.0, opExpired, "");
+        evA1.timestampUtc = now.addDays(-181).toString(Qt::ISODateWithMs).toStdString();
+        QVERIFY(repo.insertEvent(evA1));
+
+        LogEvent evA2 = LogEvent::create(LogLevel::Success, "System", "Expired op complete", "{}", "OpComplete", "System", "", 0, 0.0, opExpired, "");
+        evA2.timestampUtc = now.addDays(-181).toString(Qt::ISODateWithMs).toStdString();
+        QVERIFY(repo.insertEvent(evA2));
+
+        // Operation B: 179 days old (Retained)
+        std::string opRetained = "op-retained-179d";
+        LogEvent evB1 = LogEvent::create(LogLevel::Info, "System", "Retained op start", "{}", "OpStart", "System", "", 0, 0.0, opRetained, "");
+        evB1.timestampUtc = now.addDays(-179).toString(Qt::ISODateWithMs).toStdString();
+        QVERIFY(repo.insertEvent(evB1));
+
+        QCOMPARE(repo.countOperations(), 2);
+        QCOMPARE(repo.countEvents(), 3);
+
+        // Purge with maxRetentionDays = 180, generous maxOperations
+        int purgedRows = repo.purgeOldOperations(180, 1000);
+        QCOMPARE(purgedRows, 2); // Both events of opExpired deleted atomically
+        QCOMPARE(repo.countOperations(), 1);
+        QCOMPARE(repo.countEvents(), 1);
+
+        auto remaining = repo.queryEvents();
+        QCOMPARE(remaining.size(), 1u);
+        QCOMPARE(remaining[0].operationId, opRetained);
+    }
+
+    // =========================================================================
+    // 2. 300,000 Operation Boundary Test (Tested with 3 Operation Cap)
+    //    Verifies logical operation counting, not individual event counting.
+    // =========================================================================
+    {
+        // Add 4 more root operations, each having 3 events (12 events total)
+        for (int op = 1; op <= 4; ++op) {
+            std::string opId = "multi-ev-op-" + std::to_string(op);
+            for (int ev = 1; ev <= 3; ++ev) {
+                LogEvent logEv = LogEvent::create(
+                    LogLevel::Info, "Deck", "Event " + std::to_string(ev) + " for " + opId,
+                    "{}", "LoadTrack", "Deck", "Deck A", 0, 10.0, opId, ""
+                );
+                // Stagger timestamps so op 1 is oldest
+                logEv.timestampUtc = QDateTime::currentDateTimeUtc().addSecs(op * 10 + ev).toString(Qt::ISODateWithMs).toStdString();
+                QVERIFY(repo.insertEvent(logEv));
+            }
+        }
+
+        // Total operations in DB: 1 (opRetained) + 4 = 5 operations
+        // Total events in DB: 1 + 12 = 13 events
+        QCOMPARE(repo.countOperations(), 5);
+        QCOMPARE(repo.countEvents(), 13);
+
+        // Cap at 3 operations. Should purge 2 oldest operations in full (opRetained [1 ev] + multi-ev-op-1 [3 ev] = 4 events)
+        int purged = repo.purgeOldOperations(180, 3);
+        QCOMPARE(purged, 4);
+        QCOMPARE(repo.countOperations(), 3);
+        QCOMPARE(repo.countEvents(), 9);
+
+        // Verify no partial operations exist: remaining ops multi-ev-op-2, 3, 4 each have exactly 3 events
+        for (int op = 2; op <= 4; ++op) {
+            LogFilter f;
+            f.operationId = "multi-ev-op-" + std::to_string(op);
+            auto events = repo.queryEvents(f);
+            QCOMPARE(events.size(), 3u);
+        }
+    }
+
+    // =========================================================================
+    // 3. Album Render Parent-Child Cascade & Multi-Tier Hierarchy Purge
+    //    Album Render (root) + 2 Track Renders (children) + 1 Dither (grandchild)
+    //    must be counted as 1 logical operation and purged completely without orphans.
+    // =========================================================================
+    {
+        std::string albumOpId = "op-album-master-hierarchical";
+        std::string track1OpId = albumOpId + "-t1";
+        std::string track2OpId = albumOpId + "-t2";
+        std::string ditherOpId = track1OpId + "-dither";
+
+        // Ancient timestamp so this album render is the oldest
+        QString ancientTs = QDateTime::currentDateTimeUtc().addDays(-200).toString(Qt::ISODateWithMs);
+
+        // Root album events (2 events)
+        LogEvent albStart = LogEvent::create(LogLevel::Info, "Render", "Album started", "{}", "AlbumRender", "Folder", "/out", 0, 0.0, albumOpId, "");
+        albStart.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(albStart));
+
+        LogEvent albDone = LogEvent::create(LogLevel::Success, "Render", "Album committed", "{}", "AlbumRender", "Folder", "/out", 0, 0.0, albumOpId, "");
+        albDone.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(albDone));
+
+        // Child Track 1 (2 events)
+        LogEvent t1Start = LogEvent::create(LogLevel::Info, "Render", "Track 1 start", "{}", "RenderTrack", "File", "01.wav", 0, 0.0, track1OpId, albumOpId);
+        t1Start.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(t1Start));
+
+        LogEvent t1Done = LogEvent::create(LogLevel::Success, "Render", "Track 1 done", "{}", "RenderTrack", "File", "01.wav", 0, 0.0, track1OpId, albumOpId);
+        t1Done.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(t1Done));
+
+        // Child Track 2 (2 events)
+        LogEvent t2Start = LogEvent::create(LogLevel::Info, "Render", "Track 2 start", "{}", "RenderTrack", "File", "02.wav", 0, 0.0, track2OpId, albumOpId);
+        t2Start.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(t2Start));
+
+        LogEvent t2Done = LogEvent::create(LogLevel::Success, "Render", "Track 2 done", "{}", "RenderTrack", "File", "02.wav", 0, 0.0, track2OpId, albumOpId);
+        t2Done.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(t2Done));
+
+        // Grandchild Dither under Track 1 (1 event)
+        LogEvent ditherEv = LogEvent::create(LogLevel::Info, "DSP", "TPDF dither applied", "{}", "Dither", "AudioBuffer", "", 0, 0.0, ditherOpId, track1OpId);
+        ditherEv.timestampUtc = ancientTs.toStdString();
+        QVERIFY(repo.insertEvent(ditherEv));
+
+        // Prior state: 3 operations (9 events)
+        // Added album tree: 1 logical root operation with 7 events across 4 distinct operation IDs
+        // New totals: 4 operations, 16 events
+        QCOMPARE(repo.countOperations(), 4);
+        QCOMPARE(repo.countEvents(), 16);
+
+        // Purge expired (>180 days). The album tree is 200 days old.
+        // It must delete the root op, both child ops, and the grandchild op in one atomic transaction.
+        int purgedRows = repo.purgeOldOperations(180, 1000);
+        QCOMPARE(purgedRows, 7);
+        QCOMPARE(repo.countOperations(), 3);
+        QCOMPARE(repo.countEvents(), 9);
+
+        // Verify zero orphan events remain anywhere in the album hierarchy
+        LogFilter fAlb;
+        fAlb.operationId = albumOpId;
+        QCOMPARE(repo.queryEvents(fAlb).size(), 0u);
+
+        LogFilter fT1;
+        fT1.operationId = track1OpId;
+        QCOMPARE(repo.queryEvents(fT1).size(), 0u);
+
+        LogFilter fT2;
+        fT2.operationId = track2OpId;
+        QCOMPARE(repo.queryEvents(fT2).size(), 0u);
+
+        LogFilter fDith;
+        fDith.operationId = ditherOpId;
+        QCOMPARE(repo.queryEvents(fDith).size(), 0u);
+
+        // Also check by parentOperationId
+        LogFilter fParent;
+        fParent.parentOperationId = albumOpId;
+        QCOMPARE(repo.queryEvents(fParent).size(), 0u);
+    }
 
     repo.close();
 }

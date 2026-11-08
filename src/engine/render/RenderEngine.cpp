@@ -305,7 +305,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                                    .arg((pcmBytes + 44) / (1024 * 1024))
                                    .arg(f);
             core::log::LogService::instance().log(
-                "Render", "Preflight", "Failed", task.errorMessage, "AudioFile", inputPath
+                "Render", "Preflight", "Failed", task.errorMessage, "AudioFile", inputPath, "{}",
+                parentOpId, ""
             );
             return false;
         }
@@ -324,7 +325,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             QString("Pre-flight check failed: %1").arg(preflightError),
             "FileSystem",
             task.sourceFolder,
-            QString("{\"error\":\"%1\"}").arg(preflightError)
+            QString("{\"error\":\"%1\"}").arg(preflightError),
+            parentOpId, ""
         );
         return false;
     }
@@ -335,7 +337,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to allocate render sequence number (database initialization or transaction error).";
         core::log::LogService::instance().log(
-            "Render", "AllocateSerial", "Failed", task.errorMessage, "Database", task.sourceFolder
+            "Render", "AllocateSerial", "Failed", task.errorMessage, "Database", task.sourceFolder, "{}",
+            parentOpId, ""
         );
         return false;
     }
@@ -351,7 +354,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to create temporary staging directory: " + task.stagingDir;
         core::log::LogService::instance().log(
-            "Render", "CreateStagingDir", "Failed", task.errorMessage, "FileSystem", task.stagingDir
+            "Render", "CreateStagingDir", "Failed", task.errorMessage, "FileSystem", task.stagingDir, "{}",
+            parentOpId, ""
         );
         return false;
     }
@@ -363,13 +367,16 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         QString("Starting render: %1 files into folder %2 [Serial: %3, Staging: %4]")
             .arg(task.totalTracks).arg(folderSuffix, task.serial, task.stagingDir),
         "RenderEngine",
-        task.finalOutputDir
+        task.finalOutputDir,
+        "{}",
+        parentOpId, ""
     );
 
     // 3. Render tracks sequentially
     bool allTracksOk = true;
 
     for (int i = 0; i < task.trackFiles.size(); ++i) {
+        const QString trackOpId = QString("%1_TRACK_%2").arg(parentOpId).arg(i + 1);
         if (m_cancelRequested.load(std::memory_order_acquire)) {
             task.status = RenderStatus::Cancelled;
             task.errorMessage = "Render cancelled by user.";
@@ -416,7 +423,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             core::log::LogService::instance().log(
                 "Render", "RenderTrack", "Failed",
                 QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
-                "AudioFile", inputFilePath
+                "AudioFile", inputFilePath, "{}",
+                trackOpId, parentOpId
             );
             break;
         }
@@ -449,13 +457,15 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                                           .arg(task.stagingDir);
                 task.errorMessage = task.errorMessage.isEmpty() ? rollbackErr : (task.errorMessage + " | " + rollbackErr);
                 core::log::LogService::instance().log(
-                    "Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir
+                    "Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir, "{}",
+                    parentOpId, ""
                 );
             } else {
                 core::log::LogService::instance().log(
                     "Render", "Rollback", "Success",
                     "Rollback completed: deleted staging directory without modifying existing files.",
-                    "FileSystem", task.stagingDir
+                    "FileSystem", task.stagingDir, "{}",
+                    parentOpId, ""
                 );
             }
         }
@@ -476,11 +486,12 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             if (!removed) {
                 QString rollbackErr = QString("Rollback failed after commit failure: unable to delete %1").arg(task.stagingDir);
                 task.errorMessage += " | " + rollbackErr;
-                core::log::LogService::instance().log("Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir);
+                core::log::LogService::instance().log("Render", "Rollback", "Warning", rollbackErr, "FileSystem", task.stagingDir, "{}", parentOpId, "");
             }
         }
         core::log::LogService::instance().log(
-            "Render", "Commit", "Failed", task.errorMessage, "FileSystem", task.finalOutputDir
+            "Render", "Commit", "Failed", task.errorMessage, "FileSystem", task.finalOutputDir, "{}",
+            parentOpId, ""
         );
         return false;
     }
@@ -495,7 +506,9 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         QString("Render completed successfully: %1 tracks written to %2")
             .arg(task.totalTracks).arg(task.finalOutputDir),
         "RenderEngine",
-        task.finalOutputDir
+        task.finalOutputDir,
+        "{}",
+        parentOpId, ""
     );
 
     return true;

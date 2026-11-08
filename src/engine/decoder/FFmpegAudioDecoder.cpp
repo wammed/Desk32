@@ -60,14 +60,17 @@ bool FFmpegAudioDecoder::open(const std::string& filePath)
 {
     cleanup();
     m_filePath = filePath;
+    m_lastError.clear();
 
     // 1. Open media file
     if (avformat_open_input(&m_formatCtx, filePath.c_str(), nullptr, nullptr) < 0) {
+        m_lastError = "Failed to open input file with avformat_open_input: " + filePath;
         return false;
     }
 
     // 2. Retrieve stream information
     if (avformat_find_stream_info(m_formatCtx, nullptr) < 0) {
+        m_lastError = "Failed to retrieve stream info with avformat_find_stream_info.";
         cleanup();
         return false;
     }
@@ -85,6 +88,7 @@ bool FFmpegAudioDecoder::open(const std::string& filePath)
     }
 
     if (m_audioStreamIndex < 0) {
+        m_lastError = "No valid audio stream found in media file.";
         cleanup();
         return false;
     }
@@ -94,22 +98,37 @@ bool FFmpegAudioDecoder::open(const std::string& filePath)
     // 4. Find and initialize codec
     const AVCodec* codec = avcodec_find_decoder(audioStream->codecpar->codec_id);
     if (!codec) {
+        m_lastError = "No supported decoder codec found for audio stream.";
         cleanup();
         return false;
     }
 
     m_codecCtx = avcodec_alloc_context3(codec);
     if (!m_codecCtx) {
+        m_lastError = "Failed to allocate AVCodecContext.";
         cleanup();
         return false;
     }
 
     if (avcodec_parameters_to_context(m_codecCtx, audioStream->codecpar) < 0) {
+        m_lastError = "Failed to copy codec parameters to context.";
         cleanup();
         return false;
     }
 
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
+        m_lastError = "Failed to open audio codec with avcodec_open2.";
+        cleanup();
+        return false;
+    }
+
+    // 4.5. AUD-10: Verify strictly stereo (2 channels).
+    // Desk32 explicitly rejects mono (1ch), quad (4ch), 5.1ch, 7.1ch, and all other non-stereo media upfront.
+    // Implicit downmixing/upmixing via SwrContext is strictly prohibited per Section 2.3 and AUD-10.
+    const int channels = m_codecCtx->ch_layout.nb_channels;
+    if (channels != 2) {
+        m_lastError = "Non-stereo audio format rejected: source has " + std::to_string(channels) +
+                      " channel(s). Desk32 strictly supports stereo 2-channel audio only (AUD-10).";
         cleanup();
         return false;
     }
