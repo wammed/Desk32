@@ -1850,7 +1850,8 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         int64_t p90Ns = latencies[numBlocks * 90 / 100];
         int64_t p99Ns = latencies[numBlocks * 99 / 100];
         int64_t p999Ns = latencies[numBlocks * 999 / 1000];
-        int64_t marginNs = deadlineNanos48 - maxNs;
+        int64_t marginP999Ns = deadlineNanos48 - p999Ns;
+        int64_t marginMaxNs = deadlineNanos48 - maxNs;
 
         // Histogram buckets
         size_t hUnder20 = 0, h20to50 = 0, h50to100 = 0, h100to250 = 0, h250to500 = 0, hOver500 = 0;
@@ -1876,9 +1877,12 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << QString("P99            : %1 µs").arg(static_cast<double>(p99Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("P99.9          : %1 µs").arg(static_cast<double>(p999Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("Max Latency    : %1 µs").arg(static_cast<double>(maxNs) / 1000.0, 0, 'f', 2);
-        qDebug().noquote() << QString("Deadline Margin: %1 µs (%2% of deadline remaining)")
-                                  .arg(static_cast<double>(marginNs) / 1000.0, 0, 'f', 2)
-                                  .arg((static_cast<double>(marginNs) / static_cast<double>(deadlineNanos48)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << QString("P99.9 Margin   : %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginP999Ns) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginP999Ns) / static_cast<double>(deadlineNanos48)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << QString("Max Margin     : %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginMaxNs) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginMaxNs) / static_cast<double>(deadlineNanos48)) * 100.0, 0, 'f', 1);
         qDebug().noquote() << "Latency Distribution Histogram:";
         qDebug().noquote() << QString("  < 20 µs      : %1 (%2%)").arg(static_cast<qlonglong>(hUnder20)).arg(static_cast<double>(hUnder20) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
         qDebug().noquote() << QString("  20 - 50 µs   : %1 (%2%)").arg(static_cast<qlonglong>(h20to50)).arg(static_cast<double>(h20to50) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
@@ -1888,7 +1892,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << QString("  > 500 µs     : %1 (%2%)").arg(static_cast<qlonglong>(hOver500)).arg(static_cast<double>(hOver500) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
         qDebug().noquote() << "========================================================\n";
 
-        QVERIFY(marginNs > 0);
+        QVERIFY(marginP999Ns > 0);
         QVERIFY(p999Ns < deadlineNanos48);
     }
 
@@ -1956,7 +1960,8 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         int64_t p90Ns = latencies[numBlocks * 90 / 100];
         int64_t p99Ns = latencies[numBlocks * 99 / 100];
         int64_t p999Ns = latencies[numBlocks * 999 / 1000];
-        int64_t marginNs = deadlineNanos192 - p999Ns;
+        int64_t marginP999Ns = deadlineNanos192 - p999Ns;
+        int64_t marginMaxNs = deadlineNanos192 - maxNs;
 
         // Histogram buckets
         size_t hUnder20 = 0, h20to50 = 0, h50to100 = 0, h100to250 = 0, h250to500 = 0, hOver500 = 0;
@@ -1982,9 +1987,12 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << QString("P99            : %1 µs").arg(static_cast<double>(p99Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("P99.9          : %1 µs").arg(static_cast<double>(p999Ns) / 1000.0, 0, 'f', 2);
         qDebug().noquote() << QString("Max Latency    : %1 µs").arg(static_cast<double>(maxNs) / 1000.0, 0, 'f', 2);
-        qDebug().noquote() << QString("Deadline Margin (P99.9): %1 µs (%2% of deadline remaining)")
-                                  .arg(static_cast<double>(marginNs) / 1000.0, 0, 'f', 2)
-                                  .arg((static_cast<double>(marginNs) / static_cast<double>(deadlineNanos192)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << QString("P99.9 Margin   : %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginP999Ns) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginP999Ns) / static_cast<double>(deadlineNanos192)) * 100.0, 0, 'f', 1);
+        qDebug().noquote() << QString("Max Margin     : %1 µs (%2% of deadline remaining)")
+                                  .arg(static_cast<double>(marginMaxNs) / 1000.0, 0, 'f', 2)
+                                  .arg((static_cast<double>(marginMaxNs) / static_cast<double>(deadlineNanos192)) * 100.0, 0, 'f', 1);
         qDebug().noquote() << "Latency Distribution Histogram:";
         qDebug().noquote() << QString("  < 20 µs      : %1 (%2%)").arg(static_cast<qlonglong>(hUnder20)).arg(static_cast<double>(hUnder20) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
         qDebug().noquote() << QString("  20 - 50 µs   : %1 (%2%)").arg(static_cast<qlonglong>(h20to50)).arg(static_cast<double>(h20to50) * 100.0 / static_cast<double>(numBlocks), 0, 'f', 2);
@@ -1995,7 +2003,7 @@ void TestAudioPipeline::testAudioThreadRealtimeLogQueueAndLatencyDistribution()
         qDebug().noquote() << "========================================================\n";
 
 #if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
-        QVERIFY(marginNs > 0);
+        QVERIFY(marginP999Ns > 0);
         QVERIFY(p999Ns < deadlineNanos192);
 #endif
     }

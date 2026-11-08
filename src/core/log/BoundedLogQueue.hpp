@@ -8,8 +8,9 @@
 
 namespace desk32::core::log {
 
-/// Truly Lock-Free, Wait-Free Bounded Log Queue for RT-safe log transfer
+/// Lock-Free Bounded Log Queue for asynchronous log transfer.
 /// Implements Vyukov bounded MPMC queue with zero mutex, zero trylock, and zero dynamic allocation.
+/// Progress guarantee: Lock-free (system-wide non-blocking progress; wait-free under saturation drop).
 template <typename T, size_t Capacity = 4096>
 class BoundedLogQueue {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
@@ -26,7 +27,7 @@ public:
         }
     }
 
-    /// Strictly non-blocking, lock-free, wait-free push for Real-time Audio Thread.
+    /// Non-blocking, lock-free push.
     /// Returns false immediately without waiting or acquiring locks if the queue is full.
     bool try_push(const T& item) {
         size_t pos = m_enqueuePos.load(std::memory_order_relaxed);
