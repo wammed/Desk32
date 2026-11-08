@@ -7,6 +7,9 @@
 #include "engine/dsp/Compressor.hpp"
 #include "engine/dsp/PeakLimiter.hpp"
 #include "engine/dsp/AlgorithmicReverb.hpp"
+#include <array>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <mutex>
 
@@ -452,6 +455,13 @@ public:
         bool enabled{false};
     };
 
+    struct RingoutSlot {
+        AlgorithmicReverb* reverb{nullptr};
+        size_t ageFrames{0};
+        size_t silentBlocks{0};
+    };
+    static constexpr size_t MAX_RINGOUT_SLOTS = 3;
+
     explicit ReverbNode(std::string name = "Reverb")
         : AudioNode(std::move(name), NodeAffiliation::RenderCommon)
     {
@@ -465,7 +475,10 @@ public:
         if (auto* unconsumed = m_prepared.exchange(nullptr)) {
             delete unconsumed;
         }
-        delete m_fade;
+        for (auto& slot : m_ringoutSlots) {
+            delete slot.reverb;
+            slot.reverb = nullptr;
+        }
         delete m_active;
     }
 
@@ -501,22 +514,42 @@ public:
 
     void reset() override {
         if (m_active) m_active->reset();
-        if (m_fade) m_fade->reset();
+        for (auto& slot : m_ringoutSlots) {
+            if (slot.reverb) {
+                retireInstance(slot.reverb);
+                slot.reverb = nullptr;
+                slot.ageFrames = 0;
+                slot.silentBlocks = 0;
+            }
+        }
     }
 
     void process(double* left, double* right, size_t frameCount) override {
-        // 1. Check for prepared instance at block boundary
+        // 1. Check for prepared instance at block boundary (RT-safe atomic exchange)
         if (auto* prepared = m_prepared.exchange(nullptr, std::memory_order_acq_rel)) {
             if (m_active) {
                 // Tail Preservation (P0-22, v1.6): No buffer copying on Audio Thread!
-                // Instead, m_fade naturally continues rendering existing reverberation tail,
-                // while m_active renders incoming audio with new parameters, crossfaded smoothly over CROSSFADE_FRAMES.
-                if (m_fade) {
-                    retireInstance(m_fade);
+                // Migrate current active instance to a ringout slot so its reverberation tail
+                // decays naturally until silence (< -80dB), while m_active renders new audio.
+                bool placed = false;
+                for (auto& slot : m_ringoutSlots) {
+                    if (!slot.reverb) {
+                        slot.reverb = m_active;
+                        slot.ageFrames = 0;
+                        slot.silentBlocks = 0;
+                        placed = true;
+                        break;
+                    }
                 }
-                m_fade = m_active;
+                if (!placed) {
+                    // All ringout slots full: retire oldest slot and shift
+                    retireInstance(m_ringoutSlots[0].reverb);
+                    for (size_t s = 1; s < MAX_RINGOUT_SLOTS; ++s) {
+                        m_ringoutSlots[s - 1] = m_ringoutSlots[s];
+                    }
+                    m_ringoutSlots[MAX_RINGOUT_SLOTS - 1] = RingoutSlot{m_active, 0, 0};
+                }
                 m_active = prepared;
-                m_crossfadeRemaining = CROSSFADE_FRAMES;
             } else {
                 m_active = prepared;
             }
@@ -524,38 +557,47 @@ public:
 
         if (isBypassed()) return;
 
-        // 2. Audio processing with Tail-Preserving Crossfade (P0-22)
-        if (m_crossfadeRemaining > 0 && m_fade) {
+        // 2. Active audio processing with new parameters
+        if (m_active) {
             for (size_t i = 0; i < frameCount; ++i) {
-                double l_act = left[i];
-                double r_act = right[i];
-                if (m_active) m_active->process(l_act, r_act);
-
-                double l_fade = left[i];
-                double r_fade = right[i];
-                m_fade->process(l_fade, r_fade);
-
-                double activeWeight = 1.0 - static_cast<double>(m_crossfadeRemaining) / static_cast<double>(CROSSFADE_FRAMES);
-                double fadeWeight = 1.0 - activeWeight;
-
-                left[i] = activeWeight * l_act + fadeWeight * l_fade;
-                right[i] = activeWeight * r_act + fadeWeight * r_fade;
-
-                if (--m_crossfadeRemaining == 0) {
-                    retireInstance(m_fade);
-                    m_fade = nullptr;
-                    // Finish remaining frames in this block with m_active only
-                    for (size_t j = i + 1; j < frameCount; ++j) {
-                        if (m_active) m_active->process(left[j], right[j]);
-                    }
-                    break;
-                }
+                m_active->process(left[i], right[i]);
             }
-        } else {
-            if (m_active) {
-                for (size_t i = 0; i < frameCount; ++i) {
-                    m_active->process(left[i], right[i]);
-                }
+        }
+
+        // 3. Ringout slots processing: input 0.0 to render decaying reverberation tails naturally
+        for (auto& slot : m_ringoutSlots) {
+            if (!slot.reverb) continue;
+
+            double maxBlockTail = 0.0;
+            for (size_t i = 0; i < frameCount; ++i) {
+                double tailL = 0.0;
+                double tailR = 0.0;
+                slot.reverb->process(tailL, tailR);
+                left[i] += tailL;
+                right[i] += tailR;
+
+                double absL = std::abs(tailL);
+                double absR = std::abs(tailR);
+                if (absL > maxBlockTail) maxBlockTail = absL;
+                if (absR > maxBlockTail) maxBlockTail = absR;
+            }
+
+            slot.ageFrames += frameCount;
+
+            // Tail decay check: < -80dB (1e-4) or safety ceiling (e.g. 10 seconds @ 48kHz = 480,000 frames)
+            if (maxBlockTail < 1e-4) {
+                slot.silentBlocks++;
+            } else {
+                slot.silentBlocks = 0;
+            }
+
+            // Retire when tail has decayed into silence (e.g. 8 consecutive silent blocks)
+            // or after maximum ringout duration limit
+            if (slot.silentBlocks >= 8 || slot.ageFrames >= 480000) {
+                retireInstance(slot.reverb);
+                slot.reverb = nullptr;
+                slot.ageFrames = 0;
+                slot.silentBlocks = 0;
             }
         }
     }
@@ -622,8 +664,7 @@ private:
     mutable std::mutex m_configMutex;
     Config m_config;
     AlgorithmicReverb* m_active{nullptr};
-    AlgorithmicReverb* m_fade{nullptr};
-    size_t m_crossfadeRemaining{0};
+    std::array<RingoutSlot, MAX_RINGOUT_SLOTS> m_ringoutSlots{};
 
     alignas(64) std::atomic<AlgorithmicReverb*> m_prepared{nullptr};
     alignas(64) std::atomic<AlgorithmicReverb*> m_retireHead{nullptr};

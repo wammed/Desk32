@@ -105,7 +105,7 @@ public:
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
     /// Thread-safe Telemetry Snapshot retrieval for Control / UI Thread (P0-26, P0-29).
-    /// Audio Thread publishes via publishTelemetry() strictly lock-free and wait-free.
+    /// Audio Thread publishes via publishTelemetry() with zero mutexes and non-blocking lock-free buffer swap.
     /// UI / Reader threads serialize reading via m_telemetryReadMutex to safely copy published telemetry.
     [[nodiscard]] DspTelemetry currentTelemetry() const noexcept {
         std::lock_guard<std::mutex> lock(m_telemetryReadMutex);
@@ -417,8 +417,9 @@ private:
         }
     }
 
-    /// Audio Thread: Lock-free, wait-free Telemetry publication (P0-29).
-    /// Zero locks, zero dynamic allocation, strictly O(1) single atomic exchange.
+    /// Audio Thread: Mutex-free, non-blocking lock-free Telemetry publication (P0-29).
+    /// Inspects up to N DSP nodes (bounded O(N) traversal, zero dynamic allocation, zero locks)
+    /// and publishes the snapshot buffer via a single O(1) atomic exchange.
     void publishTelemetry(AudioChain* master, size_t frames) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
@@ -463,6 +464,8 @@ private:
     dsp::DspParameterMailbox m_paramMailbox;
 
     alignas(64) std::array<DspTelemetry, 3> m_telemetryBuffers{};
+    static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                  "Telemetry triple-buffer state must be natively lock-free on this platform");
     alignas(64) mutable std::atomic<uint32_t> m_sharedTelemetryState{1};
     int m_writerTelemetryIndex{0};
     mutable int m_readerTelemetryIndex{2};

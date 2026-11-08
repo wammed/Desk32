@@ -34,16 +34,16 @@ bool DecoderWorker::openTrack(const std::string& filePath, double graphSampleRat
     uint64_t seq = 0;
     uint64_t reqId = 0;
 
-    // Linearization Point: Request ID issuance and publication strictly synchronized under m_trackMutex
+    // Linearization Point: Lock m_trackMutex and m_cmdMutex together in strict hierarchical order
+    // to atomically issue the Request ID and enqueue the command, eliminating Close/Open interleaving race
     {
         std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        std::lock_guard<std::mutex> cmdLock(m_cmdMutex);
+
         reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
         m_activeRequestId.store(reqId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
-    }
 
-    {
-        std::lock_guard<std::mutex> lock(m_cmdMutex);
         seq = ++m_seekSequence;
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::Open;
@@ -78,16 +78,15 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
     uint64_t seq = 0;
     uint64_t reqId = 0;
 
-    // Linearization Point: Request ID issuance and publication strictly synchronized under m_trackMutex
+    // Linearization Point: Lock m_trackMutex and m_cmdMutex together in strict hierarchical order
     {
         std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        std::lock_guard<std::mutex> cmdLock(m_cmdMutex);
+
         reqId = m_nextRequestId.fetch_add(1, std::memory_order_relaxed);
         m_activeRequestId.store(reqId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::None, std::memory_order_release);
-    }
 
-    {
-        std::lock_guard<std::mutex> lock(m_cmdMutex);
         seq = ++m_seekSequence;
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::OpenSynthetic;
@@ -120,20 +119,24 @@ bool DecoderWorker::openSyntheticTrack(uint64_t totalFrames, double sampleRate, 
 }
 
 void DecoderWorker::closeTrack() {
-    // P0-26: Cancel any in-flight open requests under m_trackMutex
-    {
-        std::lock_guard<std::mutex> lock(m_trackMutex);
-        m_activeRequestId.store(0, std::memory_order_release);
-        m_committedRequestId.store(0, std::memory_order_release);
-    }
-    m_lastOpenStatus.store(OpenStatus::Cancelled, std::memory_order_release);
-
     auto promise = std::make_shared<std::promise<bool>>();
     auto future = promise->get_future();
+
+    // P0-26: Atomically invalidate request ID and enqueue CloseTrack command under hierarchical lock
     {
-        std::lock_guard<std::mutex> lock(m_cmdMutex);
+        std::lock_guard<std::mutex> trackLock(m_trackMutex);
+        std::lock_guard<std::mutex> cmdLock(m_cmdMutex);
+
+        uint64_t closingReqId = m_activeRequestId.load(std::memory_order_relaxed);
+        if (closingReqId == 0) {
+            closingReqId = m_committedRequestId.load(std::memory_order_relaxed);
+        }
+        m_activeRequestId.store(0, std::memory_order_release);
+        m_lastOpenStatus.store(OpenStatus::Cancelled, std::memory_order_release);
+
         WorkerCommand cmd;
         cmd.type = WorkerCommandType::CloseTrack;
+        cmd.targetRequestId = closingReqId; // Tag generation so older close doesn't close newer open
         cmd.openPromise = promise;
         m_pendingCommands.push_back(std::move(cmd));
     }
@@ -450,22 +453,31 @@ void DecoderWorker::processCommand(const WorkerCommand& cmd) {
         break;
     }
     case WorkerCommandType::CloseTrack: {
+        bool skipClose = false;
         {
             std::lock_guard<std::mutex> lock(m_trackMutex);
-            m_isOpen.store(false, std::memory_order_release);
-            m_isPlaying.store(false, std::memory_order_release);
-            m_isEof.store(true, std::memory_order_release);
-            m_committedRequestId.store(0, std::memory_order_release);
-            m_trackInfo = WorkerTrackInfo{};
-            m_metadata.reset();
-            m_decoder.reset();
-            m_resampler.reset();
+            uint64_t currentCommitted = m_committedRequestId.load(std::memory_order_relaxed);
+            if (cmd.targetRequestId != 0 && currentCommitted > cmd.targetRequestId) {
+                // A newer OpenTrack was already committed before this old CloseTrack arrived; skip close
+                skipClose = true;
+            } else {
+                m_isOpen.store(false, std::memory_order_release);
+                m_isPlaying.store(false, std::memory_order_release);
+                m_isEof.store(true, std::memory_order_release);
+                m_committedRequestId.store(0, std::memory_order_release);
+                m_trackInfo = WorkerTrackInfo{};
+                m_metadata.reset();
+                m_decoder.reset();
+                m_resampler.reset();
+            }
         }
-        m_ringBuffer.resetProducer();
-        m_pendingOutOffset = 0;
-        m_pendingOutCount = 0;
+        if (!skipClose) {
+            m_ringBuffer.resetProducer();
+            m_pendingOutOffset = 0;
+            m_pendingOutCount = 0;
+        }
         if (cmd.openPromise) {
-            cmd.openPromise->set_value(true);
+            try { cmd.openPromise->set_value(true); } catch (...) {}
         }
         break;
     }

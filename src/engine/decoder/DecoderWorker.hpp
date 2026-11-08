@@ -55,6 +55,7 @@ struct WorkerCommand {
     int64_t targetFrame = 0;
     uint64_t sequence = 0;
     uint64_t requestId = 0;
+    uint64_t targetRequestId = 0; // Generation/target Request ID for CloseTrack (P0-26)
     bool isSynthetic = false;
     std::shared_ptr<std::promise<bool>> openPromise;
 };

@@ -29,6 +29,11 @@ using namespace desk32::engine::pipeline;
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -88,6 +93,10 @@ void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void* p, size_t, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, size_t, std::align_val_t) noexcept { std::free(p); }
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
 class TestPhase2Dsp : public QObject {
     Q_OBJECT
 
@@ -113,6 +122,7 @@ private slots:
     void testPreparedDspInstanceExchangeSafety();
     void testContinuousParameterMailboxUpdates();
     void testRtSafetyAllocationDuringProcess();
+    void testConcurrentSampleRateAndMailboxUpdates();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -1203,15 +1213,17 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         std::vector<double> excite(1024, 0.5);
         rev.process(excite.data(), excite.data(), 1024);
 
-        // Perform multiple exchanges while input is zero
+        // Perform multiple exchanges while input is zero (P0-22: Tail preservation across exchanges)
         std::vector<double> zero(256, 0.0);
-        for (int i = 0; i < 4; ++i) {
-            rev.prepareInstance(48000.0, 0.7 - i * 0.1, 0.3, 0.5, 0.0, true, true);
+        for (int i = 0; i < 8; ++i) { // 8 blocks = 2048 frames (~42.7ms)
+            if (i < 4) {
+                rev.prepareInstance(48000.0, 0.7 - i * 0.1, 0.3, 0.5, 0.0, true, true);
+            }
             rev.process(zero.data(), zero.data(), 256);
             double e = 0.0;
             for (double s : zero) e += s * s;
             // Tail should smoothly decay without dropping to 0 instantaneously
-            QVERIFY(e > 1e-5);
+            QVERIFY(e > 1e-6);
         }
         rev.reclaimRetired();
     }
@@ -1236,21 +1248,28 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         rev.reclaimRetired();
     }
 
-    // Case 12: Bounded execution time during exchange (Microbenchmark)
+    // Case 12: Bounded execution time during exchange on Audio Thread (Microbenchmark)
     {
         ReverbNode rev;
         rev.prepareInstance(48000.0, 0.7, 0.3, 0.3, 0.0, true, true);
         std::vector<double> block(256, 0.2);
 
-        auto t0 = std::chrono::steady_clock::now();
-        // Trigger prepared instance exchange at block boundary
+        // Control Thread prepares instance beforehand
         rev.prepareInstance(48000.0, 0.8, 0.4, 0.4, 0.0, true, true);
+
+        // Audio Thread: only measure process() execution time
+        auto t0 = std::chrono::steady_clock::now();
         rev.process(block.data(), block.data(), 256);
         auto t1 = std::chrono::steady_clock::now();
 
         int64_t elapsedNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-        // 256 frames of reverb processing with crossfade must easily complete under 500 microseconds (500,000 ns)
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__)
+        // Sanitizer instrumentation incurs CPU overhead; bounded within 5 milliseconds (5,000,000 ns)
         QVERIFY(elapsedNanos < 5000000);
+#else
+        // 256 frames of reverb processing on Audio Thread must easily complete under 500 microseconds (500,000 ns)
+        QVERIFY(elapsedNanos < 500000);
+#endif
         rev.reclaimRetired();
     }
 
@@ -1350,6 +1369,50 @@ void TestPhase2Dsp::testRtSafetyAllocationDuringProcess()
 
     s_trackAllocations.store(false);
     QCOMPARE(s_allocationCount.load(), 0u);
+}
+
+void TestPhase2Dsp::testConcurrentSampleRateAndMailboxUpdates()
+{
+    // Test E (P0-24): Multi-thread concurrent setSampleRate and parameter updates
+    DspParameterMailbox mailbox;
+    std::atomic<bool> stop{false};
+
+    // Thread 1: Rapid sample rate changes
+    std::thread t1([&]() {
+        const double rates[] = {44100.0, 48000.0, 88200.0, 96000.0, 192000.0};
+        int idx = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            mailbox.setSampleRate(rates[idx % 5]);
+            idx++;
+            std::this_thread::yield();
+        }
+    });
+
+    // Thread 2: Rapid EQ parameter changes
+    std::thread t2([&]() {
+        int idx = 0;
+        while (!stop.load(std::memory_order_relaxed)) {
+            mailbox.setGeqBandGain(static_cast<size_t>(idx % 32), static_cast<float>((idx % 24) - 12));
+            idx++;
+            std::this_thread::yield();
+        }
+    });
+
+    // Reader Thread: Audio Thread fetching parameters
+    ContinuousDspParameters params;
+    uint64_t fetches = 0;
+    for (int i = 0; i < 200; ++i) {
+        if (mailbox.fetchUpdates(params)) {
+            fetches++;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    t1.join();
+    t2.join();
+
+    QVERIFY(fetches > 0);
 }
 
 QTEST_MAIN(TestPhase2Dsp)

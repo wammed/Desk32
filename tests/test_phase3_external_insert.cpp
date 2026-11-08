@@ -23,6 +23,11 @@ using namespace desk32::core;
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -55,6 +60,10 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
 void operator delete[](void* p, size_t) noexcept { std::free(p); }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 class TestPhase3ExternalInsert : public QObject {
     Q_OBJECT

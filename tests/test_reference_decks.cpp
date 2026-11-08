@@ -16,6 +16,11 @@
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -97,6 +102,10 @@ void operator delete(void* p, size_t, std::align_val_t) noexcept {
 void operator delete[](void* p, size_t, std::align_val_t) noexcept {
     std::free(p);
 }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 using namespace desk32::engine::deck;
 
@@ -923,6 +932,40 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
         // No unhandled exceptions or crashes
         (void)worker.activeRequestId();
         QVERIFY(true);
+    }
+
+    // Case 11: Concurrent CloseTrack and OpenTrack deterministic race (P0-26)
+    {
+        desk32::engine::decoder::DecoderWorker worker;
+        worker.openTrack(m_wav1.toStdString(), 48000.0);
+        QVERIFY(worker.isOpen());
+
+        std::atomic<bool> start{false};
+        std::atomic<bool> openResult{false};
+
+        std::thread tClose([&]() {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            worker.closeTrack();
+        });
+
+        std::thread tOpen([&]() {
+            while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+            openResult.store(worker.openTrack(m_wav2.toStdString(), 48000.0));
+        });
+
+        start.store(true, std::memory_order_release);
+        tClose.join();
+        tOpen.join();
+
+        // Consistent state verification:
+        // Either Open won (isOpen == true, path == wav2, active/committed ID match),
+        // or Close won (isOpen == false, committedRequestId == 0)
+        if (worker.isOpen()) {
+            QCOMPARE(worker.trackInfo().path, m_wav2.toStdString());
+            QVERIFY(worker.committedRequestId() > 0);
+        } else {
+            QCOMPARE(worker.committedRequestId(), 0u);
+        }
     }
 }
 

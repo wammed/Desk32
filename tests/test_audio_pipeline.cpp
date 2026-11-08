@@ -10,6 +10,11 @@
 static std::atomic<size_t> s_rtAllocCount{0};
 static thread_local bool t_isAudioThread{false};
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
+
 void* operator new(size_t size) {
     if (t_isAudioThread) {
         s_rtAllocCount.fetch_add(1, std::memory_order_relaxed);
@@ -53,6 +58,10 @@ void operator delete(void* ptr, size_t) noexcept {
 void operator delete[](void* ptr, size_t) noexcept {
     free(ptr);
 }
+
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 using namespace desk32::engine::pipeline;
 
@@ -593,8 +602,20 @@ void TestAudioPipeline::testReverbTailPreservationCrossfade()
     // Tail energy must remain preserved and non-zero (not truncated to 0)
     QVERIFY(tailEnergyCrossfade1 > 1e-4);
 
-    // Process next block (completing the crossfade)
+    // Process next block (completing the initial transition)
     pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+    double tailEnergyCrossfade2 = 0.0;
+    for (float s : out) tailEnergyCrossfade2 += s * s;
+    QVERIFY(tailEnergyCrossfade2 > 1e-4);
+
+    // Process blocks beyond 512 frames: ringout tail must continue naturally (P0-22)
+    for (int b = 0; b < 4; ++b) {
+        pipeline.process(inL.data(), inR.data(), frames, out.data(), SampleFormat::Float32, false);
+        double tailBlockEnergy = 0.0;
+        for (float s : out) tailBlockEnergy += s * s;
+        QVERIFY(tailBlockEnergy > 1e-5);
+    }
+
     pipeline.reclaimRetiredMemory();
 }
 

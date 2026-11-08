@@ -103,8 +103,9 @@ public:
     }
 
     void setSampleRate(double sampleRate) {
-        if (sampleRate <= 0.0 || sampleRate == m_sampleRate) return;
+        if (sampleRate <= 0.0) return;
         std::lock_guard<std::mutex> lock(m_producerMutex);
+        if (sampleRate == m_sampleRate) return;
         m_sampleRate = sampleRate;
         prepareStaging();
         recalculateAllCoefficients();
