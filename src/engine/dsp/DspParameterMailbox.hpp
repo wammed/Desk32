@@ -62,6 +62,7 @@ struct ContinuousDspParameters {
     std::array<bool, ParametricEQ::BANDS_PER_CHANNEL> listeningRightEnabled{};
     bool listeningModified = false;
 
+    uint64_t epoch = 1;
     uint64_t sequenceNumber = 0;
 };
 
@@ -105,8 +106,10 @@ public:
     }
 
     /// Re-initialize mailbox to default state (Control Thread when Audio Thread is stopped, P0-24)
+    /// Monotonic sequenceNumber is preserved across resets, while epoch is incremented.
     void reset() {
         std::lock_guard<std::mutex> lock(m_producerMutex);
+        m_epoch.fetch_add(1, std::memory_order_release);
         m_listeningPresetConfigured = false;
         initDefaultStaging();
         for (auto& buf : m_buffers) {
@@ -115,7 +118,14 @@ public:
         m_writeIndex = 0;
         m_consumerIndex = 2;
         m_sharedState.store(1, std::memory_order_release);
-        m_updateCounter.store(0, std::memory_order_release);
+    }
+
+    [[nodiscard]] uint64_t currentEpoch() const noexcept {
+        return m_epoch.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] uint64_t currentSequenceNumber() const noexcept {
+        return m_updateCounter.load(std::memory_order_acquire);
     }
 
     void setSampleRate(double sampleRate) {
@@ -453,6 +463,7 @@ private:
             m_staging.filterModified = false;
             m_staging.listeningModified = false;
         }
+        m_staging.epoch = m_epoch.load(std::memory_order_relaxed);
         m_staging.sequenceNumber = m_updateCounter.load(std::memory_order_relaxed) + 1;
     }
 
@@ -475,6 +486,7 @@ private:
     ContinuousDspParameters m_staging{};
     std::array<ContinuousDspParameters, 3> m_buffers{};
 
+    alignas(64) std::atomic<uint64_t> m_epoch{1};
     alignas(64) std::atomic<uint32_t> m_sharedState{1};
     uint32_t m_writeIndex{0};
     uint32_t m_consumerIndex{2};

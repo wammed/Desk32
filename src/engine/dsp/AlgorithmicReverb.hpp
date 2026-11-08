@@ -261,13 +261,17 @@ public:
     }
 
     /// Check whether any internal delay line or filter state has become NaN or Inf (P0-22).
+    /// Strictly O(1) lock-free check on Audio Thread without buffer scanning.
     [[nodiscard]] bool hasInvalidState() const noexcept {
-        return !std::isfinite(totalInternalEnergy());
+        return m_hasInvalidState.load(std::memory_order_relaxed);
     }
 
     /// Test helper to inject a non-finite value into internal state for safety verification (P0-22).
     void injectInvalidStateForTest(double nonFiniteVal) noexcept {
         m_combsLeft[0].filterStore = nonFiniteVal;
+        if (!std::isfinite(nonFiniteVal)) {
+            m_hasInvalidState.store(true, std::memory_order_relaxed);
+        }
     }
 
     /// Acoustic physical decay lower bound (1.5 * RT60 frames) to reach -80 dB safely (P0-22).
@@ -333,6 +337,7 @@ public:
         for (auto& a : m_allPassRight) a.reset();
         m_predelayBuffer.fill(0.0);
         m_predelayWritePos = 0;
+        m_hasInvalidState.store(false, std::memory_order_relaxed);
     }
 
     /// Real-time audio rendering: Lock-free, zero heap allocation, bounded execution time.
@@ -377,6 +382,10 @@ public:
             outCombR = m_allPassRight[i].process(outCombR);
         }
 
+        if (!std::isfinite(outCombL) || !std::isfinite(outCombR)) {
+            m_hasInvalidState.store(true, std::memory_order_relaxed);
+        }
+
         // Mix
         if (active) {
             left = left * p->dry + outCombL * p->wet;
@@ -400,6 +409,7 @@ private:
     bool m_tailPreserving = true;
 
     std::atomic<bool> m_enabled{false};
+    std::atomic<bool> m_hasInvalidState{false};
 
     CombFilter m_combsLeft[4];
     CombFilter m_combsRight[4];

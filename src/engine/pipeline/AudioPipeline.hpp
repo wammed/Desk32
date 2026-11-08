@@ -305,7 +305,7 @@ private:
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* compNode = dynamic_cast<CompressorNode*>(master->node(i))) {
-                        compNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        compNode->setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
                 }
@@ -316,7 +316,7 @@ private:
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* limiterNode = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
-                        limiterNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        limiterNode->setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
                 }
@@ -327,7 +327,7 @@ private:
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* reverbNode = dynamic_cast<ReverbNode*>(master->node(i))) {
-                        reverbNode->dsp().setEnabled(cmd.boolFlag1 != 0);
+                        reverbNode->setEnabled(cmd.boolFlag1 != 0);
                         break;
                     }
                 }
@@ -371,7 +371,7 @@ private:
             if (params.geqModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
-                        geqNode->dsp().applyAllCoefficients(params.geqCoefficients);
+                        geqNode->applyAllCoefficients(params.geqCoefficients);
                         break;
                     }
                 }
@@ -381,7 +381,7 @@ private:
             if (params.peqLeftModifiedMask != 0 || params.peqRightModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
-                        peqNode->dsp().applyCoefficients(
+                        peqNode->applyCoefficients(
                             params.peqLeftCoefficients,
                             params.peqRightCoefficients,
                             params.peqLeftEnabled,
@@ -396,7 +396,7 @@ private:
             if (params.filterModified) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
-                        filterNode->dsp().applyCoefficients(params.filterCoefficients);
+                        filterNode->applyCoefficients(params.filterCoefficients);
                         break;
                     }
                 }
@@ -408,7 +408,7 @@ private:
             if (params.listeningModified) {
                 for (size_t i = 0; i < listening->nodeCount(); ++i) {
                     if (auto* listenNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
-                        listenNode->dsp().applyCoefficients(
+                        listenNode->applyCoefficients(
                             params.listeningLeftCoefficients,
                             params.listeningRightCoefficients,
                             params.listeningLeftEnabled,
@@ -435,14 +435,14 @@ private:
                 if (!node) continue;
                 if (auto* comp = dynamic_cast<CompressorNode*>(node)) {
                     t.compressorGainReductionDb = comp->isBypassed() ? 0.0 : comp->gainReductionDb();
-                    t.compressorEnabled = !comp->isBypassed() && comp->dsp().isEnabled();
+                    t.compressorEnabled = !comp->isBypassed() && comp->isEnabled();
                 } else if (auto* lim = dynamic_cast<PeakLimiterNode*>(node)) {
                     t.limiterGainReductionDb = lim->isBypassed() ? 0.0 : lim->gainReductionDb();
                     t.limiterLatencyFrames = lim->isBypassed() ? 0 : lim->latencyFrames();
-                    t.limiterEnabled = !lim->isBypassed() && lim->dsp().isEnabled();
+                    t.limiterEnabled = !lim->isBypassed() && lim->isEnabled();
                 } else if (auto* rev = dynamic_cast<ReverbNode*>(node)) {
                     t.reverbWetLevel = rev->isBypassed() ? 0.0 : rev->wetLevel();
-                    t.reverbEnabled = !rev->isBypassed() && rev->dsp().isEnabled();
+                    t.reverbEnabled = !rev->isBypassed() && rev->isEnabled();
                 }
             }
         } else {

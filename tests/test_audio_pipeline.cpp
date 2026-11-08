@@ -6,6 +6,10 @@
 #include <atomic>
 #include <execinfo.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <time.h>
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
@@ -152,6 +156,66 @@ void operator delete[](void* ptr, size_t, std::align_val_t) noexcept {
 #pragma GCC diagnostic pop
 #endif
 
+extern "C" {
+
+int pthread_mutex_lock(pthread_mutex_t* mutex) {
+    static auto orig = reinterpret_cast<int(*)(pthread_mutex_t*)>(dlsym(RTLD_NEXT, "pthread_mutex_lock"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(mutex);
+}
+
+int pthread_mutex_trylock(pthread_mutex_t* mutex) {
+    static auto orig = reinterpret_cast<int(*)(pthread_mutex_t*)>(dlsym(RTLD_NEXT, "pthread_mutex_trylock"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(mutex);
+}
+
+int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
+    static auto orig = reinterpret_cast<int(*)(pthread_cond_t*, pthread_mutex_t*)>(dlsym(RTLD_NEXT, "pthread_cond_wait"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(cond, mutex);
+}
+
+int pthread_cond_timedwait(pthread_cond_t* cond, pthread_mutex_t* mutex, const struct timespec* abstime) {
+    static auto orig = reinterpret_cast<int(*)(pthread_cond_t*, pthread_mutex_t*, const struct timespec*)>(dlsym(RTLD_NEXT, "pthread_cond_timedwait"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(cond, mutex, abstime);
+}
+
+int sem_wait(sem_t* sem) {
+    static auto orig = reinterpret_cast<int(*)(sem_t*)>(dlsym(RTLD_NEXT, "sem_wait"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(sem);
+}
+
+int nanosleep(const struct timespec* req, struct timespec* rem) {
+    static auto orig = reinterpret_cast<int(*)(const struct timespec*, struct timespec*)>(dlsym(RTLD_NEXT, "nanosleep"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(req, rem);
+}
+
+int usleep(useconds_t usec) {
+    static auto orig = reinterpret_cast<int(*)(useconds_t)>(dlsym(RTLD_NEXT, "usleep"));
+    if (t_isAudioThread) {
+        s_rtStats.rtBlockingCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    return orig(usec);
+}
+
+} // extern "C"
+
 using namespace desk32::engine::pipeline;
 
 class TestAudioPipeline : public QObject {
@@ -177,6 +241,8 @@ private slots:
     void testEpochReclaimerWriterShutdownSerialization();
     void testEpochReclaimerDeterministicShutdownRaces();
     void testRealTimeSafetyInLivePipeline();
+    void testRealtimeSafetyNegativeDetection();
+    void testAudioPipelineWorstCaseRealtimeConditions();
     void testAudioChainMaxNodesAndBoundedCommandDrain();
     void cleanupTestCase();
 };
@@ -255,7 +321,7 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
     // Create a Listening Correction chain with massive boost (+12 dB on peak filter)
     auto listenChain = std::make_unique<AudioChain>("Test Listening", ChainPurpose::ListeningCorrectionChain);
     auto headphoneEq = std::make_shared<ParametricEqNode>("Headphone EQ", NodeAffiliation::ListeningCorrection);
-    headphoneEq->dsp().setEnabled(true);
+    headphoneEq->setEnabled(true);
 
     ParametricEQ::BandConfig cfg;
     cfg.enabled = true;
@@ -263,8 +329,8 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
     cfg.frequency = 1000.0;
     cfg.gainDb = 12.0;
     cfg.Q = 2.0;
-    headphoneEq->dsp().setLeftBand(0, cfg);
-    headphoneEq->dsp().setRightBand(0, cfg);
+    headphoneEq->setLeftBand(0, cfg);
+    headphoneEq->setRightBand(0, cfg);
     listenChain->appendNode(headphoneEq);
 
     pipeline.swapListeningChain(std::move(listenChain));
@@ -1278,6 +1344,172 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
         QVERIFY(stressNanos < 10000000);
 #endif
     }
+}
+
+void TestAudioPipeline::testRealtimeSafetyNegativeDetection()
+{
+    // P0-23: Negative Test for RT Safety Detection.
+    // Intentionally violates RT constraints under t_isAudioThread = true,
+    // proving that heap allocation counters and blocking call counters are live, active, and detectable.
+    s_rtStats.reset();
+    QCOMPARE(s_rtStats.totalAllocations(), 0u);
+    QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
+
+    t_isAudioThread = true;
+
+    // 1. Intentionally trigger heap scalar and array allocations (using explicit operator new to prevent compiler elision)
+    void* scalar = ::operator new(64);
+    asm volatile("" : "+r"(scalar) : : "memory");
+    ::operator delete(scalar);
+
+    void* arr = ::operator new[](128);
+    asm volatile("" : "+r"(arr) : : "memory");
+    ::operator delete[](arr);
+
+    // 2. Intentionally trigger POSIX mutex lock (via std::mutex)
+    std::mutex mtx;
+    mtx.lock();
+    mtx.unlock();
+
+    // 3. Intentionally trigger POSIX sleep blocking call
+    usleep(50);
+
+    t_isAudioThread = false;
+
+    // Verify negative detections fired
+    QVERIFY(s_rtStats.opNewCount.load() >= 1);
+    QVERIFY(s_rtStats.opDeleteCount.load() >= 1);
+    QVERIFY(s_rtStats.opNewArrayCount.load() >= 1);
+    QVERIFY(s_rtStats.opDeleteArrayCount.load() >= 1);
+    QVERIFY(s_rtStats.rtBlockingCount.load() >= 2); // mutex lock + usleep
+
+    // Clean up tracker
+    s_rtStats.reset();
+}
+
+void TestAudioPipeline::testAudioPipelineWorstCaseRealtimeConditions()
+{
+    // P0-23, P0-29: Worst-case real-time condition stress test:
+    // - High sample rate: 192,000 Hz
+    // - Large block size: 4096 frames (deadline = 21.33 ms)
+    // - Full 16-node audio chain populated with diverse DSP:
+    //   ParametricEq, GraphicEq, HighLowPass, Compressor, Limiter, Reverb, ExternalInsertBridge
+    // - Reverb with all 8 ringout slots saturated
+    // - Maximum discrete command drain (64 commands drained per block from 128 queued)
+    // - Concurrent Control Thread parameter updates and instance exchanges
+    // - Verification: Zero heap allocations, Zero blocking calls, execution time strictly within audio deadline.
+
+    const double sampleRate = 192000.0;
+    const size_t frames = 4096;
+    AudioPipeline pipeline(sampleRate);
+
+    auto chain = std::make_unique<AudioChain>("WorstCaseMaster", ChainPurpose::MasteringChain);
+
+    // Build 16 heterogeneous DSP nodes:
+    // 4 PEQs, 2 GEQs, 2 Filter nodes, 2 Compressors, 2 Limiters, 2 Reverbs, 2 Inserts
+    auto peq1 = std::make_shared<ParametricEqNode>("PEQ_1");
+    auto peq2 = std::make_shared<ParametricEqNode>("PEQ_2");
+    auto peq3 = std::make_shared<ParametricEqNode>("PEQ_3");
+    auto peq4 = std::make_shared<ParametricEqNode>("PEQ_4");
+    auto geq1 = std::make_shared<GraphicEqNode>("GEQ_1");
+    auto geq2 = std::make_shared<GraphicEqNode>("GEQ_2");
+    auto flt1 = std::make_shared<HighLowPassNode>("FLT_1");
+    auto flt2 = std::make_shared<HighLowPassNode>("FLT_2");
+    auto comp1 = std::make_shared<CompressorNode>("COMP_1");
+    auto comp2 = std::make_shared<CompressorNode>("COMP_2");
+    auto lim1 = std::make_shared<PeakLimiterNode>("LIM_1");
+    auto lim2 = std::make_shared<PeakLimiterNode>("LIM_2");
+    auto rev1 = std::make_shared<ReverbNode>("REV_1");
+    auto rev2 = std::make_shared<ReverbNode>("REV_2");
+    auto ins1 = std::make_shared<desk32::engine::insert::ExternalInsertNode>("INS_1");
+    auto ins2 = std::make_shared<desk32::engine::insert::ExternalInsertNode>("INS_2");
+
+    chain->appendNode(peq1);
+    chain->appendNode(geq1);
+    chain->appendNode(flt1);
+    chain->appendNode(comp1);
+    chain->appendNode(lim1);
+    chain->appendNode(rev1);
+    chain->appendNode(ins1);
+    chain->appendNode(peq2);
+    chain->appendNode(geq2);
+    chain->appendNode(flt2);
+    chain->appendNode(comp2);
+    chain->appendNode(lim2);
+    chain->appendNode(rev2);
+    chain->appendNode(ins2);
+    chain->appendNode(peq3);
+    chain->appendNode(peq4);
+    QCOMPARE(chain->nodeCount(), size_t(16));
+
+    pipeline.swapMasterChain(std::move(chain));
+
+    // Saturate Reverb 1 with all 8 ringout slots active
+    // Pass initial excitement block so m_active has non-zero internal energy (> 1e-12),
+    // then trigger 8 prepared instance exchanges with tailPreserving=true to occupy all 8 slots.
+    std::vector<double> exciteL(frames, 0.5), exciteR(frames, 0.5);
+    std::vector<float> pcmOut(frames * 2, 0.0f);
+    pipeline.process(exciteL.data(), exciteR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+
+    for (int s = 0; s < 8; ++s) {
+        rev1->prepareInstance(sampleRate, 0.7 + s * 0.02, 0.3, 0.3, 0.0, true, true);
+        pipeline.process(exciteL.data(), exciteR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+    }
+    QCOMPARE(rev1->activeRingoutSlotCount(), size_t(8));
+
+    // Queue 128 discrete commands to ensure full 64-command drain saturation in Audio Thread
+    for (int i = 0; i < 128; ++i) {
+        desk32::engine::dsp::DspCommand cmd;
+        cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+        cmd.index = static_cast<uint8_t>(i % 16);
+        cmd.subIndex = 0;
+        cmd.boolFlag1 = static_cast<uint8_t>(i % 2);
+        pipeline.paramQueue().push(cmd);
+    }
+
+    // Launch concurrent background Control Thread performing continuous parameter mailbox updates
+    std::atomic<bool> stopProducer{false};
+    std::thread controlThread([&]() {
+        size_t iter = 0;
+        while (!stopProducer.load(std::memory_order_relaxed)) {
+            pipeline.paramMailbox().setGeqBandGain(iter % 32, static_cast<float>((static_cast<int>(iter % 10)) - 5));
+            pipeline.updateCompressor(-18.0 - static_cast<double>(iter % 6), 4.0, 10.0, 100.0, 2.0, 4.0, true);
+            pipeline.updatePeakLimiter(-0.5 - static_cast<double>(iter % 3) * 0.2, 50.0, 1.0, true);
+            ++iter;
+            std::this_thread::yield();
+        }
+    });
+
+    // Audio Thread: Render under worst-case conditions
+    s_rtStats.reset();
+    t_isAudioThread = true;
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int b = 0; b < 10; ++b) {
+        pipeline.process(exciteL.data(), exciteR.data(), frames, pcmOut.data(), SampleFormat::Float32, false);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+
+    t_isAudioThread = false;
+    stopProducer.store(true, std::memory_order_release);
+    controlThread.join();
+
+    int64_t totalNanos = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+    int64_t avgBlockNanos = totalNanos / 10;
+    qDebug() << "Worst-Case 192kHz/16-Node/8-Slot Reverb (4096 frames) Avg Process Time:"
+             << (avgBlockNanos / 1000) << "microseconds";
+
+    // Strict Real-Time Verification
+    QCOMPARE(s_rtStats.totalAllocations(), 0u);
+    QCOMPARE(s_rtStats.rtBlockingCount.load(), 0u);
+
+    // Audio deadline for 4096 frames @ 192kHz is (4096 / 192000) = 21,333 microseconds (21.33 ms)
+    // Under native Release, should finish well within 15 ms
+#if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+    QVERIFY(avgBlockNanos < 15000000); // 15 ms max (deadline = 21.33 ms)
+#endif
+
+    pipeline.reclaimRetiredMemory();
 }
 
 void TestAudioPipeline::testAudioChainMaxNodesAndBoundedCommandDrain()

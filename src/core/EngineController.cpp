@@ -79,9 +79,9 @@ bool EngineController::initialize() {
         "Listening Correction", engine::pipeline::NodeAffiliation::ListeningCorrection
     );
     listenNode->setBypassed(false);
-    listenNode->dsp().setEnabled(true);
-    listenNode->dsp().configure(48000.0);
-    listenNode->dsp().applyPreset("Monitor Flat");
+    listenNode->setEnabled(true);
+    listenNode->configure(48000.0);
+    listenNode->applyPreset("Monitor Flat");
     listeningChain->appendNode(std::move(listenNode));
 
     // 4. Initialize Audio Pipeline with Logical Render Tap

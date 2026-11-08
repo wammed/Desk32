@@ -37,7 +37,33 @@ public:
         }
     }
 
-    [[nodiscard]] ParametricEQ& dsp() noexcept { return m_eq; }
+    void applyCoefficients(const std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL>& leftCoeffs,
+                           const std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL>& rightCoeffs,
+                           const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& leftEnabled,
+                           const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& rightEnabled) noexcept {
+        m_eq.applyCoefficients(leftCoeffs, rightCoeffs, leftEnabled, rightEnabled);
+    }
+
+    void setEnabled(bool enabled) noexcept {
+        m_eq.setEnabled(enabled);
+    }
+
+    [[nodiscard]] bool isEnabled() const noexcept {
+        return m_eq.isEnabled();
+    }
+
+    void setLeftBand(size_t index, const ParametricEQ::BandConfig& config) {
+        m_eq.setLeftBand(index, config);
+    }
+
+    void setRightBand(size_t index, const ParametricEQ::BandConfig& config) {
+        m_eq.setRightBand(index, config);
+    }
+
+    void applyPreset(const std::string& presetName) {
+        m_eq.applyPreset(presetName);
+    }
+
     [[nodiscard]] const ParametricEQ& dsp() const noexcept { return m_eq; }
 
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
@@ -73,7 +99,18 @@ public:
         }
     }
 
-    [[nodiscard]] GraphicEQ& dsp() noexcept { return m_geq; }
+    void applyAllCoefficients(const std::array<BiquadCoefficients, GraphicEQ::NUM_BANDS>& coeffs) noexcept {
+        m_geq.applyAllCoefficients(coeffs);
+    }
+
+    void setEnabled(bool enabled) noexcept {
+        m_geq.setEnabled(enabled);
+    }
+
+    [[nodiscard]] bool isEnabled() const noexcept {
+        return m_geq.isEnabled();
+    }
+
     [[nodiscard]] const GraphicEQ& dsp() const noexcept { return m_geq; }
 
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
@@ -109,7 +146,35 @@ public:
         }
     }
 
-    [[nodiscard]] HighLowPassFilter& dsp() noexcept { return m_filter; }
+    void applyCoefficients(const HighLowPassCoefficients& coeffs) noexcept {
+        m_filter.applyCoefficients(coeffs);
+    }
+
+    void setHpfEnabled(bool enabled) noexcept {
+        m_filter.setHpfEnabled(enabled);
+    }
+
+    [[nodiscard]] bool isHpfEnabled() const noexcept {
+        return m_filter.isHpfEnabled();
+    }
+
+    void setLpfEnabled(bool enabled) noexcept {
+        m_filter.setLpfEnabled(enabled);
+    }
+
+    [[nodiscard]] bool isLpfEnabled() const noexcept {
+        return m_filter.isLpfEnabled();
+    }
+
+    void setEnabled(bool enabled) noexcept {
+        m_filter.setHpfEnabled(enabled);
+        m_filter.setLpfEnabled(enabled);
+    }
+
+    [[nodiscard]] bool isEnabled() const noexcept {
+        return m_filter.isHpfEnabled() || m_filter.isLpfEnabled();
+    }
+
     [[nodiscard]] const HighLowPassFilter& dsp() const noexcept { return m_filter; }
 
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
@@ -138,7 +203,7 @@ public:
         double releaseMs{100.0};
         double makeupDb{0.0};
         double kneeDb{4.0};
-        bool enabled{false};
+        bool enabled{true};
     };
 
     explicit CompressorNode(std::string name = "Compressor")
@@ -216,7 +281,10 @@ public:
         return m_active ? m_active->gainReductionDb() : 0.0;
     }
 
-    [[nodiscard]] Compressor& dsp() noexcept { return *m_active; }
+    void setEnabled(bool enabled) noexcept {
+        if (m_active) m_active->setEnabled(enabled);
+    }
+
     [[nodiscard]] const Compressor& dsp() const noexcept { return *m_active; }
 
     [[nodiscard]] uint64_t activatedCount() const noexcept { return m_activatedCount.load(std::memory_order_relaxed); }
@@ -249,8 +317,7 @@ public:
         return m_config.kneeDb;
     }
     [[nodiscard]] bool isEnabled() const noexcept {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        return m_config.enabled;
+        return m_active ? m_active->isEnabled() : false;
     }
 
     void reclaimRetired() noexcept override {
@@ -310,7 +377,7 @@ public:
         double ceilingDb{-0.1};
         double releaseMs{50.0};
         double lookaheadMs{1.0};
-        bool enabled{false};
+        bool enabled{true};
     };
 
     explicit PeakLimiterNode(std::string name = "Peak Limiter")
@@ -393,7 +460,10 @@ public:
         return m_active ? m_active->gainReductionDb() : 0.0;
     }
 
-    [[nodiscard]] PeakLimiter& dsp() noexcept { return *m_active; }
+    void setEnabled(bool enabled) noexcept {
+        if (m_active) m_active->setEnabled(enabled);
+    }
+
     [[nodiscard]] const PeakLimiter& dsp() const noexcept { return *m_active; }
 
     [[nodiscard]] uint64_t activatedCount() const noexcept { return m_activatedCount.load(std::memory_order_relaxed); }
@@ -414,8 +484,7 @@ public:
         return m_config.lookaheadMs;
     }
     [[nodiscard]] bool isEnabled() const noexcept {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        return m_config.enabled;
+        return m_active ? m_active->isEnabled() : false;
     }
 
     void reclaimRetired() noexcept override {
@@ -481,7 +550,7 @@ public:
         double wetLevel{0.2};
         double predelayMs{0.0};
         bool tailPreserving{true};
-        bool enabled{false};
+        bool enabled{true};
     };
 
     struct RingoutSlot {
@@ -569,9 +638,8 @@ public:
     [[nodiscard]] RetireReason evaluateRetireCondition(const RingoutSlot& slot, double maxBlockTail) const noexcept {
         if (!slot.reverb) return RetireReason::None;
 
-        // 0. Abnormal state (NaN / Inf) protection
-        const double internalEnergy = slot.reverb->totalInternalEnergy();
-        if (!std::isfinite(maxBlockTail) || !std::isfinite(internalEnergy)) {
+        // 0. Abnormal state (NaN / Inf) protection: strictly O(1) lock-free check
+        if (!std::isfinite(maxBlockTail) || slot.reverb->hasInvalidState()) {
             return RetireReason::AbnormalStateReset;
         }
 
@@ -584,10 +652,11 @@ public:
 
         // 2. Natural decay complete: Output amplitude < -80 dB (< 1e-4),
         // elapsed frames >= 1.5 * RT60 lower bound, AND internal comb/allpass buffer energy < 1e-7 (-100 dB)
+        // Note: totalInternalEnergy() is computed ONLY when all preceding criteria pass (final gate).
         if (maxBlockTail < 1e-4 &&
             slot.silentBlocks >= 8 &&
             slot.ageFrames >= slot.reverb->theoreticalDecayFrames()) {
-            if (internalEnergy < 1e-7) {
+            if (slot.reverb->totalInternalEnergy() < 1e-7) {
                 return RetireReason::NaturalDecayComplete;
             }
         }
@@ -622,13 +691,13 @@ public:
                         }
                     }
                     if (!placed) {
-                        // All 8 slots occupied: find the slot with the lowest internal energy (most decayed)
+                        // All 8 slots occupied: find the slot with the longest elapsed age (most decayed)
+                        // Deterministic O(1) scalar comparison without scanning delay buffers (P0-22).
                         size_t minIdx = 0;
-                        double minEnergy = 1e30;
+                        size_t maxAge = 0;
                         for (size_t s = 0; s < MAX_RINGOUT_SLOTS; ++s) {
-                            double e = m_ringoutSlots[s].reverb->totalInternalEnergy();
-                            if (!std::isfinite(e) || e < minEnergy) {
-                                minEnergy = std::isfinite(e) ? e : -1.0;
+                            if (m_ringoutSlots[s].ageFrames >= maxAge) {
+                                maxAge = m_ringoutSlots[s].ageFrames;
                                 minIdx = s;
                             }
                         }
@@ -672,7 +741,6 @@ public:
                 }
                 slot.ageFrames += frameCount;
                 if (maxTail < 1e-4) slot.silentBlocks++; else slot.silentBlocks = 0;
-                slot.lastMeasuredEnergy = slot.reverb->totalInternalEnergy();
 
                 RetireReason reason = evaluateRetireCondition(slot, maxTail);
                 if (reason != RetireReason::None) {
@@ -758,7 +826,6 @@ public:
             } else {
                 slot.silentBlocks = 0;
             }
-            slot.lastMeasuredEnergy = slot.reverb->totalInternalEnergy();
 
             RetireReason reason = evaluateRetireCondition(slot, maxBlockTail);
             if (reason != RetireReason::None) {
@@ -774,7 +841,18 @@ public:
         return m_active ? m_active->wetLevel() : 0.0;
     }
 
-    [[nodiscard]] AlgorithmicReverb& dsp() noexcept { return *m_active; }
+    void setEnabled(bool enabled) noexcept {
+        if (m_active) m_active->setEnabled(enabled);
+    }
+
+    void injectInvalidStateForTest(double nonFiniteVal) noexcept {
+        if (m_active) m_active->injectInvalidStateForTest(nonFiniteVal);
+    }
+
+    [[nodiscard]] bool hasInvalidState() const noexcept {
+        return m_active ? m_active->hasInvalidState() : false;
+    }
+
     [[nodiscard]] const AlgorithmicReverb& dsp() const noexcept { return *m_active; }
 
     [[nodiscard]] size_t activeRingoutSlotCount() const noexcept {
@@ -813,8 +891,7 @@ public:
         return m_config.tailPreserving;
     }
     [[nodiscard]] bool isEnabled() const noexcept {
-        std::lock_guard<std::mutex> lock(m_configMutex);
-        return m_config.enabled;
+        return m_active ? m_active->isEnabled() : false;
     }
 
     void reclaimRetired() noexcept override {

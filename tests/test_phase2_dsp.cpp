@@ -125,6 +125,9 @@ private slots:
     void testRtSafetyAllocationDuringProcess();
     void testConcurrentSampleRateAndMailboxUpdates();
     void testReverbMultiExchangeAndBypassTailDecay();
+    void testReverbSlotCapacityEvictionAndSafetyCeiling();
+    void testDspParameterMailboxEpochAndMonotonicSequence();
+    void testParameterCommandQueueOverflowAndDrainLimit();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -385,15 +388,15 @@ void TestPhase2Dsp::testLogicalRenderTapAndListeningCorrectionIsolation()
     auto correctionPeq = std::make_shared<ParametricEqNode>("Listening Correction", NodeAffiliation::ListeningCorrection);
 
     // Apply +12 dB boost at 1 kHz strictly in Listening Correction
-    correctionPeq->dsp().setEnabled(true);
+    correctionPeq->setEnabled(true);
     ParametricEQ::BandConfig boost;
     boost.frequency = 1000.0;
     boost.gainDb = 12.0;
     boost.Q = 1.0;
     boost.type = BiquadFilterType::Peak;
     boost.enabled = true;
-    correctionPeq->dsp().setLeftBand(5, boost);
-    correctionPeq->dsp().setRightBand(5, boost);
+    correctionPeq->setLeftBand(5, boost);
+    correctionPeq->setRightBand(5, boost);
 
     listeningChain->appendNode(correctionPeq);
     pipeline.swapListeningChain(std::move(listeningChain));
@@ -758,16 +761,19 @@ void TestPhase2Dsp::testDspParameterMailboxMultiProducerAndContinuousUpdates()
     // Second fetch without new updates must return false
     QVERIFY(!mailbox.fetchUpdates(params));
 
-    // Re-initialization (reset) verification (P0-24)
+    // Re-initialization (reset) verification (P0-24):
+    // Preserves sequenceNumber monotonicity while incrementing epoch
     mailbox.reset();
-    QCOMPARE(mailbox.updateCount(), 0u);
+    QCOMPARE(mailbox.currentEpoch(), 2u);
+    QCOMPARE(mailbox.updateCount(), 1u); // Monotonic sequence preserved across reset
     QVERIFY(!mailbox.fetchUpdates(params));
 
     mailbox.setGeqBandGain(5, -3.0f);
-    QCOMPARE(mailbox.updateCount(), 1u);
+    QCOMPARE(mailbox.updateCount(), 2u);
     QVERIFY(mailbox.fetchUpdates(params));
     QCOMPARE(params.geqGains[5], -3.0f);
-    QCOMPARE(params.sequenceNumber, 1u);
+    QCOMPARE(params.sequenceNumber, 2u);
+    QCOMPARE(params.epoch, 2u);
 
     // 2. Concurrent multi-producer stress test (4 producer threads, 1 consumer thread)
     std::atomic<bool> running{true};
@@ -1112,9 +1118,9 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         CompressorNode compNode;
         PeakLimiterNode limNode;
         ReverbNode revNode;
-        QVERIFY(compNode.dsp().isEnabled());
-        QVERIFY(limNode.dsp().isEnabled());
-        QVERIFY(revNode.dsp().isEnabled());
+        QVERIFY(compNode.isEnabled());
+        QVERIFY(limNode.isEnabled());
+        QVERIFY(revNode.isEnabled());
     }
 
     // Case 2: Active exchange at block boundary
@@ -1123,8 +1129,8 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         compNode.prepareInstance(48000.0, -18.0, 4.0, 10.0, 100.0, 3.5, 4.0, true);
         std::vector<double> left(128, 0.5), right(128, 0.5);
         compNode.process(left.data(), right.data(), 128);
-        QCOMPARE(compNode.dsp().thresholdDb(), -18.0);
-        QCOMPARE(compNode.dsp().makeupGainDb(), 3.5);
+        QCOMPARE(compNode.thresholdDb(), -18.0);
+        QCOMPARE(compNode.makeupGainDb(), 3.5);
     }
 
     // Case 3: Old instance retirement & reclaim
@@ -1146,7 +1152,7 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
             std::vector<double> left(64, 0.5), right(64, 0.5);
             limNode.process(left.data(), right.data(), 64);
             limNode.reclaimRetired();
-            QCOMPARE(limNode.dsp().ceilingDb(), ceilDb);
+            QCOMPARE(limNode.ceilingDb(), ceilDb);
         }
     }
 
@@ -1163,8 +1169,8 @@ void TestPhase2Dsp::testPreparedDspInstanceExchangeSafety()
         compNode.process(left.data(), right.data(), 128);
         QCOMPARE(compNode.activatedCount(), 1u);
         QCOMPARE(compNode.retiredCount(), 1u);
-        QCOMPARE(compNode.dsp().thresholdDb(), -22.0);
-        QCOMPARE(compNode.dsp().makeupGainDb(), 6.0);
+        QCOMPARE(compNode.thresholdDb(), -22.0);
+        QCOMPARE(compNode.makeupGainDb(), 6.0);
         compNode.reclaimRetired();
         QCOMPARE(compNode.reclaimedCount(), 1u);
     }
@@ -1626,8 +1632,8 @@ void TestPhase2Dsp::testReverbMultiExchangeAndBypassTailDecay()
         rev.process(exciteL.data(), exciteR.data(), 1024);
 
         // Inject NaN into active reverb state, then swap so it tries to enter ringout
-        rev.dsp().injectInvalidStateForTest(std::numeric_limits<double>::quiet_NaN());
-        QVERIFY(rev.dsp().hasInvalidState());
+        rev.injectInvalidStateForTest(std::numeric_limits<double>::quiet_NaN());
+        QVERIFY(rev.hasInvalidState());
 
         rev.prepareInstance(48000.0, 0.75, 0.3, 0.5, 0.0, true, true);
         std::vector<double> outL(256, 0.2), outR(256, 0.2);
@@ -1710,6 +1716,155 @@ void TestPhase2Dsp::testReverbMultiExchangeAndBypassTailDecay()
         QVERIFY(residualEnergy < 1e-9);
         rev.reclaimRetired();
     }
+}
+
+void TestPhase2Dsp::testReverbSlotCapacityEvictionAndSafetyCeiling()
+{
+    // P0-22: Deterministic verification of SlotCapacityEviction and MaxRetentionSafetyCeiling
+    // 1. SlotCapacityEviction (All 8 slots saturated -> 9th swap evicts longest-lived slot)
+    {
+        ReverbNode rev;
+        const double sr = 48000.0;
+        const size_t frames = 256;
+        std::vector<double> exciteL(frames, 0.5), exciteR(frames, 0.5);
+
+        // Initial process so active reverb has energy (> 1e-12)
+        rev.prepareInstance(sr, 0.8, 0.3, 0.5, 0.0, true, true);
+        rev.process(exciteL.data(), exciteR.data(), frames);
+
+        // Fill all 8 ringout slots with excited reverbs
+        for (int s = 0; s < 8; ++s) {
+            rev.prepareInstance(sr, 0.8 + static_cast<double>(s) * 0.01, 0.3, 0.5, 0.0, true, true);
+            rev.process(exciteL.data(), exciteR.data(), frames);
+        }
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(8));
+        QCOMPARE(rev.capacityEvictionRetireCount(), uint64_t(0));
+
+        // 9th swap: All 8 slots full -> must trigger SlotCapacityEviction
+        rev.prepareInstance(sr, 0.7, 0.2, 0.4, 0.0, true, true);
+        rev.process(exciteL.data(), exciteR.data(), frames);
+
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(8)); // Still 8
+        QCOMPARE(rev.capacityEvictionRetireCount(), uint64_t(1));
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::SlotCapacityEviction);
+        rev.reclaimRetired();
+    }
+
+    // 2. MaxRetentionSafetyCeiling (10-second timeout ceiling)
+    {
+        ReverbNode rev;
+        const double sr = 8000.0; // Use 8kHz so 10 seconds is 80,000 frames
+        const size_t frames = 1000;
+        rev.configure(sr);
+
+        std::vector<double> exciteL(frames, 0.5), exciteR(frames, 0.5);
+        rev.prepareInstance(sr, 0.99, 0.01, 0.5, 0.0, true, true); // Extremely long decay
+        rev.process(exciteL.data(), exciteR.data(), frames);
+
+        // Swap to put it in ringout slot
+        rev.prepareInstance(sr, 0.5, 0.5, 0.5, 0.0, true, true);
+        std::vector<double> silenceL(frames, 0.0), silenceR(frames, 0.0);
+        rev.process(silenceL.data(), silenceR.data(), frames);
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(1));
+
+        // Advance 81 blocks of 1000 frames (81,000 frames > 80,000 frames = 10 seconds @ 8kHz)
+        for (int b = 0; b < 81; ++b) {
+            std::fill(silenceL.begin(), silenceL.end(), 0.0);
+            std::fill(silenceR.begin(), silenceR.end(), 0.0);
+            rev.process(silenceL.data(), silenceR.data(), frames);
+        }
+
+        // Must be retired due to MaxRetentionSafetyCeiling
+        QCOMPARE(rev.activeRingoutSlotCount(), size_t(0));
+        QCOMPARE(rev.safetyCeilingRetireCount(), uint64_t(1));
+        QCOMPARE(rev.lastRetireReason(), ReverbNode::RetireReason::MaxRetentionSafetyCeiling);
+        rev.reclaimRetired();
+    }
+}
+
+void TestPhase2Dsp::testDspParameterMailboxEpochAndMonotonicSequence()
+{
+    // P0-24: Generation / Epoch tracking & strict sequenceNumber monotonicity across resets
+    DspParameterMailbox mailbox;
+    QCOMPARE(mailbox.currentEpoch(), uint64_t(1));
+    QCOMPARE(mailbox.currentSequenceNumber(), uint64_t(0));
+
+    // Update parameters
+    mailbox.setGeqBandGain(0, 3.0f);
+    mailbox.setGeqBandGain(1, -2.0f);
+    QCOMPARE(mailbox.currentEpoch(), uint64_t(1));
+    uint64_t seqBefore = mailbox.currentSequenceNumber();
+    QCOMPARE(seqBefore, uint64_t(2));
+
+    ContinuousDspParameters params;
+    QVERIFY(mailbox.fetchUpdates(params));
+    QCOMPARE(params.epoch, uint64_t(1));
+    QCOMPARE(params.sequenceNumber, uint64_t(2));
+
+    // Reset mailbox: epoch must increment, sequenceNumber must preserve monotonicity
+    mailbox.reset();
+    QCOMPARE(mailbox.currentEpoch(), uint64_t(2));
+    QCOMPARE(mailbox.currentSequenceNumber(), seqBefore); // NOT zero!
+
+    // Next update after reset: sequenceNumber continues monotonically from seqBefore
+    mailbox.setGeqBandGain(5, 1.5f);
+    QCOMPARE(mailbox.currentEpoch(), uint64_t(2));
+    QCOMPARE(mailbox.currentSequenceNumber(), seqBefore + 1);
+
+    ContinuousDspParameters postResetParams;
+    QVERIFY(mailbox.fetchUpdates(postResetParams));
+    QCOMPARE(postResetParams.epoch, uint64_t(2));
+    QCOMPARE(postResetParams.sequenceNumber, seqBefore + 1);
+    QVERIFY(postResetParams.sequenceNumber > params.sequenceNumber);
+}
+
+void TestPhase2Dsp::testParameterCommandQueueOverflowAndDrainLimit()
+{
+    // P0-25: ParameterCommandQueue overflow detection and drain bounds
+    ParameterCommandQueue queue;
+    QCOMPARE(queue.size(), size_t(0));
+    QCOMPARE(queue.overflowCount(), uint64_t(0));
+
+    // Fill queue to exact capacity (512)
+    for (size_t i = 0; i < ParameterCommandQueue::CAPACITY; ++i) {
+        DspCommand cmd;
+        cmd.type = DspCommandType::SetNodeBypass;
+        cmd.index = static_cast<uint8_t>(i % 16);
+        QVERIFY(queue.push(cmd));
+    }
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
+    QCOMPARE(queue.overflowCount(), uint64_t(0));
+
+    // 513th push must return false and increment overflowCount
+    DspCommand overflowCmd;
+    overflowCmd.type = DspCommandType::SetGlobalBypass;
+    QVERIFY(!queue.push(overflowCmd));
+    QCOMPARE(queue.overflowCount(), uint64_t(1));
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
+
+    // Push 9 more when full -> all return false, overflowCount increases to 10
+    for (int i = 0; i < 9; ++i) {
+        QVERIFY(!queue.push(overflowCmd));
+    }
+    QCOMPARE(queue.overflowCount(), uint64_t(10));
+
+    // Drain exactly 64 commands (AudioPipeline MAX_COMMANDS_PER_BLOCK limit)
+    for (size_t i = 0; i < 64; ++i) {
+        DspCommand popped;
+        QVERIFY(queue.pop(popped));
+        QCOMPARE(popped.type, DspCommandType::SetNodeBypass);
+        QCOMPARE(popped.index, static_cast<uint8_t>(i % 16));
+    }
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY - 64);
+
+    // Now 64 slots are free -> push 64 commands must succeed
+    for (size_t i = 0; i < 64; ++i) {
+        DspCommand cmd;
+        cmd.type = DspCommandType::ResetAllGeqBands;
+        QVERIFY(queue.push(cmd));
+    }
+    QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
+    QCOMPARE(queue.overflowCount(), uint64_t(10)); // Unchanged
 }
 
 QTEST_MAIN(TestPhase2Dsp)
