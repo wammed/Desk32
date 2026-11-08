@@ -20,18 +20,23 @@ class ParametricEqNode : public AudioNode {
 public:
     explicit ParametricEqNode(std::string name = "Parametric EQ", NodeAffiliation affiliation = NodeAffiliation::RenderCommon)
         : AudioNode(std::move(name), affiliation)
-    {}
+    {
+        m_eq.setEnabled(true);
+    }
 
     void configure(double sampleRate) override {
         AudioNode::configure(sampleRate);
         m_eq.configure(sampleRate);
+        m_eq.setEnabled(true);
     }
 
     void reset() override {
         m_eq.reset();
+        m_eq.setEnabled(true);
     }
 
     void process(double* left, double* right, size_t frameCount) override {
+        if (isBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_eq.process(left[i], right[i]);
         }
@@ -42,26 +47,6 @@ public:
                            const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& leftEnabled,
                            const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& rightEnabled) noexcept {
         m_eq.applyCoefficients(leftCoeffs, rightCoeffs, leftEnabled, rightEnabled);
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        m_eq.setEnabled(enabled);
-    }
-
-    [[nodiscard]] bool isEnabled() const noexcept {
-        return m_eq.isEnabled();
-    }
-
-    void setLeftBand(size_t index, const ParametricEQ::BandConfig& config) {
-        m_eq.setLeftBand(index, config);
-    }
-
-    void setRightBand(size_t index, const ParametricEQ::BandConfig& config) {
-        m_eq.setRightBand(index, config);
-    }
-
-    void applyPreset(const std::string& presetName) {
-        m_eq.applyPreset(presetName);
     }
 
     [[nodiscard]] const ParametricEQ& dsp() const noexcept { return m_eq; }
@@ -82,18 +67,23 @@ class GraphicEqNode : public AudioNode {
 public:
     explicit GraphicEqNode(std::string name = "Graphic EQ")
         : AudioNode(std::move(name), NodeAffiliation::RenderCommon)
-    {}
+    {
+        m_geq.setEnabled(true);
+    }
 
     void configure(double sampleRate) override {
         AudioNode::configure(sampleRate);
         m_geq.configure(sampleRate);
+        m_geq.setEnabled(true);
     }
 
     void reset() override {
         m_geq.reset();
+        m_geq.setEnabled(true);
     }
 
     void process(double* left, double* right, size_t frameCount) override {
+        if (isBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_geq.process(left[i], right[i]);
         }
@@ -101,14 +91,6 @@ public:
 
     void applyAllCoefficients(const std::array<BiquadCoefficients, GraphicEQ::NUM_BANDS>& coeffs) noexcept {
         m_geq.applyAllCoefficients(coeffs);
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        m_geq.setEnabled(enabled);
-    }
-
-    [[nodiscard]] bool isEnabled() const noexcept {
-        return m_geq.isEnabled();
     }
 
     [[nodiscard]] const GraphicEQ& dsp() const noexcept { return m_geq; }
@@ -129,18 +111,26 @@ class HighLowPassNode : public AudioNode {
 public:
     explicit HighLowPassNode(std::string name = "HPF / LPF")
         : AudioNode(std::move(name), NodeAffiliation::RenderCommon)
-    {}
+    {
+        m_filter.setHpfEnabled(true);
+        m_filter.setLpfEnabled(true);
+    }
 
     void configure(double sampleRate) override {
         AudioNode::configure(sampleRate);
         m_filter.configure(sampleRate);
+        m_filter.setHpfEnabled(true);
+        m_filter.setLpfEnabled(true);
     }
 
     void reset() override {
         m_filter.reset();
+        m_filter.setHpfEnabled(true);
+        m_filter.setLpfEnabled(true);
     }
 
     void process(double* left, double* right, size_t frameCount) override {
+        if (isBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_filter.process(left[i], right[i]);
         }
@@ -148,31 +138,6 @@ public:
 
     void applyCoefficients(const HighLowPassCoefficients& coeffs) noexcept {
         m_filter.applyCoefficients(coeffs);
-    }
-
-    void setHpfEnabled(bool enabled) noexcept {
-        m_filter.setHpfEnabled(enabled);
-    }
-
-    [[nodiscard]] bool isHpfEnabled() const noexcept {
-        return m_filter.isHpfEnabled();
-    }
-
-    void setLpfEnabled(bool enabled) noexcept {
-        m_filter.setLpfEnabled(enabled);
-    }
-
-    [[nodiscard]] bool isLpfEnabled() const noexcept {
-        return m_filter.isLpfEnabled();
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        m_filter.setHpfEnabled(enabled);
-        m_filter.setLpfEnabled(enabled);
-    }
-
-    [[nodiscard]] bool isEnabled() const noexcept {
-        return m_filter.isHpfEnabled() || m_filter.isLpfEnabled();
     }
 
     [[nodiscard]] const HighLowPassFilter& dsp() const noexcept { return m_filter; }
@@ -279,10 +244,6 @@ public:
 
     [[nodiscard]] double gainReductionDb() const noexcept {
         return m_active ? m_active->gainReductionDb() : 0.0;
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        if (m_active) m_active->setEnabled(enabled);
     }
 
     [[nodiscard]] const Compressor& dsp() const noexcept { return *m_active; }
@@ -458,10 +419,6 @@ public:
 
     [[nodiscard]] double gainReductionDb() const noexcept {
         return m_active ? m_active->gainReductionDb() : 0.0;
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        if (m_active) m_active->setEnabled(enabled);
     }
 
     [[nodiscard]] const PeakLimiter& dsp() const noexcept { return *m_active; }
@@ -839,10 +796,6 @@ public:
 
     [[nodiscard]] double wetLevel() const noexcept {
         return m_active ? m_active->wetLevel() : 0.0;
-    }
-
-    void setEnabled(bool enabled) noexcept {
-        if (m_active) m_active->setEnabled(enabled);
     }
 
     void injectInvalidStateForTest(double nonFiniteVal) noexcept {

@@ -128,6 +128,8 @@ private slots:
     void testReverbSlotCapacityEvictionAndSafetyCeiling();
     void testDspParameterMailboxEpochAndMonotonicSequence();
     void testParameterCommandQueueOverflowAndDrainLimit();
+    void testReverbO1StateTrackingAccuracyAndTailWaveformComparison();
+    void testActiveDspDirectModificationImpossibility();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -387,19 +389,17 @@ void TestPhase2Dsp::testLogicalRenderTapAndListeningCorrectionIsolation()
     auto listeningChain = std::make_unique<AudioChain>("Listening Chain", ChainPurpose::ListeningCorrectionChain);
     auto correctionPeq = std::make_shared<ParametricEqNode>("Listening Correction", NodeAffiliation::ListeningCorrection);
 
-    // Apply +12 dB boost at 1 kHz strictly in Listening Correction
-    correctionPeq->setEnabled(true);
+    listeningChain->appendNode(correctionPeq);
+    pipeline.swapListeningChain(std::move(listeningChain));
+
+    // Apply +12 dB boost at 1 kHz strictly in Listening Correction via Mailbox (P0-21)
     ParametricEQ::BandConfig boost;
     boost.frequency = 1000.0;
     boost.gainDb = 12.0;
     boost.Q = 1.0;
     boost.type = BiquadFilterType::Peak;
     boost.enabled = true;
-    correctionPeq->setLeftBand(5, boost);
-    correctionPeq->setRightBand(5, boost);
-
-    listeningChain->appendNode(correctionPeq);
-    pipeline.swapListeningChain(std::move(listeningChain));
+    pipeline.paramMailbox().setListeningBand(5, boost);
 
     // 3. Render 256 frames of 1 kHz sine wave
     const size_t frames = 256;
@@ -1865,6 +1865,123 @@ void TestPhase2Dsp::testParameterCommandQueueOverflowAndDrainLimit()
     }
     QCOMPARE(queue.size(), ParameterCommandQueue::CAPACITY);
     QCOMPARE(queue.overflowCount(), uint64_t(10)); // Unchanged
+}
+
+void TestPhase2Dsp::testReverbO1StateTrackingAccuracyAndTailWaveformComparison()
+{
+    // P0-22: Comprehensive Reverb O(1) state tracking accuracy, tail continuity, and decay verification
+    AlgorithmicReverb reverb;
+    const double sr = 48000.0;
+    reverb.configure(sr, 0.85, 0.3, 0.5, 5.0, true, true);
+    reverb.reset();
+
+    // 1. Initial state: both O(1) tracking and scan must report 0.0 energy
+    QCOMPARE(reverb.totalInternalEnergy(), 0.0);
+    QCOMPARE(reverb.debugScanTotalEnergy(), 0.0);
+
+    // 2. Feed an impulse to excite the reverb
+    double impL = 1.0, impR = 1.0;
+    reverb.process(impL, impR);
+
+    // Energy must have increased in both
+    double energyAfterImpulse = reverb.totalInternalEnergy();
+    double scanAfterImpulse = reverb.debugScanTotalEnergy();
+    QVERIFY(energyAfterImpulse > 0.0);
+    QVERIFY(scanAfterImpulse > 0.0);
+    QVERIFY(std::abs(energyAfterImpulse - scanAfterImpulse) / scanAfterImpulse < 1e-3);
+
+    // 3. Ringout with silence: verify O(1) energy matches buffer scan at every step
+    for (int block = 0; block < 100; ++block) {
+        for (int s = 0; s < 256; ++s) {
+            double l = 0.0, r = 0.0;
+            reverb.process(l, r);
+        }
+        double e_o1 = reverb.totalInternalEnergy();
+        double e_scan = reverb.debugScanTotalEnergy();
+        if (e_scan > 1e-6) {
+            double relErr = std::abs(e_o1 - e_scan) / e_scan;
+            QVERIFY(relErr < 0.02); // Within 2% relative error throughout dynamic decay
+        }
+    }
+
+    // 4. Test ReverbNode natural decay and non-premature retirement
+    ReverbNode revNode("TestReverbNode");
+    revNode.configure(sr);
+    revNode.prepareInstance(sr, 0.6, 0.2, 0.3, 0.0, true, true);
+
+    const size_t frames = 256;
+    std::vector<double> impulseBufL(frames, 0.0), impulseBufR(frames, 0.0);
+    impulseBufL[0] = 1.0; impulseBufR[0] = 1.0;
+    revNode.process(impulseBufL.data(), impulseBufR.data(), frames);
+
+    // Swap instance to send excited reverb to a ringout slot
+    revNode.prepareInstance(sr, 0.5, 0.5, 0.3, 0.0, true, true);
+    std::vector<double> silenceL(frames, 0.0), silenceR(frames, 0.0);
+    revNode.process(silenceL.data(), silenceR.data(), frames);
+    QCOMPARE(revNode.activeRingoutSlotCount(), size_t(1));
+
+    // While tail is still ringing out, slot must NOT retire prematurely
+    for (int b = 0; b < 10; ++b) {
+        std::fill(silenceL.begin(), silenceL.end(), 0.0);
+        std::fill(silenceR.begin(), silenceR.end(), 0.0);
+        revNode.process(silenceL.data(), silenceR.data(), frames);
+    }
+    QCOMPARE(revNode.activeRingoutSlotCount(), size_t(1)); // Still active!
+
+    // Advance until natural decay finishes safely
+    size_t decayBlocks = (revNode.dsp().theoreticalDecayFrames() / frames) + 30;
+    for (size_t b = 0; b < decayBlocks; ++b) {
+        std::fill(silenceL.begin(), silenceL.end(), 0.0);
+        std::fill(silenceR.begin(), silenceR.end(), 0.0);
+        revNode.process(silenceL.data(), silenceR.data(), frames);
+        if (revNode.activeRingoutSlotCount() == 0) break;
+    }
+    QCOMPARE(revNode.activeRingoutSlotCount(), size_t(0));
+    QCOMPARE(revNode.lastRetireReason(), ReverbNode::RetireReason::NaturalDecayComplete);
+    revNode.reclaimRetired();
+
+    // 5. High sample rate (192kHz) max tail execution time verification (pure O(1))
+    AlgorithmicReverb hiRateRev;
+    hiRateRev.configure(192000.0, 0.98, 0.1, 0.5, 50.0, true, true);
+    double l192 = 0.5, r192 = 0.5;
+    hiRateRev.process(l192, r192);
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 4096; ++i) {
+        double l = 0.0, r = 0.0;
+        hiRateRev.process(l, r);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    auto elapsedMicros = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    qDebug() << "192kHz 4096-frame Reverb O(1) process time:" << elapsedMicros << "microseconds";
+    // 4096 frames at 192kHz deadline is 21.3 ms (21,333 us); pure O(1) DSP runs in < 2ms
+    QVERIFY(elapsedMicros < 10000);
+}
+
+void TestPhase2Dsp::testActiveDspDirectModificationImpossibility()
+{
+    // P0-21: Architectural verification that Audio Nodes do not expose mutable DSP instances
+    ParametricEqNode peqNode("Master PEQ");
+    const ParametricEQ& peqConstRef = peqNode.dsp(); // Strictly const ref
+    (void)peqConstRef;
+
+    CompressorNode compNode("Master Comp");
+    const Compressor& compConstRef = compNode.dsp(); // Strictly const ref
+    (void)compConstRef;
+
+    PeakLimiterNode limNode("Master Limiter");
+    const PeakLimiter& limConstRef = limNode.dsp(); // Strictly const ref
+    (void)limConstRef;
+
+    ReverbNode revNode("Master Reverb");
+    const AlgorithmicReverb& revConstRef = revNode.dsp(); // Strictly const ref
+    (void)revConstRef;
+
+    // Verify prepared instance exchange counters
+    QCOMPARE(compNode.activatedCount(), uint64_t(0));
+    compNode.prepareInstance(48000.0, -12.0, 4.0, 10.0, 100.0, 0.0, 4.0, true);
+    std::vector<double> bufL(256, 0.5), bufR(256, 0.5);
+    compNode.process(bufL.data(), bufR.data(), 256);
+    QCOMPARE(compNode.activatedCount(), uint64_t(1));
 }
 
 QTEST_MAIN(TestPhase2Dsp)

@@ -300,34 +300,34 @@ private:
             // paramMailbox().setListeningPreset() to prevent heavy coefficient computation in Audio Thread.
             break;
         case dsp::DspCommandType::SetCompressorParams:
-            // P0-14: Structural and mathematical configure is handled exclusively on Control Thread
+            // P0-14, P0-21: Structural and mathematical configure is handled exclusively on Control Thread
             // via updateCompressor() to maintain strict Audio Thread real-time safety.
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* compNode = dynamic_cast<CompressorNode*>(master->node(i))) {
-                        compNode->setEnabled(cmd.boolFlag1 != 0);
+                        compNode->setBypassed(cmd.boolFlag1 == 0);
                         break;
                     }
                 }
             }
             break;
         case dsp::DspCommandType::SetLimiterParams:
-            // P0-14: Lookahead buffer and ceiling configure handled on Control Thread via updatePeakLimiter()
+            // P0-14, P0-21: Lookahead buffer and ceiling configure handled on Control Thread via updatePeakLimiter()
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* limiterNode = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
-                        limiterNode->setEnabled(cmd.boolFlag1 != 0);
+                        limiterNode->setBypassed(cmd.boolFlag1 == 0);
                         break;
                     }
                 }
             }
             break;
         case dsp::DspCommandType::SetReverbParams:
-            // P0-14: Reverb comb filter & delay buffer configure handled on Control Thread via updateReverb()
+            // P0-14, P0-21: Reverb comb filter & delay buffer configure handled on Control Thread via updateReverb()
             if (master) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* reverbNode = dynamic_cast<ReverbNode*>(master->node(i))) {
-                        reverbNode->setEnabled(cmd.boolFlag1 != 0);
+                        reverbNode->setBypassed(cmd.boolFlag1 == 0);
                         break;
                     }
                 }

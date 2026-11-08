@@ -345,6 +345,22 @@ public:
         return true;
     }
 
+    void setListeningBand(size_t index, const ParametricEQ::BandConfig& config) {
+        if (index >= ParametricEQ::BANDS_PER_CHANNEL) return;
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        const double freq = std::clamp(config.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
+        const double gain = std::clamp(config.gainDb, -24.0, 24.0);
+        const double q = std::clamp(config.Q, 0.1, 20.0);
+        auto coeff = BiquadFilter::calculateCoefficients(config.type, m_sampleRate, freq, q, gain);
+        m_staging.listeningLeftCoefficients[index] = coeff;
+        m_staging.listeningLeftEnabled[index] = config.enabled;
+        m_staging.listeningRightCoefficients[index] = coeff;
+        m_staging.listeningRightEnabled[index] = config.enabled;
+        m_staging.listeningModified = true;
+        publishStaging();
+    }
+
     /// Audio Thread: Mutex-free, non-blocking lock-free retrieval of published parameters (P0-29).
     /// Strictly O(1): at most one atomic load and one atomic exchange.
     /// Returns true and populates `outParams` if new parameters were published since last fetch.

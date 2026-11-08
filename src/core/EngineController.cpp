@@ -79,15 +79,14 @@ bool EngineController::initialize() {
         "Listening Correction", engine::pipeline::NodeAffiliation::ListeningCorrection
     );
     listenNode->setBypassed(false);
-    listenNode->setEnabled(true);
     listenNode->configure(48000.0);
-    listenNode->applyPreset("Monitor Flat");
     listeningChain->appendNode(std::move(listenNode));
 
     // 4. Initialize Audio Pipeline with Logical Render Tap
     m_pipeline = std::make_shared<engine::pipeline::AudioPipeline>(48000.0);
     m_pipeline->swapMasterChain(std::move(masterChain));
     m_pipeline->swapListeningChain(std::move(listeningChain));
+    m_pipeline->paramMailbox().setListeningPreset("Monitor Flat");
 
     m_gainSmootherL.configure(48000.0, 15.0);
     m_gainSmootherR.configure(48000.0, 15.0);

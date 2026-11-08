@@ -27,6 +27,7 @@ public:
         double feedback = 0.8;
         double damp = 0.2;
         double filterStore = 0.0;
+        double energy = 0.0; // Strictly O(1) buffer energy tracking
 
         void init(size_t len, double fb, double d) {
             size = std::clamp(len, size_t(16), MAX_COMB_SIZE);
@@ -34,13 +35,20 @@ public:
             feedback = std::clamp(fb, 0.0, 0.98);
             damp = std::clamp(d, 0.0, 1.0);
             filterStore = 0.0;
+            energy = 0.0;
             buffer.fill(0.0);
         }
 
         inline double process(double input) {
             double output = buffer[index];
             filterStore = (output * (1.0 - damp)) + (filterStore * damp);
-            buffer[index] = input + (filterStore * feedback);
+            double newVal = input + (filterStore * feedback);
+            double diff = (newVal * newVal) - (output * output);
+            energy += diff;
+            if (energy < 1e-15 || !std::isfinite(energy)) {
+                energy = 0.0;
+            }
+            buffer[index] = newVal;
             index = (index + 1) % size;
             return output;
         }
@@ -48,7 +56,13 @@ public:
         inline double process(double input, double fb, double d) {
             double output = buffer[index];
             filterStore = (output * (1.0 - d)) + (filterStore * d);
-            buffer[index] = input + (filterStore * fb);
+            double newVal = input + (filterStore * fb);
+            double diff = (newVal * newVal) - (output * output);
+            energy += diff;
+            if (energy < 1e-15 || !std::isfinite(energy)) {
+                energy = 0.0;
+            }
+            buffer[index] = newVal;
             index = (index + 1) % size;
             return output;
         }
@@ -56,9 +70,15 @@ public:
         void reset() {
             buffer.fill(0.0);
             filterStore = 0.0;
+            energy = 0.0;
         }
 
-        [[nodiscard]] double energy() const noexcept {
+        [[nodiscard]] double totalEnergy() const noexcept {
+            if (!std::isfinite(filterStore) || !std::isfinite(energy)) return std::numeric_limits<double>::quiet_NaN();
+            return energy + (filterStore * filterStore);
+        }
+
+        [[nodiscard]] double scanBufferEnergy() const noexcept {
             if (!std::isfinite(filterStore)) return std::numeric_limits<double>::quiet_NaN();
             double sum = filterStore * filterStore;
             for (size_t i = 0; i < size; ++i) {
@@ -75,27 +95,41 @@ public:
         size_t size = 225;
         size_t index = 0;
         double feedback = 0.5;
+        double energy = 0.0; // Strictly O(1) buffer energy tracking
 
         void init(size_t len, double fb = 0.5) {
             size = std::clamp(len, size_t(16), MAX_ALLPASS_SIZE);
             index = 0;
             feedback = std::clamp(fb, 0.0, 0.98);
+            energy = 0.0;
             buffer.fill(0.0);
         }
 
         inline double process(double input) {
             double bufOut = buffer[index];
             double output = -input + bufOut;
-            buffer[index] = input + (bufOut * feedback);
+            double newVal = input + (bufOut * feedback);
+            double diff = (newVal * newVal) - (bufOut * bufOut);
+            energy += diff;
+            if (energy < 1e-15 || !std::isfinite(energy)) {
+                energy = 0.0;
+            }
+            buffer[index] = newVal;
             index = (index + 1) % size;
             return output;
         }
 
         void reset() {
             buffer.fill(0.0);
+            energy = 0.0;
         }
 
-        [[nodiscard]] double energy() const noexcept {
+        [[nodiscard]] double totalEnergy() const noexcept {
+            if (!std::isfinite(energy)) return std::numeric_limits<double>::quiet_NaN();
+            return energy;
+        }
+
+        [[nodiscard]] double scanBufferEnergy() const noexcept {
             double sum = 0.0;
             for (size_t i = 0; i < size; ++i) {
                 const double v = buffer[i];
@@ -227,27 +261,56 @@ public:
     [[nodiscard]] bool isEnabled() const noexcept { return m_enabled.load(std::memory_order_relaxed); }
 
     /// Calculate total energy accumulated in all internal comb/allpass delay buffers (P0-22).
-    /// Used by Audio Thread to verify that reverberation inside the network has completely decayed (< -100 dB).
+    /// Strictly O(1) lock-free calculation on Audio Thread without buffer scanning.
     /// Returns NaN if any internal filter state contains NaN or Inf.
     [[nodiscard]] double totalInternalEnergy() const noexcept {
-        double e = 0.0;
+        if (m_hasInvalidState.load(std::memory_order_relaxed)) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        double e = m_predelayEnergy;
         for (const auto& c : m_combsLeft) {
-            double ce = c.energy();
+            double ce = c.totalEnergy();
             if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
             e += ce;
         }
         for (const auto& c : m_combsRight) {
-            double ce = c.energy();
+            double ce = c.totalEnergy();
             if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
             e += ce;
         }
         for (const auto& a : m_allPassLeft) {
-            double ae = a.energy();
+            double ae = a.totalEnergy();
             if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
             e += ae;
         }
         for (const auto& a : m_allPassRight) {
-            double ae = a.energy();
+            double ae = a.totalEnergy();
+            if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
+            e += ae;
+        }
+        return e;
+    }
+
+    /// Full buffer scanning energy calculation for offline verification and testing (P0-22).
+    [[nodiscard]] double debugScanTotalEnergy() const noexcept {
+        double e = 0.0;
+        for (const auto& c : m_combsLeft) {
+            double ce = c.scanBufferEnergy();
+            if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
+            e += ce;
+        }
+        for (const auto& c : m_combsRight) {
+            double ce = c.scanBufferEnergy();
+            if (!std::isfinite(ce)) return std::numeric_limits<double>::quiet_NaN();
+            e += ce;
+        }
+        for (const auto& a : m_allPassLeft) {
+            double ae = a.scanBufferEnergy();
+            if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
+            e += ae;
+        }
+        for (const auto& a : m_allPassRight) {
+            double ae = a.scanBufferEnergy();
             if (!std::isfinite(ae)) return std::numeric_limits<double>::quiet_NaN();
             e += ae;
         }
@@ -269,6 +332,7 @@ public:
     /// Test helper to inject a non-finite value into internal state for safety verification (P0-22).
     void injectInvalidStateForTest(double nonFiniteVal) noexcept {
         m_combsLeft[0].filterStore = nonFiniteVal;
+        m_combsLeft[0].energy = nonFiniteVal;
         if (!std::isfinite(nonFiniteVal)) {
             m_hasInvalidState.store(true, std::memory_order_relaxed);
         }
@@ -290,6 +354,7 @@ public:
     {
         m_predelayBuffer = other.m_predelayBuffer;
         m_predelayWritePos = other.m_predelayWritePos;
+        m_predelayEnergy = other.m_predelayEnergy;
         for (size_t i = 0; i < 4; ++i) {
             const size_t cLenL = std::min(m_combsLeft[i].size, other.m_combsLeft[i].size);
             for (size_t s = 0; s < cLenL; ++s) {
@@ -297,6 +362,7 @@ public:
             }
             m_combsLeft[i].index = other.m_combsLeft[i].index % m_combsLeft[i].size;
             m_combsLeft[i].filterStore = other.m_combsLeft[i].filterStore;
+            m_combsLeft[i].energy = other.m_combsLeft[i].energy;
 
             const size_t cLenR = std::min(m_combsRight[i].size, other.m_combsRight[i].size);
             for (size_t s = 0; s < cLenR; ++s) {
@@ -304,6 +370,7 @@ public:
             }
             m_combsRight[i].index = other.m_combsRight[i].index % m_combsRight[i].size;
             m_combsRight[i].filterStore = other.m_combsRight[i].filterStore;
+            m_combsRight[i].energy = other.m_combsRight[i].energy;
         }
         for (size_t i = 0; i < 2; ++i) {
             const size_t aLenL = std::min(m_allPassLeft[i].size, other.m_allPassLeft[i].size);
@@ -311,12 +378,14 @@ public:
                 m_allPassLeft[i].buffer[s] = other.m_allPassLeft[i].buffer[s];
             }
             m_allPassLeft[i].index = other.m_allPassLeft[i].index % m_allPassLeft[i].size;
+            m_allPassLeft[i].energy = other.m_allPassLeft[i].energy;
 
             const size_t aLenR = std::min(m_allPassRight[i].size, other.m_allPassRight[i].size);
             for (size_t s = 0; s < aLenR; ++s) {
                 m_allPassRight[i].buffer[s] = other.m_allPassRight[i].buffer[s];
             }
             m_allPassRight[i].index = other.m_allPassRight[i].index % m_allPassRight[i].size;
+            m_allPassRight[i].energy = other.m_allPassRight[i].energy;
         }
     }
 
@@ -337,6 +406,7 @@ public:
         for (auto& a : m_allPassRight) a.reset();
         m_predelayBuffer.fill(0.0);
         m_predelayWritePos = 0;
+        m_predelayEnergy = 0.0;
         m_hasInvalidState.store(false, std::memory_order_relaxed);
     }
 
@@ -359,13 +429,26 @@ public:
         double delayedInput = 0.0;
 
         if (active) {
-            m_predelayBuffer[m_predelayWritePos] = inMono;
             size_t readPos = (m_predelayWritePos + MAX_PREDELAY_SIZE - p->predelaySamples) % MAX_PREDELAY_SIZE;
             delayedInput = m_predelayBuffer[readPos];
+            double diff = (inMono * inMono) - (delayedInput * delayedInput);
+            m_predelayEnergy += diff;
+            if (m_predelayEnergy < 1e-15 || !std::isfinite(m_predelayEnergy)) {
+                m_predelayEnergy = 0.0;
+            }
+            m_predelayBuffer[m_predelayWritePos] = inMono;
             m_predelayWritePos = (m_predelayWritePos + 1) % MAX_PREDELAY_SIZE;
         } else {
             // Tail-preserving Bypass: zero input enters reverb network, allowing tail to ring out
-            delayedInput = 0.0;
+            size_t readPos = (m_predelayWritePos + MAX_PREDELAY_SIZE - p->predelaySamples) % MAX_PREDELAY_SIZE;
+            delayedInput = m_predelayBuffer[readPos];
+            double diff = 0.0 - (delayedInput * delayedInput);
+            m_predelayEnergy += diff;
+            if (m_predelayEnergy < 1e-15 || !std::isfinite(m_predelayEnergy)) {
+                m_predelayEnergy = 0.0;
+            }
+            m_predelayBuffer[m_predelayWritePos] = 0.0;
+            m_predelayWritePos = (m_predelayWritePos + 1) % MAX_PREDELAY_SIZE;
         }
 
         // Parallel Comb Filters
@@ -406,6 +489,7 @@ private:
     double m_predelayMs = 0.0;
     size_t m_predelaySamples = 1;
     size_t m_predelayWritePos = 0;
+    double m_predelayEnergy = 0.0;
     bool m_tailPreserving = true;
 
     std::atomic<bool> m_enabled{false};

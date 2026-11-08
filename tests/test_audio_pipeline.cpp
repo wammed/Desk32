@@ -321,7 +321,9 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
     // Create a Listening Correction chain with massive boost (+12 dB on peak filter)
     auto listenChain = std::make_unique<AudioChain>("Test Listening", ChainPurpose::ListeningCorrectionChain);
     auto headphoneEq = std::make_shared<ParametricEqNode>("Headphone EQ", NodeAffiliation::ListeningCorrection);
-    headphoneEq->setEnabled(true);
+    listenChain->appendNode(headphoneEq);
+
+    pipeline.swapListeningChain(std::move(listenChain));
 
     ParametricEQ::BandConfig cfg;
     cfg.enabled = true;
@@ -329,11 +331,7 @@ void TestAudioPipeline::testOutputPathRoutingAndZeroLeakage()
     cfg.frequency = 1000.0;
     cfg.gainDb = 12.0;
     cfg.Q = 2.0;
-    headphoneEq->setLeftBand(0, cfg);
-    headphoneEq->setRightBand(0, cfg);
-    listenChain->appendNode(headphoneEq);
-
-    pipeline.swapListeningChain(std::move(listenChain));
+    pipeline.paramMailbox().setListeningBand(0, cfg);
 
     // 1. In RenderMonitorPath, Listening Correction MUST NOT affect the output at all
     pipeline.setOutputMode(OutputPathMode::RenderMonitorPath);
