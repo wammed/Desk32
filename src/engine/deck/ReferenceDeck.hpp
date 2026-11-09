@@ -205,6 +205,8 @@ public:
 
     [[nodiscard]] bool isOpen() const noexcept { return m_worker.isOpen(); }
     [[nodiscard]] bool isPlaying() const noexcept { return m_state.load(std::memory_order_acquire) == TransportState::Playing; }
+    [[nodiscard]] decoder::DecoderWorker& worker() noexcept { return m_worker; }
+    [[nodiscard]] const decoder::DecoderWorker& worker() const noexcept { return m_worker; }
 
     void seek(int64_t targetFrame) noexcept {
         m_worker.seek(targetFrame);

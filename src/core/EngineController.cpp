@@ -30,7 +30,7 @@ EngineController::~EngineController() {
     }
 }
 
-bool EngineController::initialize() {
+bool EngineController::initialize(bool offlineMode) {
     // 1. Initialize 4-Deck Manager
     m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
 
@@ -64,14 +64,33 @@ bool EngineController::initialize() {
 
     // 3. Construct Master and Listening Chains with isolated DSP nodes (P0-08, P0-21)
     // Section 5.1: Mastering DSP belongs in Master Chain (upstream of Render Tap)
+    // Initial state: optional master DSPs start bypassed matching spec §5.3-5.6 and EngineController model.
     auto masterChain = std::make_unique<engine::pipeline::AudioChain>("Master Chain", engine::pipeline::ChainPurpose::MasteringChain);
-    masterChain->appendNode(std::make_shared<engine::pipeline::ParametricEqNode>("Master PEQ", engine::pipeline::NodeAffiliation::RenderCommon));
-    masterChain->appendNode(std::make_shared<engine::pipeline::GraphicEqNode>("Graphic EQ"));
-    masterChain->appendNode(std::make_shared<engine::pipeline::HighLowPassNode>("HPF / LPF"));
-    masterChain->appendNode(std::make_shared<engine::pipeline::CompressorNode>("Compressor"));
+    auto peqNode = std::make_shared<engine::pipeline::ParametricEqNode>("Master PEQ", engine::pipeline::NodeAffiliation::RenderCommon);
+    peqNode->setBypassed(true);
+    masterChain->appendNode(std::move(peqNode));
+
+    auto geqNode = std::make_shared<engine::pipeline::GraphicEqNode>("Graphic EQ");
+    geqNode->setBypassed(true);
+    masterChain->appendNode(std::move(geqNode));
+
+    auto filterNode = std::make_shared<engine::pipeline::HighLowPassNode>("HPF / LPF");
+    filterNode->setBypassed(true);
+    masterChain->appendNode(std::move(filterNode));
+
+    auto compNode = std::make_shared<engine::pipeline::CompressorNode>("Compressor");
+    compNode->setBypassed(true);
+    masterChain->appendNode(std::move(compNode));
+
     masterChain->appendNode(m_insertNode->clone());
-    masterChain->appendNode(std::make_shared<engine::pipeline::ReverbNode>("Reverb"));
-    masterChain->appendNode(std::make_shared<engine::pipeline::PeakLimiterNode>("Peak Limiter"));
+
+    auto reverbNode = std::make_shared<engine::pipeline::ReverbNode>("Reverb");
+    reverbNode->setBypassed(true);
+    masterChain->appendNode(std::move(reverbNode));
+
+    auto limiterNode = std::make_shared<engine::pipeline::PeakLimiterNode>("Peak Limiter");
+    limiterNode->setBypassed(true);
+    masterChain->appendNode(std::move(limiterNode));
 
     // Listening Correction Chain strictly contains Listening Correction ONLY
     auto listeningChain = std::make_unique<engine::pipeline::AudioChain>("Listening Chain", engine::pipeline::ChainPurpose::ListeningCorrectionChain);
@@ -95,6 +114,9 @@ bool EngineController::initialize() {
 
     // 5. Initialize Native PipeWire AudioOutput
     m_audioOutput = std::make_unique<engine::backend::PipeWireAudioOutput>();
+    if (offlineMode) {
+        m_audioOutput->setOfflineSimulationMode(true);
+    }
     bool initOk = m_audioOutput->initialize(48000, 256);
     if (!initOk) {
         log::LogService::instance().start();
@@ -497,8 +519,10 @@ void EngineController::setGlobalDspBypass(bool bypass) {
     cmdListen.subIndex = 1; // Listening
     cmdListen.boolFlag1 = bypass ? 1 : 0;
 
-    // Check capacity first to avoid partial enqueue (P1-1)
-    if (!m_pipeline->paramQueue().hasSpace(2)) {
+    // P1-1: Atomically enqueue both Master and Listening commands under a single producer lock.
+    // pushTwo() guarantees that either BOTH commands are enqueued or NEITHER is enqueued.
+    // Partial bypass state between Master and Listening chains is structurally impossible.
+    if (!m_pipeline->paramQueue().pushTwo(cmdMaster, cmdListen)) {
         log::LogService::instance().log(
             "DSP",
             "GlobalBypass",
@@ -507,61 +531,6 @@ void EngineController::setGlobalDspBypass(bool bypass) {
             "DSPQueue",
             "Pipeline"
         );
-        emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
-        emit globalDspBypassChanged(prevBypass);
-        return;
-    }
-
-    bool masterOk = m_pipeline->paramQueue().push(cmdMaster);
-    bool listenOk = m_pipeline->paramQueue().push(cmdListen);
-
-    if (!masterOk || !listenOk) {
-        if (masterOk && !listenOk) {
-            // Partial failure recovery: Master succeeded but Listening failed -> Rollback Master
-            engine::dsp::DspCommand cmdRollback;
-            cmdRollback.type = engine::dsp::DspCommandType::SetGlobalBypass;
-            cmdRollback.subIndex = 0;
-            cmdRollback.boolFlag1 = prevBypass ? 1 : 0;
-            bool rollbackOk = m_pipeline->paramQueue().push(cmdRollback);
-            if (!rollbackOk) {
-                m_globalBypassDesynced.store(true, std::memory_order_relaxed);
-            }
-            log::LogService::instance().log(
-                "DSP",
-                "GlobalBypass",
-                "Failed",
-                QString("Partial Global DSP Bypass failure: Listening queue full, Master rolled back (code: 3002)"),
-                "DSPQueue",
-                "Pipeline"
-            );
-        } else if (!masterOk && listenOk) {
-            // Partial failure recovery: Listening succeeded but Master failed -> Rollback Listening
-            engine::dsp::DspCommand cmdRollback;
-            cmdRollback.type = engine::dsp::DspCommandType::SetGlobalBypass;
-            cmdRollback.subIndex = 1;
-            cmdRollback.boolFlag1 = prevBypass ? 1 : 0;
-            bool rollbackOk = m_pipeline->paramQueue().push(cmdRollback);
-            if (!rollbackOk) {
-                m_globalBypassDesynced.store(true, std::memory_order_relaxed);
-            }
-            log::LogService::instance().log(
-                "DSP",
-                "GlobalBypass",
-                "Failed",
-                QString("Partial Global DSP Bypass failure: Master queue full, Listening rolled back (code: 3004)"),
-                "DSPQueue",
-                "Pipeline"
-            );
-        } else {
-            log::LogService::instance().log(
-                "DSP",
-                "GlobalBypass",
-                "Failed",
-                QString("Failed to queue Global DSP Bypass: queue full (code: 3001)"),
-                "DSPQueue",
-                "Pipeline"
-            );
-        }
         emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
         emit globalDspBypassChanged(prevBypass);
         return;
@@ -1331,6 +1300,25 @@ bool EngineController::isDspNodeBypassed(const QString& nodeName) {
     if (nodeName == "Reverb") return m_reverbBypassed.load(std::memory_order_relaxed);
     if (nodeName == "ListeningCorrection") return m_listeningCorrectionBypassed.load(std::memory_order_relaxed);
     return false;
+}
+
+bool EngineController::isDspNodeAppliedBypassed(const QString& nodeName) const noexcept {
+    if (!m_pipeline) return false;
+    uint8_t targetChain = 0;
+    uint8_t nodeIndex = 0;
+    if (!findDspNode(nodeName, targetChain, nodeIndex)) {
+        return false;
+    }
+    if (targetChain == 1) {
+        return m_pipeline->isListeningNodeBypassed(nodeIndex);
+    }
+    return m_pipeline->isMasterNodeBypassed(nodeIndex);
+}
+
+void EngineController::renderOfflineBlock(float* outInterleaved, size_t frames) {
+    if (m_audioOutput) {
+        m_audioOutput->renderOfflineBlock(outInterleaved, frames);
+    }
 }
 
 QVariantMap EngineController::getDeckState(const QString& deckId) {

@@ -1,5 +1,7 @@
 #include <QTest>
 #include <QObject>
+#include <QSignalSpy>
+#include <QTemporaryDir>
 #include <cmath>
 #include <vector>
 #include <array>
@@ -22,6 +24,8 @@
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
 #include "engine/memory/EpochReclaimer.hpp"
+#include "core/EngineController.hpp"
+#include "core/log/LogService.hpp"
 
 using namespace desk32::engine::dsp;
 using namespace desk32::engine::pipeline;
@@ -156,11 +160,24 @@ private slots:
     void testMasterMutePcmAttenuationIntegration();
     void testAudioThreadZeroAllocationDuringContinuousDspUpdates();
     void testDspNodeBypassParameterPreservation();
+    void cleanupTestCase();
+
+private:
+    std::unique_ptr<QTemporaryDir> m_tempDir;
 };
 
 void TestPhase2Dsp::initTestCase()
 {
     qDebug() << "Initializing TestPhase2Dsp (Phase 2 Acoustic Correction & Built-in DSP Verification)...";
+    m_tempDir = std::make_unique<QTemporaryDir>();
+    QVERIFY(m_tempDir->isValid());
+    QString dbPath = m_tempDir->path() + "/test_phase2_log.db";
+    desk32::core::log::LogService::instance().start(dbPath);
+}
+
+void TestPhase2Dsp::cleanupTestCase()
+{
+    desk32::core::log::LogService::instance().stop();
 }
 
 void TestPhase2Dsp::test24BandParametricEqAndResponseCurve()
@@ -2170,54 +2187,111 @@ void TestPhase2Dsp::testMasterMuteSmoothingAndTelemetry() {
 }
 
 void TestPhase2Dsp::testMasterMutePcmAttenuationIntegration() {
-    // End-to-end integration test of Master Mute with actual AudioPipeline and ParameterSmoother (P1-3)
-    AudioPipeline pipeline(48000.0);
-    ParameterSmoother gainSmootherL(1.0, 15.0);
-    ParameterSmoother gainSmootherR(1.0, 15.0);
-    gainSmootherL.configure(48000.0, 15.0);
-    gainSmootherR.configure(48000.0, 15.0);
-    gainSmootherL.reset(1.0);
-    gainSmootherR.reset(1.0);
+    // End-to-end integration test of Master Mute via EngineController APIs with actual AudioPipeline (P1-3)
+    desk32::core::EngineController& controller = desk32::core::EngineController::instance();
+    QVERIFY(controller.initialize(true));
+    if (controller.audioOutput()) {
+        controller.audioOutput()->stop();
+        controller.audioOutput()->setOfflineSimulationMode(true);
+    }
+
+    // 1. Initial State: Unmuted, Master Gain = 1.0
+    controller.setMasterGain(1.0);
+    controller.setMasterMute(false);
+    QCOMPARE(controller.masterGain(), 1.0);
+    QCOMPARE(controller.isMasterMute(), false);
+
+    // Setup synthetic 440Hz reference tone on Deck A
+    desk32::engine::deck::TrackInfo synthInfo;
+    synthInfo.path = "synthetic://sine_440";
+    synthInfo.sampleRate = 48000.0;
+    synthInfo.channels = 2;
+    synthInfo.totalFrames = 480000; // 10 seconds of 440Hz sine
+
+    auto* deckA = controller.deckManager()->deck('A');
+    QVERIFY(deckA != nullptr);
+    QVERIFY(deckA->loadTrack(synthInfo, 48000.0));
+    controller.play("A");
+    QCOMPARE(deckA->state(), desk32::engine::deck::TransportState::Playing);
+
+    // Wait until background DecoderWorker has primed the ring buffer with decoded audio
+    int waitCount = 0;
+    while (deckA->worker().ringBuffer().availableRead() < 8192 && waitCount++ < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    QVERIFY(deckA->worker().ringBuffer().availableRead() >= 4096);
 
     const size_t blockSize = 128;
-    std::vector<double> inL(blockSize, 0.5);
-    std::vector<double> inR(blockSize, -0.4);
     std::vector<float> outPcm(blockSize * 2);
 
-    // Initial pass: full unmuted signal
-    std::vector<double> blockL = inL;
-    std::vector<double> blockR = inR;
-    gainSmootherL.process(blockL.data(), blockSize);
-    gainSmootherR.process(blockR.data(), blockSize);
-    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                     desk32::engine::format::SampleFormat::Float32, false);
-
-    QVERIFY(std::abs(outPcm[0]) > 0.45);
-    QVERIFY(std::abs(outPcm[1]) > 0.35);
-
-    // 1. Engage Master Mute (target -> 0.0)
-    gainSmootherL.setTarget(0.0);
-    gainSmootherR.setTarget(0.0);
-
-    // Process blocks until smooth decay and settling (60 blocks of 128 frames = 7680 samples = 160 ms > 10 tau)
-    double prevMax = 1.0;
-    for (int b = 0; b < 60; ++b) {
-        blockL = inL;
-        blockR = inR;
-        gainSmootherL.process(blockL.data(), blockSize);
-        gainSmootherR.process(blockR.data(), blockSize);
-        pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                         desk32::engine::format::SampleFormat::Float32, false);
-
-        double curMax = 0.0;
-        for (size_t i = 0; i < blockSize * 2; ++i) {
-            curMax = std::max(curMax, std::abs(static_cast<double>(outPcm[i])));
+    // Prime the pipeline to steady-state playback (fill lookahead buffers and decoder ring buffers)
+    double steadyMax = 0.0;
+    for (int p = 0; p < 25; ++p) {
+        controller.renderOfflineBlock(outPcm.data(), blockSize);
+        for (float s : outPcm) {
+            steadyMax = std::max(steadyMax, std::abs(static_cast<double>(s)));
         }
-        // Smooth monotonic decay
-        QVERIFY(curMax <= prevMax + 1e-6);
-        prevMax = curMax;
+    }
+    qDebug() << "steadyMax:" << steadyMax;
+    QVERIFY(steadyMax > 0.1); // Confirmed active steady-state playback
 
-        // Check for click/pop: sample-to-sample difference should be bounded (< 0.05 per sample)
+    // 2. Engage Master Mute via EngineController::setMasterMute(true)
+    QSignalSpy muteSpy(&controller, &desk32::core::EngineController::masterMuteChanged);
+    controller.setMasterMute(true);
+    QCOMPARE(controller.isMasterMute(), true);
+    QCOMPARE(muteSpy.count(), 1);
+
+    // Process blocks through EngineController until smooth decay and settling (20 chunks of 4*128 frames = 213 ms > 14 tau)
+    double prevChunkMax = 2.0;
+    for (int step = 0; step < 20; ++step) {
+        double chunkMax = 0.0;
+        for (int b = 0; b < 4; ++b) {
+            controller.renderOfflineBlock(outPcm.data(), blockSize);
+            double bMax = 0.0;
+            for (float sample : outPcm) {
+                bMax = std::max(bMax, std::abs(static_cast<double>(sample)));
+            }
+            chunkMax = std::max(chunkMax, bMax);
+
+            // Check for click/pop: sample-to-sample difference should be bounded (< 0.05 per sample)
+            for (size_t i = 2; i < blockSize * 2; i += 2) {
+                double deltaL = std::abs(outPcm[i] - outPcm[i - 2]);
+                double deltaR = std::abs(outPcm[i + 1] - outPcm[i - 1]);
+                QVERIFY(deltaL < 0.05);
+                QVERIFY(deltaR < 0.05);
+            }
+        }
+
+        // Smooth monotonic decay across successive time windows
+        QVERIFY(chunkMax <= prevChunkMax + 1e-5);
+        prevChunkMax = chunkMax;
+    }
+
+    // After settling (>14 tau), ParameterSmoother inside EngineController snaps to 0.0: output must be strictly silent (< 1e-7, >140 dB attenuation)
+    controller.renderOfflineBlock(outPcm.data(), blockSize);
+    for (size_t i = 0; i < blockSize * 2; ++i) {
+        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
+    }
+
+    // 3. While muted, modify Master Gain via EngineController::setMasterGain(1.5)
+    controller.setMasterGain(1.5);
+    QCOMPARE(controller.masterGain(), 1.5);
+
+    // Verify output remains strictly silent while mute is active
+    controller.renderOfflineBlock(outPcm.data(), blockSize);
+    for (size_t i = 0; i < blockSize * 2; ++i) {
+        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
+    }
+
+    // 4. Disengage Master Mute via EngineController::setMasterMute(false)
+    controller.setMasterMute(false);
+    QCOMPARE(controller.isMasterMute(), false);
+    QCOMPARE(controller.masterGain(), 1.5); // Master Gain 1.5 was preserved across mute!
+
+    // Render recovery blocks: smooth ramp up towards gain 1.5
+    for (int b = 0; b < 60; ++b) {
+        controller.renderOfflineBlock(outPcm.data(), blockSize);
+
         for (size_t i = 2; i < blockSize * 2; i += 2) {
             double deltaL = std::abs(outPcm[i] - outPcm[i - 2]);
             double deltaR = std::abs(outPcm[i + 1] - outPcm[i - 1]);
@@ -2226,77 +2300,31 @@ void TestPhase2Dsp::testMasterMutePcmAttenuationIntegration() {
         }
     }
 
-    // After settling, ParameterSmoother snaps to 0.0, output must be strictly silent (< 1e-7, >140 dB attenuation)
-    blockL = inL;
-    blockR = inR;
-    gainSmootherL.process(blockL.data(), blockSize);
-    gainSmootherR.process(blockR.data(), blockSize);
-    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                     desk32::engine::format::SampleFormat::Float32, false);
-
-    for (size_t i = 0; i < blockSize * 2; ++i) {
-        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
-    }
-
-    // 2. While muted, Master Gain is changed to 1.5
-    // In EngineController, when isMuted is true, target remains 0.0
-    double savedMasterGain = 1.5;
-    bool isMuted = true;
-    gainSmootherL.setTarget(isMuted ? 0.0 : savedMasterGain);
-    gainSmootherR.setTarget(isMuted ? 0.0 : savedMasterGain);
-
-    blockL = inL;
-    blockR = inR;
-    gainSmootherL.process(blockL.data(), blockSize);
-    gainSmootherR.process(blockR.data(), blockSize);
-    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                     desk32::engine::format::SampleFormat::Float32, false);
-
-    for (size_t i = 0; i < blockSize * 2; ++i) {
-        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
-    }
-
-    // 3. Disengage Master Mute (target -> savedMasterGain = 1.5)
-    isMuted = false;
-    gainSmootherL.setTarget(isMuted ? 0.0 : savedMasterGain);
-    gainSmootherR.setTarget(isMuted ? 0.0 : savedMasterGain);
-
-    // Verify smooth monotonic rise towards 1.5 without overshoot or clicks
-    for (int b = 0; b < 60; ++b) {
-        blockL = inL;
-        blockR = inR;
-        gainSmootherL.process(blockL.data(), blockSize);
-        gainSmootherR.process(blockR.data(), blockSize);
-        pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                         desk32::engine::format::SampleFormat::Float32, false);
-
-        for (size_t i = 2; i < blockSize * 2; i += 2) {
-            double deltaL = std::abs(outPcm[i] - outPcm[i - 2]);
-            double deltaR = std::abs(outPcm[i + 1] - outPcm[i - 1]);
-            QVERIFY(deltaL < 0.05); // No clicks or pops
-            QVERIFY(deltaR < 0.05);
+    // After full ramp up, measure peak across multiple blocks to capture the sine wave cycle
+    double unmutedMax = 0.0;
+    for (int b = 0; b < 10; ++b) {
+        controller.renderOfflineBlock(outPcm.data(), blockSize);
+        for (float sample : outPcm) {
+            unmutedMax = std::max(unmutedMax, std::abs(static_cast<double>(sample)));
         }
     }
+    QVERIFY(unmutedMax > steadyMax * 1.1); // Amplified by 1.5 gain
 
-    // After settling to 1.5, signal should be at full 1.5 * input
-    blockL = inL;
-    blockR = inR;
-    gainSmootherL.process(blockL.data(), blockSize);
-    gainSmootherR.process(blockR.data(), blockSize);
-    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
-                     desk32::engine::format::SampleFormat::Float32, false);
+    // 5. Verify DSP Node & Global Bypass independence
+    QCOMPARE(controller.globalDspBypass(), false);
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), true);
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), true);
 
-    QVERIFY(std::abs(outPcm[0] - (0.5f * 1.5f)) < 0.01f);
-    QVERIFY(std::abs(outPcm[1] - (-0.4f * 1.5f)) < 0.01f);
-
-    // 4. Verify DSP chain bypass states are completely unaffected throughout mute operations
-    QCOMPARE(pipeline.isMasterGlobalBypassed(), false);
-    QCOMPARE(pipeline.isListeningGlobalBypassed(), false);
+    // Clean up
+    controller.stop("A");
+    controller.setMasterGain(1.0);
 }
 
 void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
-    // P1-4: Verify strictly ZERO dynamic memory allocations in Audio Thread while Control Thread
-    // issues continuous high-frequency DSP parameter updates across all nodes
+    // P1-4: Verify strictly ZERO C++ dynamic memory allocations (operator new / operator new[]) in Audio Thread
+    // while Control Thread issues continuous high-frequency DSP parameter updates across all nodes.
+    // Note: C-runtime direct heap allocations (malloc/calloc) outside C++ new are not tracked by operator new override;
+    // this test strictly validates C++ heap allocation safety across all DSP and pipeline processing paths.
     AudioPipeline pipeline(48000.0);
 
     // Build realistic Mastering and Listening chains
@@ -2339,10 +2367,16 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
             blocksProcessed.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
+        t_isAudioThread = false;
     });
+
+    size_t updatesRequested = 0;
+    size_t updatesAccepted = 0;
 
     // Control Thread: Issue 1,000 rapid updates across all DSP modules
     for (int i = 0; i < 1000; ++i) {
+        updatesRequested++;
+
         // Continuous Mailbox updates
         pipeline.paramMailbox().setFilterParams(
             static_cast<float>(20.0 + (i % 200)),
@@ -2369,7 +2403,9 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
             cmd.type = desk32::engine::dsp::DspCommandType::SetGlobalBypass;
             cmd.boolFlag1 = (i % 16 == 3) ? 1 : 0;
         }
-        pipeline.paramQueue().push(cmd);
+        if (pipeline.paramQueue().push(cmd)) {
+            updatesAccepted++;
+        }
 
         // Prepared instance updates
         if (i % 10 == 0) {
@@ -2393,9 +2429,14 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
 
     s_trackAllocations.store(false, std::memory_order_relaxed);
 
-    // CRITICAL ASSERTION: Audio Thread allocation count must be STRICTLY 0!
-    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
-    QVERIFY(blocksProcessed.load() >= 100);
+    // Quantitative metrics verification:
+    // 1. Verify updates were actually requested and accepted by the queue
+    QCOMPARE(updatesRequested, size_t(1000));
+    QVERIFY(updatesAccepted > 900); // High acceptance rate without spurious drops
+    // 2. Verify Audio Thread executed at least 100 real-time blocks
+    QVERIFY(blocksProcessed.load(std::memory_order_relaxed) >= 100);
+    // 3. Strictly zero dynamic allocations in Audio Thread (C++ operator new/new[])
+    QCOMPARE(s_audioThreadAllocationCount.load(std::memory_order_relaxed), size_t(0));
 
     // Test Queue Full condition: fill queue to capacity (512 items) and verify process() doesn't block or allocate
     s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
@@ -2496,5 +2537,5 @@ void TestPhase2Dsp::testDspNodeBypassParameterPreservation() {
     QCOMPARE(revNode.isTailPreserving(), true);
 }
 
-QTEST_MAIN(TestPhase2Dsp)
+QTEST_GUILESS_MAIN(TestPhase2Dsp)
 #include "test_phase2_dsp.moc"

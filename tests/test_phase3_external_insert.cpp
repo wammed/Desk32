@@ -739,7 +739,99 @@ void TestPhase3ExternalInsert::testGlobalDspBypassQueueConsistencyAndRollback() 
     QCOMPARE(controller.globalDspBypass(), false);
     QVERIFY(overflowSpy.count() > 0);
 
-    // Case 4: Queue drains and resync succeeds
+    // Case 4: Multi-Producer Concurrency Verification of pushTwo Atomicity (P1-1)
+    // Verify that under concurrent push operations from multiple threads, pushTwo() ALWAYS enqueues
+    // the Master and Listening commands consecutively without interleaving from other producers.
+    {
+        desk32::engine::dsp::ParameterCommandQueue testQueue;
+        std::atomic<bool> start{false};
+        std::atomic<bool> done{false};
+        std::atomic<size_t> pushTwoSuccessCount{0};
+
+        // 2 threads calling pushTwo
+        std::vector<std::thread> producers;
+        for (int t = 0; t < 2; ++t) {
+            producers.emplace_back([&, t]() {
+                while (!start.load(std::memory_order_acquire)) {}
+                for (int i = 0; i < 100; ++i) {
+                    desk32::engine::dsp::DspCommand c1, c2;
+                    c1.type = desk32::engine::dsp::DspCommandType::SetGlobalBypass;
+                    c1.subIndex = 0; // Master
+                    c1.index = static_cast<uint8_t>(t * 100 + i);
+                    c2.type = desk32::engine::dsp::DspCommandType::SetGlobalBypass;
+                    c2.subIndex = 1; // Listening
+                    c2.index = static_cast<uint8_t>(t * 100 + i);
+                    if (testQueue.pushTwo(c1, c2)) {
+                        pushTwoSuccessCount.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    std::this_thread::yield();
+                }
+            });
+        }
+
+        // 2 threads calling single push
+        for (int t = 0; t < 2; ++t) {
+            producers.emplace_back([&, t]() {
+                while (!start.load(std::memory_order_acquire)) {}
+                for (int i = 0; i < 100; ++i) {
+                    desk32::engine::dsp::DspCommand c;
+                    c.type = desk32::engine::dsp::DspCommandType::None;
+                    c.index = static_cast<uint8_t>(t * 100 + i);
+                    testQueue.push(c);
+                    std::this_thread::yield();
+                }
+            });
+        }
+
+        // Consumer thread popping and verifying that Master and Listening are ALWAYS consecutive
+        std::atomic<bool> atomicityViolation{false};
+        std::thread consumer([&]() {
+            while (!done.load(std::memory_order_acquire)) {
+                desk32::engine::dsp::DspCommand cmd;
+                if (testQueue.pop(cmd)) {
+                    if (cmd.type == desk32::engine::dsp::DspCommandType::SetGlobalBypass && cmd.subIndex == 0) {
+                        desk32::engine::dsp::DspCommand nextCmd;
+                        while (!testQueue.pop(nextCmd)) {
+                            std::this_thread::yield();
+                        }
+                        if (nextCmd.type != desk32::engine::dsp::DspCommandType::SetGlobalBypass ||
+                            nextCmd.subIndex != 1 ||
+                            nextCmd.index != cmd.index) {
+                            atomicityViolation.store(true, std::memory_order_relaxed);
+                        }
+                    }
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+            // Drain remaining
+            desk32::engine::dsp::DspCommand cmd;
+            while (testQueue.pop(cmd)) {
+                if (cmd.type == desk32::engine::dsp::DspCommandType::SetGlobalBypass && cmd.subIndex == 0) {
+                    desk32::engine::dsp::DspCommand nextCmd;
+                    while (!testQueue.pop(nextCmd)) {
+                        std::this_thread::yield();
+                    }
+                    if (nextCmd.type != desk32::engine::dsp::DspCommandType::SetGlobalBypass ||
+                        nextCmd.subIndex != 1 ||
+                        nextCmd.index != cmd.index) {
+                        atomicityViolation.store(true, std::memory_order_relaxed);
+                    }
+                }
+            }
+        });
+
+        start.store(true, std::memory_order_release);
+        for (auto& p : producers) p.join();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        done.store(true, std::memory_order_release);
+        consumer.join();
+
+        QVERIFY(pushTwoSuccessCount.load() > 50);
+        QCOMPARE(atomicityViolation.load(), false);
+    }
+
+    // Case 5: Queue drains and resync succeeds
     while (pipe->paramQueue().pop(dummy)) {}
     QCOMPARE(pipe->paramQueue().hasSpace(2), true);
 
@@ -767,26 +859,32 @@ void TestPhase3ExternalInsert::testDspNodeBypassQueueFailureAndConsistency() {
     while (pipe->paramQueue().pop(dummy)) {}
     QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
 
-    // Case 1: Normal toggle
+    // Case 1: Requested -> Accepted -> Applied lifecycle verification (P1-2)
     QSignalSpy filterSpy(&controller, &EngineController::filterParametersChanged);
     controller.setDspNodeBypass("Filter", true);
+
+    // 1. Accepted: updated in Controller atomic state and UI model
     QCOMPARE(controller.isDspNodeBypassed("Filter"), true);
     QVERIFY(filterSpy.count() > 0);
 
-    // Drain command
-    bool foundCmd = false;
-    while (pipe->paramQueue().pop(dummy)) {
-        if (dummy.type == desk32::engine::dsp::DspCommandType::SetNodeBypass && dummy.index == 2) {
-            QCOMPARE(dummy.boolFlag1, uint8_t(1));
-            foundCmd = true;
-        }
-    }
-    QVERIFY(foundCmd);
+    // 2. Not yet Applied in Audio Thread (pipeline has not drained parameter command queue yet)
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), false);
 
-    // Reset to unbypassed
+    // 3. Audio Thread cycle runs (renderOfflineBlock drains parameter queue into active DSP nodes)
+    std::vector<float> pcm(256 * 2, 0.0f);
+    controller.renderOfflineBlock(pcm.data(), 256);
+
+    // 4. Applied: DSP node in Audio Thread now confirms bypass engaged
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), true);
+
+    // Toggle back to false
+    filterSpy.clear();
     controller.setDspNodeBypass("Filter", false);
-    while (pipe->paramQueue().pop(dummy)) {}
-    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false); // Accepted
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), true); // Still true until Audio Thread runs
+    controller.renderOfflineBlock(pcm.data(), 256); // Audio Thread cycle
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), false); // Applied
+    QVERIFY(filterSpy.count() > 0);
 
     // Case 2: Parameter Queue Full -> Failure handling
     for (size_t i = 0; i < desk32::engine::dsp::ParameterCommandQueue::CAPACITY; ++i) {
@@ -803,6 +901,7 @@ void TestPhase3ExternalInsert::testDspNodeBypassQueueFailureAndConsistency() {
 
     // AC-04: UI and DSP state must remain consistent on failure: state must stay false!
     QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), false);
     QVERIFY(overflowSpy.count() > 0);
     // UI signal re-emitted so UI reverts to false
     QVERIFY(filterSpy.count() > 0);

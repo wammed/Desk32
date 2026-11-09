@@ -88,7 +88,7 @@ public:
     explicit EngineController(QObject* parent = nullptr);
     ~EngineController() override;
 
-    bool initialize();
+    bool initialize(bool offlineMode = false);
 
     // Property getters
     [[nodiscard]] QString activeDeckId() const;
@@ -204,6 +204,7 @@ public:
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
     Q_INVOKABLE bool resyncDspNodeBypass(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
+    Q_INVOKABLE bool isDspNodeAppliedBypassed(const QString& nodeName) const noexcept;
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
 
     // Phase 3: External Insert Host Operations (Section 6.0)
@@ -224,7 +225,7 @@ public:
     Q_INVOKABLE void setInsertDelayCompensation(int frames);
 
     // Phase 3: Common Preset Management (Specification Section 11.1)
-    Q_INVOKABLE QStringList listPresets(const QString& category) const;
+    QStringList listPresets(const QString& category) const;
     Q_INVOKABLE bool savePreset(const QString& category, const QString& presetName, const QVariantMap& data);
     Q_INVOKABLE QVariantMap loadPreset(const QString& category, const QString& presetName);
     Q_INVOKABLE bool deletePreset(const QString& category, const QString& presetName);
@@ -238,10 +239,15 @@ public:
     Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath);
     Q_INVOKABLE QVariantMap getRenderStatus() const;
 
-    // Direct access to nodes for tests
+    // Direct access to nodes and engine components for testing
     [[nodiscard]] std::shared_ptr<engine::insert::ExternalInsertNode> insertNode() const noexcept { return m_insertNode; }
     [[nodiscard]] engine::preset::PresetManager& presetManager() noexcept { return m_presetManager; }
     [[nodiscard]] engine::render::RenderEngine& renderEngine() noexcept { return m_renderEngine; }
+    [[nodiscard]] engine::deck::DeckManager* deckManager() noexcept { return m_deckManager.get(); }
+    [[nodiscard]] engine::backend::PipeWireAudioOutput* audioOutput() noexcept { return m_audioOutput.get(); }
+
+    /// Test helper: Render an audio block through the controller's audio output callback
+    void renderOfflineBlock(float* outInterleaved, size_t frames);
 
 signals:
     void activeDeckChanged(const QString& deckId);

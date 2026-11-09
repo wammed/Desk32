@@ -125,6 +125,10 @@ public:
     /// Strictly RT-Safe: Zero dynamic allocation, zero locks, zero blocking, zero FFmpeg calls.
     size_t readAudioBlock(double* outLeft, double* outRight, size_t frames) noexcept;
 
+    /// Direct access to lock-free PCM ring buffer (e.g. for offline testing / inspection)
+    [[nodiscard]] buffer::PcmRingBuffer& ringBuffer() noexcept { return m_ringBuffer; }
+    [[nodiscard]] const buffer::PcmRingBuffer& ringBuffer() const noexcept { return m_ringBuffer; }
+
 private:
     void workerLoop();
     void processCommand(const WorkerCommand& cmd);

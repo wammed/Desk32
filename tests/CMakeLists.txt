@@ -306,15 +306,45 @@ add_test(NAME test_log_service COMMAND test_log_service)
 # Phase 2: Acoustic Correction & Built-in DSP Implementation
 add_executable(test_phase2_dsp
     test_phase2_dsp.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
 )
 
 target_link_libraries(test_phase2_dsp PRIVATE
     Qt6::Core
+    Qt6::Gui
     Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ALSA::ALSA
 )
 
 target_include_directories(test_phase2_dsp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_phase2_dsp SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
 )
 
 add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
