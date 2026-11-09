@@ -131,9 +131,10 @@ bool EngineController::initialize() {
             size_t chunk = std::min(remaining, size_t(4096));
             m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(), chunk);
 
-            // Apply master gain with smooth interpolation (independent L/R, zipper noise-free)
-            m_gainSmootherL.setTarget(m_masterGainL.load(std::memory_order_relaxed));
-            m_gainSmootherR.setTarget(m_masterGainR.load(std::memory_order_relaxed));
+            // Apply master gain with smooth interpolation (independent L/R, zipper noise-free, click-free mute)
+            const bool isMuted = m_masterMute.load(std::memory_order_relaxed);
+            m_gainSmootherL.setTarget(isMuted ? 0.0 : m_masterGainL.load(std::memory_order_relaxed));
+            m_gainSmootherR.setTarget(isMuted ? 0.0 : m_masterGainR.load(std::memory_order_relaxed));
             m_gainSmootherL.process(m_audioInL.data(), chunk);
             m_gainSmootherR.process(m_audioInR.data(), chunk);
 
@@ -264,6 +265,36 @@ double EngineController::masterGainL() const {
 
 double EngineController::masterGainR() const {
     return m_masterGainR.load(std::memory_order_relaxed);
+}
+
+bool EngineController::isMasterMute() const {
+    return m_masterMute.load(std::memory_order_relaxed);
+}
+
+double EngineController::masterPeakL() const {
+    return m_pipeline ? m_pipeline->masterPeakL() : 0.0;
+}
+
+double EngineController::masterPeakR() const {
+    return m_pipeline ? m_pipeline->masterPeakR() : 0.0;
+}
+
+double EngineController::masterRmsL() const {
+    return m_pipeline ? m_pipeline->masterRmsL() : 0.0;
+}
+
+double EngineController::masterRmsR() const {
+    return m_pipeline ? m_pipeline->masterRmsR() : 0.0;
+}
+
+bool EngineController::masterClipped() const {
+    return m_pipeline ? m_pipeline->masterClipped() : false;
+}
+
+double EngineController::masterHeadroomDb() const {
+    double peak = std::max(masterPeakL(), masterPeakR());
+    if (peak <= 0.000001) return 96.0;
+    return -20.0 * std::log10(peak);
 }
 
 int EngineController::xrunCount() const {
@@ -464,17 +495,8 @@ void EngineController::setGlobalDspBypass(bool bypass) {
                 emit dspQueueOverflowWarning(static_cast<int>(cmdListen.type));
             }
         }
-        m_peqBypassed.store(bypass, std::memory_order_relaxed);
-        m_geqBypassed.store(bypass, std::memory_order_relaxed);
-        m_filterBypassed.store(bypass, std::memory_order_relaxed);
-        m_compBypassed.store(bypass, std::memory_order_relaxed);
-        m_insertBypassed.store(bypass, std::memory_order_relaxed);
-        m_limiterBypassed.store(bypass, std::memory_order_relaxed);
-        m_reverbBypassed.store(bypass, std::memory_order_relaxed);
-        m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
-        if (m_insertNode) m_insertNode->setBypassed(bypass);
+        // Section 10.2.3 & 5.9: Global DSP Bypass is temporary and does NOT destroy individual DSP node ON/OFF states!
         emit globalDspBypassChanged(bypass);
-        emit externalInsertStatusChanged();
         emit peqParametersChanged();
         emit geqParametersChanged();
         emit filterParametersChanged();
@@ -488,6 +510,21 @@ void EngineController::setGlobalDspBypass(bool bypass) {
             bypass ? "Global DSP Bypass Engaged" : "Global DSP Bypass Disengaged",
             "DSPChain",
             "Master"
+        );
+    }
+}
+
+void EngineController::setMasterMute(bool mute) {
+    bool prev = m_masterMute.exchange(mute);
+    if (prev != mute) {
+        emit masterMuteChanged(mute);
+        log::LogService::instance().log(
+            "MasterControl",
+            "Mute",
+            "Success",
+            mute ? "Master Output Muted" : "Master Output Unmuted",
+            "Master",
+            mute ? "MuteOn" : "MuteOff"
         );
     }
 }

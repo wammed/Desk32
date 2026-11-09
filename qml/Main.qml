@@ -169,6 +169,26 @@ ApplicationWindow {
                 color: "#2a3038"
             }
 
+            // DSP Parameter Preview Toggle (Section 5.9 Prior Implementation)
+            Button {
+                text: dspPreviewPanel.visible ? qsTr("🎛 DSP PARAMETERS [ON]") : qsTr("🎛 DSP PARAMETERS")
+                font.bold: true
+                font.pixelSize: 11
+                highlighted: dspPreviewPanel.visible
+                onClicked: {
+                    dspPreviewPanel.visible = !dspPreviewPanel.visible
+                    if (dspPreviewPanel.visible) {
+                        dspPreviewPanel.reloadParameters()
+                    }
+                }
+            }
+
+            Rectangle {
+                width: 1
+                height: 20
+                color: "#2a3038"
+            }
+
             // Language Switcher (EN / JA)
             RowLayout {
                 spacing: 4
@@ -808,16 +828,16 @@ ApplicationWindow {
                         spacing: 10
 
                         Label {
-                            text: qsTr("MASTER & OUTPUT PATH ROUTING")
+                            text: qsTr("MASTER CONTROL // OUTPUT BUS (SECTION 10.2.3)")
                             font.bold: true
                             font.pixelSize: 12
                             color: "#00E5FF"
                         }
 
-                        // 3-Path Output Routing Box
+                        // 3-Path Output Routing Box (Section 5.11 & 10.2.3)
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 135
+                            Layout.preferredHeight: 145
                             color: "#101215"
                             border.color: "#20252b"
                             radius: 4
@@ -828,7 +848,7 @@ ApplicationWindow {
                                 spacing: 4
 
                                 Label {
-                                    text: qsTr("OUTPUT ROUTING (SECTION 9.2)")
+                                    text: qsTr("OUTPUT ROUTING (SECTION 9.2 & 5.11)")
                                     font.bold: true
                                     font.pixelSize: 11
                                     color: "#A0AAB2"
@@ -866,13 +886,19 @@ ApplicationWindow {
                                     checked: EngineController.outputRoutingMode === 1
                                     onClicked: EngineController.outputRoutingMode = 1
                                 }
+
+                                RadioButton {
+                                    text: qsTr("Render / File Output Path (Offline Export)")
+                                    checked: EngineController.outputRoutingMode === 2
+                                    enabled: false
+                                }
                             }
                         }
 
-                        // DSP NODES INDIVIDUAL BYPASS TOGGLES & TELEMETRY
+                        // MASTER BUS CONTROLS: GLOBAL DSP BYPASS, MASTER MUTE & HEADROOM (SECTION 10.2.3)
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 180
+                            Layout.preferredHeight: 110
                             color: "#101215"
                             border.color: "#20252b"
                             radius: 4
@@ -885,164 +911,74 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Label {
-                                        text: qsTr("DSP NODES (SECTION 5.0)")
+                                        text: qsTr("MASTER BUS CONTROLS")
                                         font.bold: true
                                         font.pixelSize: 11
                                         color: "#A0AAB2"
                                     }
                                     Item { Layout.fillWidth: true }
+                                    // Clip LED Badge
+                                    Rectangle {
+                                        width: 50
+                                        height: 18
+                                        radius: 3
+                                        color: EngineController.masterClipped ? "#FF5252" : "#1a1e24"
+                                        border.color: EngineController.masterClipped ? "#FF8A80" : "#2a3038"
+                                        Label {
+                                            anchors.centerIn: parent
+                                            text: "CLIP"
+                                            font.pixelSize: 9
+                                            font.bold: true
+                                            color: EngineController.masterClipped ? "#FFFFFF" : "#546E7A"
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+
+                                    // Global DSP Bypass Button (Temporary bypass without altering individual states)
                                     Button {
-                                        text: EngineController.globalDspBypass ? qsTr("GLOBAL BYPASS ON") : qsTr("GLOBAL BYPASS")
+                                        Layout.fillWidth: true
+                                        text: EngineController.globalDspBypass ? qsTr("GLOBAL BYPASS [ON]") : qsTr("GLOBAL BYPASS [OFF]")
                                         font.pixelSize: 10
+                                        font.bold: true
                                         highlighted: EngineController.globalDspBypass
                                         onClicked: EngineController.globalDspBypass = !EngineController.globalDspBypass
                                     }
-                                }
 
-                                GridLayout {
-                                    columns: 2
-                                    Layout.fillWidth: true
-                                    rowSpacing: 4
-                                    columnSpacing: 8
-
-                                    CheckBox {
-                                        text: "PEQ (24-Band)"
-                                        checked: !EngineController.isDspNodeBypassed("PEQ")
-                                        onToggled: EngineController.setDspNodeBypass("PEQ", !checked)
-                                    }
-                                    CheckBox {
-                                        text: "GEQ (32-Band)"
-                                        checked: !EngineController.isDspNodeBypassed("GEQ")
-                                        onToggled: EngineController.setDspNodeBypass("GEQ", !checked)
-                                    }
-                                    CheckBox {
-                                        text: "HPF / LPF"
-                                        checked: !EngineController.isDspNodeBypassed("Filter")
-                                        onToggled: EngineController.setDspNodeBypass("Filter", !checked)
-                                    }
-                                    CheckBox {
-                                        text: "Reverb"
-                                        checked: !EngineController.isDspNodeBypassed("Reverb")
-                                        onToggled: EngineController.setDspNodeBypass("Reverb", !checked)
-                                    }
-
-                                    RowLayout {
+                                    // Master Mute Button (Smooth ramp to 0, click-free)
+                                    Button {
                                         Layout.fillWidth: true
-                                        spacing: 2
-                                        CheckBox {
-                                            text: "Compressor"
-                                            checked: !EngineController.isDspNodeBypassed("Compressor")
-                                            onToggled: EngineController.setDspNodeBypass("Compressor", !checked)
-                                        }
-                                        Label {
-                                            text: EngineController.compressorGainReductionDb > 0.05 ? ("GR -" + EngineController.compressorGainReductionDb.toFixed(1) + " dB") : "0.0 dB"
-                                            font.pixelSize: 9
-                                            font.family: "Monospace"
-                                            color: EngineController.compressorGainReductionDb > 0.1 ? "#FFB300" : "#606c7a"
-                                        }
-                                    }
-
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 2
-                                        CheckBox {
-                                            text: "Peak Limiter"
-                                            checked: !EngineController.isDspNodeBypassed("Limiter")
-                                            onToggled: EngineController.setDspNodeBypass("Limiter", !checked)
-                                        }
-                                        Label {
-                                            text: EngineController.limiterGainReductionDb > 0.05 ? ("GR -" + EngineController.limiterGainReductionDb.toFixed(1) + " dB") : (EngineController.limiterLatencyFrames + "smp")
-                                            font.pixelSize: 9
-                                            font.family: "Monospace"
-                                            color: EngineController.limiterGainReductionDb > 0.1 ? "#FF5252" : "#606c7a"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // EXTERNAL INSERT (HOST BRIDGE) QUICK STATUS & ROUTING
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 105
-                            color: "#101215"
-                            border.color: "#20252b"
-                            radius: 4
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 10
-                                spacing: 6
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label {
-                                        text: qsTr("EXTERNAL INSERT (HOST BRIDGE)")
+                                        text: EngineController.masterMute ? qsTr("MUTE [ACTIVE]") : qsTr("MUTE [OFF]")
+                                        font.pixelSize: 10
                                         font.bold: true
-                                        font.pixelSize: 11
-                                        color: "#A0AAB2"
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    // Status LED Badge
-                                    Rectangle {
-                                        id: insertBadgeQuick
-                                        property int st: EngineController.externalInsertState
-                                        property bool isByp: EngineController.externalInsertBypassed
-                                        width: 90
-                                        height: 18
-                                        radius: 3
-                                        color: st === 2 ? (isByp ? "#FFD60025" : "#00E67625") : (st === 1 ? "#00E5FF25" : (st === 0 ? "#262b32" : "#FF525225"))
-                                        border.color: st === 2 ? (isByp ? "#FFD600" : "#00E676") : (st === 1 ? "#00E5FF" : (st === 0 ? "#3a414d" : "#FF5252"))
-                                        Label {
-                                            anchors.centerIn: parent
-                                            text: insertBadgeQuick.st === 2 ? (insertBadgeQuick.isByp ? qsTr("BYPASS") : qsTr("ACTIVE")) : (insertBadgeQuick.st === 1 ? qsTr("CONNECTED") : (insertBadgeQuick.st === 0 ? qsTr("DISCONNECTED") : qsTr("ERROR")))
-                                            font.pixelSize: 9
-                                            font.bold: true
-                                            color: insertBadgeQuick.border.color
-                                        }
+                                        highlighted: EngineController.masterMute
+                                        onClicked: EngineController.masterMute = !EngineController.masterMute
                                     }
                                 }
 
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    spacing: 6
                                     Label {
-                                        text: qsTr("Host:")
+                                        text: qsTr("Headroom:")
                                         font.pixelSize: 10
                                         color: "#808c99"
                                     }
                                     Label {
-                                        text: EngineController.externalInsertClientName.length > 0 ? EngineController.externalInsertClientName : "Carla"
-                                        font.pixelSize: 11
+                                        text: EngineController.masterClipped ? "0.0 dB (CLIP)" : (EngineController.masterHeadroomDb >= 90.0 ? "> 90.0 dB" : ("+ " + EngineController.masterHeadroomDb.toFixed(1) + " dB"))
+                                        font.pixelSize: 10
+                                        font.family: "Monospace"
                                         font.bold: true
-                                        color: "#E0E6ED"
+                                        color: EngineController.masterClipped ? "#FF5252" : (EngineController.masterHeadroomDb < 3.0 ? "#FFD600" : "#00E5FF")
                                     }
                                     Item { Layout.fillWidth: true }
-                                    Button {
-                                        text: EngineController.externalInsertBypassed ? qsTr("DRY BYPASS [ON]") : qsTr("INSERT [ON]")
-                                        font.pixelSize: 9
-                                        highlighted: !EngineController.externalInsertBypassed
-                                        Layout.preferredHeight: 22
-                                        onClicked: EngineController.externalInsertBypassed = !EngineController.externalInsertBypassed
-                                    }
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 4
                                     Label {
-                                        text: "Rep: " + EngineController.externalInsertReportedLatency + "smp | Meas: " + (EngineController.externalInsertMeasuredLatency >= 0 ? EngineController.externalInsertMeasuredLatency : "--") + "smp | PDC: " + EngineController.externalInsertDelayCompensation + "smp"
+                                        text: "Pk L: " + masterSectionRect.formatLevelDb(EngineController.masterPeakL) + " | R: " + masterSectionRect.formatLevelDb(EngineController.masterPeakR)
                                         font.pixelSize: 9
                                         font.family: "Monospace"
-                                        color: "#758291"
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Button {
-                                        text: qsTr("OPEN HOST PANEL ▶")
-                                        font.pixelSize: 9
-                                        highlighted: eqConsoleRect.eqMode === "insert"
-                                        Layout.preferredHeight: 22
-                                        onClicked: eqConsoleRect.eqMode = "insert"
+                                        color: "#78909C"
                                     }
                                 }
                             }
@@ -1061,6 +997,12 @@ ApplicationWindow {
                             property bool fadersLinked: true
 
                             function formatGainDb(g) {
+                                if (g <= 0.0001) return "-∞ dB";
+                                var db = 20.0 * Math.log10(g);
+                                return (db > 0.0 ? "+" : "") + db.toFixed(1) + " dB";
+                            }
+
+                            function formatLevelDb(g) {
                                 if (g <= 0.0001) return "-∞ dB";
                                 var db = 20.0 * Math.log10(g);
                                 return (db > 0.0 ? "+" : "") + db.toFixed(1) + " dB";
@@ -1156,20 +1098,29 @@ ApplicationWindow {
                                             Layout.fillHeight: true
                                             spacing: 6
 
-                                            // Left VU Meter Bar
+                                            // Left Precision VU / Peak Meter Bar (Section 10.2.3)
                                             Rectangle {
-                                                width: 12
+                                                width: 14
                                                 Layout.fillHeight: true
                                                 color: "#07090b"
                                                 border.color: "#1b2129"
                                                 radius: 2
                                                 clip: true
 
+                                                // RMS Bar
                                                 Rectangle {
                                                     anchors.bottom: parent.bottom
                                                     width: parent.width
-                                                    height: Math.max(4, parent.height * Math.min(1.0, 0.72 * EngineController.masterGainL))
-                                                    color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
+                                                    height: Math.max(2, parent.height * Math.min(1.0, EngineController.masterRmsL))
+                                                    color: "#00E5FF50"
+                                                }
+
+                                                // Peak Bar
+                                                Rectangle {
+                                                    anchors.bottom: parent.bottom
+                                                    width: parent.width
+                                                    height: Math.max(2, parent.height * Math.min(1.0, EngineController.masterPeakL))
+                                                    color: height > parent.height * 0.98 ? "#FF5252" : (height > parent.height * 0.85 ? "#FFD600" : "#00E676")
                                                 }
                                             }
 
@@ -1382,20 +1333,29 @@ ApplicationWindow {
                                                 }
                                             }
 
-                                            // Right VU Meter Bar
+                                            // Right Precision VU / Peak Meter Bar (Section 10.2.3)
                                             Rectangle {
-                                                width: 12
+                                                width: 14
                                                 Layout.fillHeight: true
                                                 color: "#07090b"
                                                 border.color: "#1b2129"
                                                 radius: 2
                                                 clip: true
 
+                                                // RMS Bar
                                                 Rectangle {
                                                     anchors.bottom: parent.bottom
                                                     width: parent.width
-                                                    height: Math.max(4, parent.height * Math.min(1.0, 0.70 * EngineController.masterGainR))
-                                                    color: height > parent.height * 0.9 ? "#FF5252" : (height > parent.height * 0.75 ? "#FFD600" : "#00E676")
+                                                    height: Math.max(2, parent.height * Math.min(1.0, EngineController.masterRmsR))
+                                                    color: "#00E5FF50"
+                                                }
+
+                                                // Peak Bar
+                                                Rectangle {
+                                                    anchors.bottom: parent.bottom
+                                                    width: parent.width
+                                                    height: Math.max(2, parent.height * Math.min(1.0, EngineController.masterPeakR))
+                                                    color: height > parent.height * 0.98 ? "#FF5252" : (height > parent.height * 0.85 ? "#FFD600" : "#00E676")
                                                 }
                                             }
                                         }
@@ -2766,5 +2726,19 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // Step 1: Lightweight Non-Modal DSP Parameter Preview Panel (Section 5.9 Prior Implementation)
+    DspPreviewPanel {
+        id: dspPreviewPanel
+        anchors.right: parent.right
+        anchors.rightMargin: 16
+        anchors.top: parent.top
+        anchors.topMargin: 56
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 16
+        z: 999
+        visible: false
+        onCloseRequested: dspPreviewPanel.visible = false
     }
 }

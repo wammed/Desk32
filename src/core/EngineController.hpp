@@ -38,6 +38,13 @@ class EngineController : public QObject {
     Q_PROPERTY(double masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
     Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY masterGainLChanged)
     Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY masterGainRChanged)
+    Q_PROPERTY(bool masterMute READ isMasterMute WRITE setMasterMute NOTIFY masterMuteChanged)
+    Q_PROPERTY(double masterPeakL READ masterPeakL NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double masterPeakR READ masterPeakR NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double masterRmsL READ masterRmsL NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double masterRmsR READ masterRmsR NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(bool masterClipped READ masterClipped NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double masterHeadroomDb READ masterHeadroomDb NOTIFY dspTelemetryChanged)
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
@@ -92,6 +99,13 @@ public:
     [[nodiscard]] double masterGain() const;
     [[nodiscard]] double masterGainL() const;
     [[nodiscard]] double masterGainR() const;
+    [[nodiscard]] bool isMasterMute() const;
+    [[nodiscard]] double masterPeakL() const;
+    [[nodiscard]] double masterPeakR() const;
+    [[nodiscard]] double masterRmsL() const;
+    [[nodiscard]] double masterRmsR() const;
+    [[nodiscard]] bool masterClipped() const;
+    [[nodiscard]] double masterHeadroomDb() const;
     [[nodiscard]] int xrunCount() const;
     [[nodiscard]] bool isDirectMode() const;
     [[nodiscard]] int directModeStatus() const;
@@ -136,6 +150,7 @@ public:
     Q_INVOKABLE void setMasterGain(double gain);
     Q_INVOKABLE void setMasterGainL(double gain);
     Q_INVOKABLE void setMasterGainR(double gain);
+    Q_INVOKABLE void setMasterMute(bool mute);
 
     // QML-invokable Deck Operations
     Q_INVOKABLE void play(const QString& deckId);
@@ -233,6 +248,7 @@ signals:
     void masterGainChanged(double gain);
     void masterGainLChanged(double gain);
     void masterGainRChanged(double gain);
+    void masterMuteChanged(bool muted);
     void diagnosticsChanged();
     void deckStateChanged(const QString& deckId);
     void dspTelemetryChanged();
@@ -292,6 +308,7 @@ private:
     std::atomic<double> m_masterGain{1.0};
     std::atomic<double> m_masterGainL{1.0};
     std::atomic<double> m_masterGainR{1.0};
+    std::atomic<bool> m_masterMute{false};
 
     // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
     engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};

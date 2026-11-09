@@ -98,6 +98,7 @@ qt_add_qml_module(desk32
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/DspPreviewPanel.qml
     RESOURCES
         images/Desk32-Icon.svg
 )
@@ -110,6 +111,7 @@ qt_add_translations(desk32
     SOURCES
         src/main.cpp
         qml/Main.qml
+        qml/DspPreviewPanel.qml
 )
 
 target_link_libraries(desk32 PRIVATE

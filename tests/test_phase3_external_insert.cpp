@@ -99,6 +99,9 @@ private slots:
     // 9. EngineController: Integration of External Insert and Preset APIs
     void testEngineControllerIntegration();
 
+    // 10. EngineController: DSP Parameter Preview & Master Control APIs (Section 5.9 & 10.2.3)
+    void testEngineControllerDspPreviewAndMasterControl();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
 };
@@ -564,6 +567,99 @@ void TestPhase3ExternalInsert::testEngineControllerIntegration() {
     QCOMPARE(controller.masterGainL(), 1.0);
     QCOMPARE(controller.masterGainR(), 1.0);
     QCOMPARE(controller.masterGain(), 1.0);
+}
+
+void TestPhase3ExternalInsert::testEngineControllerDspPreviewAndMasterControl() {
+    EngineController& controller = EngineController::instance();
+
+    // 1. DSP Parameter Get/Set and signals
+    QSignalSpy filterSpy(&controller, &EngineController::filterParametersChanged);
+    QSignalSpy compSpy(&controller, &EngineController::compressorParametersChanged);
+    QSignalSpy limSpy(&controller, &EngineController::limiterParametersChanged);
+    QSignalSpy revSpy(&controller, &EngineController::reverbParametersChanged);
+
+    controller.setFilterParams(180.0, true, 1, 9500.0, true, 0);
+    QVERIFY(filterSpy.count() > 0);
+    QVariantMap flt = controller.getFilterParams();
+    QCOMPARE(flt["hpfFrequency"].toDouble(), 180.0);
+    QCOMPARE(flt["hpfEnabled"].toBool(), true);
+    QCOMPARE(flt["hpfSlope"].toInt(), 1); // 24 dB/oct
+    QCOMPARE(flt["lpfFrequency"].toDouble(), 9500.0);
+    QCOMPARE(flt["lpfEnabled"].toBool(), true);
+    QCOMPARE(flt["lpfSlope"].toInt(), 0); // 12 dB/oct
+
+    controller.setCompressorParams(-16.0, 3.5, 12.0, 90.0, 2.5, 4.0);
+    QVERIFY(compSpy.count() > 0);
+    QVariantMap comp = controller.getCompressorParams();
+    QCOMPARE(comp["thresholdDb"].toDouble(), -16.0);
+    QCOMPARE(comp["ratio"].toDouble(), 3.5);
+    QCOMPARE(comp["attackMs"].toDouble(), 12.0);
+    QCOMPARE(comp["releaseMs"].toDouble(), 90.0);
+    QCOMPARE(comp["makeupGainDb"].toDouble(), 2.5);
+    QCOMPARE(comp["kneeDb"].toDouble(), 4.0);
+
+    controller.setLimiterParams(-2.0, 45.0, 3.0);
+    QVERIFY(limSpy.count() > 0);
+    QVariantMap lim = controller.getLimiterParams();
+    QCOMPARE(lim["ceilingDb"].toDouble(), -2.0);
+    QCOMPARE(lim["releaseMs"].toDouble(), 45.0);
+    QCOMPARE(lim["lookaheadMs"].toDouble(), 3.0);
+
+    controller.setReverbParams(0.7, 0.4, 0.25, 30.0, true);
+    QVERIFY(revSpy.count() > 0);
+    QVariantMap rev = controller.getReverbParams();
+    QCOMPARE(rev["roomSize"].toDouble(), 0.7);
+    QCOMPARE(rev["damping"].toDouble(), 0.4);
+    QCOMPARE(rev["predelayMs"].toDouble(), 30.0);
+    QCOMPARE(rev["tailPreserving"].toBool(), true);
+
+    // 2. Individual Bypass vs Global Bypass Non-Destructive Behavior (Section 10.2.3 & 5.9)
+    controller.setDspNodeBypass("Filter", false);     // Active
+    controller.setDspNodeBypass("Compressor", false); // Active
+    controller.setDspNodeBypass("Reverb", true);      // Bypassed
+    controller.setDspNodeBypass("Limiter", false);    // Active
+
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Compressor"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Reverb"), true);
+    QCOMPARE(controller.isDspNodeBypassed("Limiter"), false);
+
+    // Engage Global Bypass
+    controller.setGlobalDspBypass(true);
+    QCOMPARE(controller.globalDspBypass(), true);
+
+    // Must NOT destroy individual bypass flags!
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Compressor"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Reverb"), true);
+    QCOMPARE(controller.isDspNodeBypassed("Limiter"), false);
+
+    // Disengage Global Bypass
+    controller.setGlobalDspBypass(false);
+    QCOMPARE(controller.globalDspBypass(), false);
+
+    // Individual flags intact
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Compressor"), false);
+    QCOMPARE(controller.isDspNodeBypassed("Reverb"), true); // Still bypassed!
+    QCOMPARE(controller.isDspNodeBypassed("Limiter"), false);
+
+    // 3. Master Control: Master Gain, Mute & Headroom
+    QSignalSpy muteSpy(&controller, &EngineController::masterMuteChanged);
+    controller.setMasterGain(1.15);
+    QCOMPARE(controller.masterGain(), 1.15);
+
+    controller.setMasterMute(true);
+    QCOMPARE(controller.isMasterMute(), true);
+    QCOMPARE(muteSpy.count(), 1);
+
+    controller.setMasterMute(false);
+    QCOMPARE(controller.isMasterMute(), false);
+    QCOMPARE(controller.masterGain(), 1.15); // Preserved
+
+    // Telemetry getters
+    QVERIFY(controller.masterHeadroomDb() >= 0.0);
+    QCOMPARE(controller.masterClipped(), false);
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

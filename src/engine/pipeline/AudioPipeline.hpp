@@ -30,6 +30,11 @@ struct DspTelemetry {
     bool reverbEnabled = false;
     double graphSampleRate = 48000.0;
     uint64_t processedFrameCount = 0;
+    double masterPeakL = 0.0;
+    double masterPeakR = 0.0;
+    double masterRmsL = 0.0;
+    double masterRmsR = 0.0;
+    bool masterClipped = false;
 };
 
 class AudioPipeline {
@@ -131,6 +136,26 @@ public:
 
     [[nodiscard]] int limiterLatencyFrames() const noexcept {
         return static_cast<int>(currentTelemetry().limiterLatencyFrames);
+    }
+
+    [[nodiscard]] double masterPeakL() const noexcept {
+        return currentTelemetry().masterPeakL;
+    }
+
+    [[nodiscard]] double masterPeakR() const noexcept {
+        return currentTelemetry().masterPeakR;
+    }
+
+    [[nodiscard]] double masterRmsL() const noexcept {
+        return currentTelemetry().masterRmsL;
+    }
+
+    [[nodiscard]] double masterRmsR() const noexcept {
+        return currentTelemetry().masterRmsR;
+    }
+
+    [[nodiscard]] bool masterClipped() const noexcept {
+        return currentTelemetry().masterClipped;
     }
 
     [[nodiscard]] uint64_t readerExhaustionDrops() const noexcept {
@@ -278,7 +303,7 @@ public:
         );
 
         // 5. Publish Telemetry Snapshot to UI Thread (P0-26)
-        publishTelemetry(masterGuard.chain, frameCount);
+        publishTelemetry(masterGuard.chain, frameCount, left, right);
     }
 
 private:
@@ -424,10 +449,30 @@ private:
     /// Audio Thread: Mutex-free, non-blocking lock-free Telemetry publication (P0-29).
     /// Inspects up to AudioChain::MAX_NODES (strictly bounded O(N) where N <= 16, zero dynamic allocation, zero locks)
     /// and publishes the snapshot buffer via a single O(1) atomic exchange.
-    void publishTelemetry(AudioChain* master, size_t frames) noexcept {
+    void publishTelemetry(AudioChain* master, size_t frames, const double* left = nullptr, const double* right = nullptr) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
         t.processedFrameCount += frames;
+
+        double peakL = 0.0;
+        double peakR = 0.0;
+        double sumSqL = 0.0;
+        double sumSqR = 0.0;
+        if (left && right && frames > 0) {
+            for (size_t i = 0; i < frames; ++i) {
+                double al = std::abs(left[i]);
+                double ar = std::abs(right[i]);
+                if (al > peakL) peakL = al;
+                if (ar > peakR) peakR = ar;
+                sumSqL += left[i] * left[i];
+                sumSqR += right[i] * right[i];
+            }
+        }
+        t.masterPeakL = peakL;
+        t.masterPeakR = peakR;
+        t.masterRmsL = frames > 0 ? std::sqrt(sumSqL / static_cast<double>(frames)) : 0.0;
+        t.masterRmsR = frames > 0 ? std::sqrt(sumSqR / static_cast<double>(frames)) : 0.0;
+        t.masterClipped = (peakL >= 1.0 || peakR >= 1.0);
 
         if (master && !master->isBypassed()) {
             for (size_t i = 0; i < master->nodeCount(); ++i) {

@@ -130,6 +130,9 @@ private slots:
     void testParameterCommandQueueOverflowAndDrainLimit();
     void testReverbO1StateTrackingAccuracyAndTailWaveformComparison();
     void testActiveDspDirectModificationImpossibility();
+    void testDspParametersReflectedAndAuditioned();
+    void testIndividualDspNodeBypassVsGlobalBypassNonDestructive();
+    void testMasterMuteSmoothingAndTelemetry();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -1986,6 +1989,161 @@ void TestPhase2Dsp::testActiveDspDirectModificationImpossibility()
     std::vector<double> bufL(256, 0.5), bufR(256, 0.5);
     compNode.process(bufL.data(), bufR.data(), 256);
     QCOMPARE(compNode.activatedCount(), uint64_t(1));
+}
+
+void TestPhase2Dsp::testDspParametersReflectedAndAuditioned() {
+    // 1. HighLowPassFilter response verification
+    HighLowPassFilter filter;
+    filter.configure(48000.0, 250.0, 7500.0,
+                     HighLowPassFilter::FilterSlope::Slope24dB,
+                     HighLowPassFilter::FilterSlope::Slope24dB);
+    filter.setHpfEnabled(true);
+    filter.setLpfEnabled(true);
+
+    std::vector<double> freqs = { 50.0, 1000.0, 15000.0 };
+    std::vector<double> outDb;
+    filter.calculateResponseCurve(freqs, outDb);
+
+    QCOMPARE(outDb.size(), size_t(3));
+    QVERIFY(outDb[0] < -12.0); // 50 Hz attenuated by 24 dB/oct HPF at 250 Hz
+    QVERIFY(std::abs(outDb[1]) < 1.0); // 1000 Hz passband
+    QVERIFY(outDb[2] < -12.0); // 15000 Hz attenuated by 24 dB/oct LPF at 7500 Hz
+
+    // 2. Compressor dynamics & gain reduction
+    Compressor comp;
+    comp.configure(48000.0, -24.0, 4.0, 5.0, 100.0, 0.0, 2.0, true);
+    std::vector<double> cInL(512, 1.0), cInR(512, 1.0);
+    for (size_t s = 0; s < 512; ++s) {
+        comp.process(cInL[s], cInR[s]);
+    }
+    QVERIFY(comp.gainReductionDb() > 10.0);
+    QVERIFY(cInL[511] < 0.6); // Signal compressed
+
+    // 3. Peak Limiter brickwall ceiling
+    PeakLimiter lim;
+    lim.configure(48000.0, -1.5, 30.0, 2.5, true); // -1.5 dB ceiling = 0.8414
+    std::vector<double> lInL(512, 1.5), lInR(512, 1.5);
+    for (size_t s = 0; s < 512; ++s) {
+        lim.process(lInL[s], lInR[s]);
+    }
+    for (size_t s = 120; s < 512; ++s) {
+        QVERIFY(std::abs(lInL[s]) <= 0.842);
+        QVERIFY(std::abs(lInR[s]) <= 0.842);
+    }
+
+    // 4. Algorithmic Reverb impulse and tail audition
+    AlgorithmicReverb rev;
+    rev.configure(48000.0, 0.8, 0.5, 0.5, 10.0, true, true);
+    std::vector<double> rInL(256, 0.0), rInR(256, 0.0);
+    rInL[0] = 1.0; rInR[0] = 1.0; // Impulse
+    for (size_t s = 0; s < 256; ++s) {
+        rev.process(rInL[s], rInR[s]);
+    }
+    QVERIFY(rev.totalInternalEnergy() > 0.0);
+}
+
+void TestPhase2Dsp::testIndividualDspNodeBypassVsGlobalBypassNonDestructive() {
+    AudioChain chain("Test Master Chain", ChainPurpose::MasteringChain);
+    auto filterNode = std::make_shared<HighLowPassNode>("Filter Node");
+    auto compNode = std::make_shared<CompressorNode>("Comp Node");
+    auto limNode = std::make_shared<PeakLimiterNode>("Limiter Node");
+    auto revNode = std::make_shared<ReverbNode>("Reverb Node");
+
+    chain.appendNode(filterNode);
+    chain.appendNode(compNode);
+    chain.appendNode(limNode);
+    chain.appendNode(revNode);
+
+    // Set individual node bypass states
+    filterNode->setBypassed(false); // Active
+    compNode->setBypassed(false);   // Active
+    revNode->setBypassed(true);     // Bypassed
+    limNode->setBypassed(false);    // Active
+
+    QCOMPARE(filterNode->isBypassed(), false);
+    QCOMPARE(compNode->isBypassed(), false);
+    QCOMPARE(revNode->isBypassed(), true);
+    QCOMPARE(limNode->isBypassed(), false);
+
+    // Engage Global DSP Bypass on the chain (Section 10.2.3 & 5.9)
+    chain.setBypassed(true);
+    QCOMPARE(chain.isBypassed(), true);
+
+    // Critical assertion: Global DSP Bypass must NOT modify or overwrite individual node bypass states!
+    QCOMPARE(filterNode->isBypassed(), false);
+    QCOMPARE(compNode->isBypassed(), false);
+    QCOMPARE(revNode->isBypassed(), true);
+    QCOMPARE(limNode->isBypassed(), false);
+
+    // Process signal while globally bypassed: audio must pass through completely untouched
+    std::vector<double> bufL(256, 0.777), bufR(256, -0.444);
+    chain.process(bufL.data(), bufR.data(), 256);
+    QCOMPARE(bufL[0], 0.777);
+    QCOMPARE(bufR[0], -0.444);
+
+    // Disengage Global DSP Bypass
+    chain.setBypassed(false);
+    QCOMPARE(chain.isBypassed(), false);
+
+    // Verify all individual node bypass states are cleanly preserved
+    QCOMPARE(filterNode->isBypassed(), false);
+    QCOMPARE(compNode->isBypassed(), false);
+    QCOMPARE(revNode->isBypassed(), true); // Remains bypassed!
+    QCOMPARE(limNode->isBypassed(), false);
+}
+
+void TestPhase2Dsp::testMasterMuteSmoothingAndTelemetry() {
+    // 1. ParameterSmoother behavior during Master Mute (smooth ramp down, click-free)
+    ParameterSmoother smoother(1.0, 15.0);
+    smoother.configure(48000.0, 15.0);
+    smoother.reset(1.0);
+
+    // Mute: ramp to 0.0
+    smoother.setTarget(0.0);
+    std::vector<double> sBuf(256, 1.0);
+    smoother.process(sBuf.data(), 256);
+
+    // Check monotonic decrease
+    for (size_t i = 1; i < 256; ++i) {
+        QVERIFY(sBuf[i] <= sBuf[i - 1]);
+    }
+    QVERIFY(sBuf[255] < 0.8); // Smoothly attenuated
+
+    // 2. AudioPipeline Master Level, RMS & Clip Telemetry
+    AudioPipeline pipeline(48000.0);
+
+    std::vector<double> inL(256, 0.5), inR(256, 0.25);
+    std::vector<float> outPcm(256 * 2);
+
+    // Process normal block (within 0 dBFS headroom)
+    pipeline.process(inL.data(), inR.data(), 256, outPcm.data(), desk32::engine::format::SampleFormat::Float32, false);
+
+    auto telem = pipeline.currentTelemetry();
+    QVERIFY(telem.masterPeakL > 0.49 && telem.masterPeakL < 0.51);
+    QVERIFY(telem.masterPeakR > 0.24 && telem.masterPeakR < 0.26);
+    QVERIFY(telem.masterRmsL > 0.49 && telem.masterRmsL < 0.51);
+    QCOMPARE(telem.masterClipped, false);
+
+    // Process hot signal that clips (>= 1.0)
+    std::vector<double> hotL(256, 1.2), hotR(256, 0.8);
+    pipeline.process(hotL.data(), hotR.data(), 256, outPcm.data(), desk32::engine::format::SampleFormat::Float32, false);
+
+    auto telemHot = pipeline.currentTelemetry();
+    QVERIFY(telemHot.masterPeakL >= 1.0);
+    QCOMPARE(telemHot.masterClipped, true);
+
+    // Verify zero allocations during telemetry and parameter changes
+    s_trackAllocations.store(true, std::memory_order_relaxed);
+    s_allocationCount.store(0, std::memory_order_relaxed);
+
+    for (int i = 0; i < 1000; ++i) {
+        pipeline.process(inL.data(), inR.data(), 256, outPcm.data(), desk32::engine::format::SampleFormat::Float32, false);
+        auto t = pipeline.currentTelemetry();
+        (void)t;
+    }
+
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+    QCOMPARE(s_allocationCount.load(), size_t(0));
 }
 
 QTEST_MAIN(TestPhase2Dsp)
