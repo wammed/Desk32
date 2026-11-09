@@ -17,6 +17,7 @@
 
 using namespace desk32::engine::insert;
 using namespace desk32::engine::preset;
+using namespace desk32::engine::dsp;
 using namespace desk32::core;
 
 // Real-time heap allocation tracking for Audio Thread safety verification
@@ -101,6 +102,12 @@ private slots:
 
     // 10. EngineController: DSP Parameter Preview & Master Control APIs (Section 5.9 & 10.2.3)
     void testEngineControllerDspPreviewAndMasterControl();
+
+    // 11. P1-1: Global DSP Bypass Queue Consistency, Atomic Push, and Rollback
+    void testGlobalDspBypassQueueConsistencyAndRollback();
+
+    // 12. P1-2: Individual DSP Node Bypass Queue Push Failure, Consistency, and Parameter Preservation
+    void testDspNodeBypassQueueFailureAndConsistency();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -660,6 +667,159 @@ void TestPhase3ExternalInsert::testEngineControllerDspPreviewAndMasterControl() 
     // Telemetry getters
     QVERIFY(controller.masterHeadroomDb() >= 0.0);
     QCOMPARE(controller.masterClipped(), false);
+}
+
+void TestPhase3ExternalInsert::testGlobalDspBypassQueueConsistencyAndRollback() {
+    EngineController& controller = EngineController::instance();
+    auto pipe = controller.pipeline();
+    QVERIFY(pipe != nullptr);
+
+    // Initial state: disengaged
+    controller.setGlobalDspBypass(false);
+    QCOMPARE(controller.globalDspBypass(), false);
+
+    // Drain any pending commands
+    desk32::engine::dsp::DspCommand dummy;
+    while (pipe->paramQueue().pop(dummy)) {}
+
+    // Case 1: Normal toggle succeeds on both chains
+    QSignalSpy bypassSpy(&controller, &EngineController::globalDspBypassChanged);
+    controller.setGlobalDspBypass(true);
+    QCOMPARE(controller.globalDspBypass(), true);
+    QCOMPARE(bypassSpy.count(), 1);
+
+    // Drain and verify AudioPipeline received commands
+    while (pipe->paramQueue().pop(dummy)) {
+        if (dummy.type == desk32::engine::dsp::DspCommandType::SetGlobalBypass) {
+            QCOMPARE(dummy.boolFlag1, uint8_t(1));
+        }
+    }
+
+    controller.setGlobalDspBypass(false);
+    QCOMPARE(controller.globalDspBypass(), false);
+    while (pipe->paramQueue().pop(dummy)) {}
+
+    // Case 2: Parameter Queue Full (512 items)
+    // Fill queue to capacity so hasSpace(2) and push() fail
+    for (size_t i = 0; i < desk32::engine::dsp::ParameterCommandQueue::CAPACITY; ++i) {
+        desk32::engine::dsp::DspCommand fillCmd;
+        fillCmd.type = desk32::engine::dsp::DspCommandType::None;
+        pipe->paramQueue().push(fillCmd);
+    }
+    QCOMPARE(pipe->paramQueue().hasSpace(2), false);
+
+    QSignalSpy overflowSpy(&controller, &EngineController::dspQueueOverflowWarning);
+    bypassSpy.clear();
+
+    // Attempt to engage Global Bypass with full queue
+    controller.setGlobalDspBypass(true);
+
+    // AC-01: UI and DSP state must NOT remain desynchronized; controller state remains false!
+    QCOMPARE(controller.globalDspBypass(), false);
+    QVERIFY(overflowSpy.count() > 0);
+
+    // Case 3: Partial push prevention via hasSpace(2)
+    // Clear queue, fill to CAPACITY - 1 (only 1 slot left)
+    while (pipe->paramQueue().pop(dummy)) {}
+    for (size_t i = 0; i < desk32::engine::dsp::ParameterCommandQueue::CAPACITY - 1; ++i) {
+        desk32::engine::dsp::DspCommand fillCmd;
+        fillCmd.type = desk32::engine::dsp::DspCommandType::None;
+        pipe->paramQueue().push(fillCmd);
+    }
+    QCOMPARE(pipe->paramQueue().hasSpace(2), false);
+
+    overflowSpy.clear();
+    bypassSpy.clear();
+    controller.setGlobalDspBypass(true);
+
+    // AC-02: Partial state avoided, state remains false
+    QCOMPARE(controller.globalDspBypass(), false);
+    QVERIFY(overflowSpy.count() > 0);
+
+    // Case 4: Queue drains and resync succeeds
+    while (pipe->paramQueue().pop(dummy)) {}
+    QCOMPARE(pipe->paramQueue().hasSpace(2), true);
+
+    bool resyncOk = controller.resyncGlobalDspBypass();
+    QCOMPARE(resyncOk, true);
+    QCOMPARE(controller.isGlobalDspBypassDesynced(), false);
+
+    // Clean up
+    while (pipe->paramQueue().pop(dummy)) {}
+    controller.setGlobalDspBypass(false);
+    while (pipe->paramQueue().pop(dummy)) {}
+}
+
+void TestPhase3ExternalInsert::testDspNodeBypassQueueFailureAndConsistency() {
+    EngineController& controller = EngineController::instance();
+    auto pipe = controller.pipeline();
+    QVERIFY(pipe != nullptr);
+
+    // Drain queue
+    desk32::engine::dsp::DspCommand dummy;
+    while (pipe->paramQueue().pop(dummy)) {}
+
+    // Initial state: ensure Filter is not bypassed
+    controller.setDspNodeBypass("Filter", false);
+    while (pipe->paramQueue().pop(dummy)) {}
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+
+    // Case 1: Normal toggle
+    QSignalSpy filterSpy(&controller, &EngineController::filterParametersChanged);
+    controller.setDspNodeBypass("Filter", true);
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), true);
+    QVERIFY(filterSpy.count() > 0);
+
+    // Drain command
+    bool foundCmd = false;
+    while (pipe->paramQueue().pop(dummy)) {
+        if (dummy.type == desk32::engine::dsp::DspCommandType::SetNodeBypass && dummy.index == 2) {
+            QCOMPARE(dummy.boolFlag1, uint8_t(1));
+            foundCmd = true;
+        }
+    }
+    QVERIFY(foundCmd);
+
+    // Reset to unbypassed
+    controller.setDspNodeBypass("Filter", false);
+    while (pipe->paramQueue().pop(dummy)) {}
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+
+    // Case 2: Parameter Queue Full -> Failure handling
+    for (size_t i = 0; i < desk32::engine::dsp::ParameterCommandQueue::CAPACITY; ++i) {
+        desk32::engine::dsp::DspCommand fillCmd;
+        fillCmd.type = desk32::engine::dsp::DspCommandType::None;
+        pipe->paramQueue().push(fillCmd);
+    }
+
+    QSignalSpy overflowSpy(&controller, &EngineController::dspQueueOverflowWarning);
+    filterSpy.clear();
+
+    // Attempt to bypass Filter while queue is full
+    controller.setDspNodeBypass("Filter", true);
+
+    // AC-04: UI and DSP state must remain consistent on failure: state must stay false!
+    QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QVERIFY(overflowSpy.count() > 0);
+    // UI signal re-emitted so UI reverts to false
+    QVERIFY(filterSpy.count() > 0);
+
+    // Drain queue
+    while (pipe->paramQueue().pop(dummy)) {}
+
+    // Case 3: Resynchronization
+    bool resyncOk = controller.resyncDspNodeBypass("Filter");
+    QCOMPARE(resyncOk, true);
+    while (pipe->paramQueue().pop(dummy)) {}
+
+    // Case 4: Node bypass does not affect Global DSP Bypass
+    controller.setGlobalDspBypass(false);
+    controller.setDspNodeBypass("Compressor", true);
+    QCOMPARE(controller.isDspNodeBypassed("Compressor"), true);
+    QCOMPARE(controller.globalDspBypass(), false);
+
+    controller.setDspNodeBypass("Compressor", false);
+    while (pipe->paramQueue().pop(dummy)) {}
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

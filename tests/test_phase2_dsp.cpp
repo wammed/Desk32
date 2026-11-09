@@ -29,6 +29,8 @@ using namespace desk32::engine::pipeline;
 // Heap allocation tracker for real-time safety verification
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
+static thread_local bool t_isAudioThread{false};
+static std::atomic<size_t> s_audioThreadAllocationCount{0};
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -37,6 +39,9 @@ static std::atomic<size_t> s_allocationCount{0};
 
 void* operator new(size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
@@ -44,6 +49,9 @@ void* operator new(size_t size) {
 
 void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
@@ -51,6 +59,9 @@ void* operator new(size_t size, const std::nothrow_t&) noexcept {
 
 void* operator new[](size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
@@ -58,6 +69,9 @@ void* operator new[](size_t size) {
 
 void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
@@ -65,6 +79,9 @@ void* operator new[](size_t size, const std::nothrow_t&) noexcept {
 
 void* operator new(size_t size, std::align_val_t al) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     void* ptr = nullptr;
@@ -76,6 +93,9 @@ void* operator new(size_t size, std::align_val_t al) {
 
 void* operator new[](size_t size, std::align_val_t al) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     void* ptr = nullptr;
@@ -133,6 +153,9 @@ private slots:
     void testDspParametersReflectedAndAuditioned();
     void testIndividualDspNodeBypassVsGlobalBypassNonDestructive();
     void testMasterMuteSmoothingAndTelemetry();
+    void testMasterMutePcmAttenuationIntegration();
+    void testAudioThreadZeroAllocationDuringContinuousDspUpdates();
+    void testDspNodeBypassParameterPreservation();
 };
 
 void TestPhase2Dsp::initTestCase()
@@ -2144,6 +2167,333 @@ void TestPhase2Dsp::testMasterMuteSmoothingAndTelemetry() {
 
     s_trackAllocations.store(false, std::memory_order_relaxed);
     QCOMPARE(s_allocationCount.load(), size_t(0));
+}
+
+void TestPhase2Dsp::testMasterMutePcmAttenuationIntegration() {
+    // End-to-end integration test of Master Mute with actual AudioPipeline and ParameterSmoother (P1-3)
+    AudioPipeline pipeline(48000.0);
+    ParameterSmoother gainSmootherL(1.0, 15.0);
+    ParameterSmoother gainSmootherR(1.0, 15.0);
+    gainSmootherL.configure(48000.0, 15.0);
+    gainSmootherR.configure(48000.0, 15.0);
+    gainSmootherL.reset(1.0);
+    gainSmootherR.reset(1.0);
+
+    const size_t blockSize = 128;
+    std::vector<double> inL(blockSize, 0.5);
+    std::vector<double> inR(blockSize, -0.4);
+    std::vector<float> outPcm(blockSize * 2);
+
+    // Initial pass: full unmuted signal
+    std::vector<double> blockL = inL;
+    std::vector<double> blockR = inR;
+    gainSmootherL.process(blockL.data(), blockSize);
+    gainSmootherR.process(blockR.data(), blockSize);
+    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    QVERIFY(std::abs(outPcm[0]) > 0.45);
+    QVERIFY(std::abs(outPcm[1]) > 0.35);
+
+    // 1. Engage Master Mute (target -> 0.0)
+    gainSmootherL.setTarget(0.0);
+    gainSmootherR.setTarget(0.0);
+
+    // Process blocks until smooth decay and settling (60 blocks of 128 frames = 7680 samples = 160 ms > 10 tau)
+    double prevMax = 1.0;
+    for (int b = 0; b < 60; ++b) {
+        blockL = inL;
+        blockR = inR;
+        gainSmootherL.process(blockL.data(), blockSize);
+        gainSmootherR.process(blockR.data(), blockSize);
+        pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                         desk32::engine::format::SampleFormat::Float32, false);
+
+        double curMax = 0.0;
+        for (size_t i = 0; i < blockSize * 2; ++i) {
+            curMax = std::max(curMax, std::abs(static_cast<double>(outPcm[i])));
+        }
+        // Smooth monotonic decay
+        QVERIFY(curMax <= prevMax + 1e-6);
+        prevMax = curMax;
+
+        // Check for click/pop: sample-to-sample difference should be bounded (< 0.05 per sample)
+        for (size_t i = 2; i < blockSize * 2; i += 2) {
+            double deltaL = std::abs(outPcm[i] - outPcm[i - 2]);
+            double deltaR = std::abs(outPcm[i + 1] - outPcm[i - 1]);
+            QVERIFY(deltaL < 0.05);
+            QVERIFY(deltaR < 0.05);
+        }
+    }
+
+    // After settling, ParameterSmoother snaps to 0.0, output must be strictly silent (< 1e-7, >140 dB attenuation)
+    blockL = inL;
+    blockR = inR;
+    gainSmootherL.process(blockL.data(), blockSize);
+    gainSmootherR.process(blockR.data(), blockSize);
+    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    for (size_t i = 0; i < blockSize * 2; ++i) {
+        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
+    }
+
+    // 2. While muted, Master Gain is changed to 1.5
+    // In EngineController, when isMuted is true, target remains 0.0
+    double savedMasterGain = 1.5;
+    bool isMuted = true;
+    gainSmootherL.setTarget(isMuted ? 0.0 : savedMasterGain);
+    gainSmootherR.setTarget(isMuted ? 0.0 : savedMasterGain);
+
+    blockL = inL;
+    blockR = inR;
+    gainSmootherL.process(blockL.data(), blockSize);
+    gainSmootherR.process(blockR.data(), blockSize);
+    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    for (size_t i = 0; i < blockSize * 2; ++i) {
+        QVERIFY(std::abs(outPcm[i]) < 1e-7f);
+    }
+
+    // 3. Disengage Master Mute (target -> savedMasterGain = 1.5)
+    isMuted = false;
+    gainSmootherL.setTarget(isMuted ? 0.0 : savedMasterGain);
+    gainSmootherR.setTarget(isMuted ? 0.0 : savedMasterGain);
+
+    // Verify smooth monotonic rise towards 1.5 without overshoot or clicks
+    for (int b = 0; b < 60; ++b) {
+        blockL = inL;
+        blockR = inR;
+        gainSmootherL.process(blockL.data(), blockSize);
+        gainSmootherR.process(blockR.data(), blockSize);
+        pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                         desk32::engine::format::SampleFormat::Float32, false);
+
+        for (size_t i = 2; i < blockSize * 2; i += 2) {
+            double deltaL = std::abs(outPcm[i] - outPcm[i - 2]);
+            double deltaR = std::abs(outPcm[i + 1] - outPcm[i - 1]);
+            QVERIFY(deltaL < 0.05); // No clicks or pops
+            QVERIFY(deltaR < 0.05);
+        }
+    }
+
+    // After settling to 1.5, signal should be at full 1.5 * input
+    blockL = inL;
+    blockR = inR;
+    gainSmootherL.process(blockL.data(), blockSize);
+    gainSmootherR.process(blockR.data(), blockSize);
+    pipeline.process(blockL.data(), blockR.data(), blockSize, outPcm.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    QVERIFY(std::abs(outPcm[0] - (0.5f * 1.5f)) < 0.01f);
+    QVERIFY(std::abs(outPcm[1] - (-0.4f * 1.5f)) < 0.01f);
+
+    // 4. Verify DSP chain bypass states are completely unaffected throughout mute operations
+    QCOMPARE(pipeline.isMasterGlobalBypassed(), false);
+    QCOMPARE(pipeline.isListeningGlobalBypassed(), false);
+}
+
+void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
+    // P1-4: Verify strictly ZERO dynamic memory allocations in Audio Thread while Control Thread
+    // issues continuous high-frequency DSP parameter updates across all nodes
+    AudioPipeline pipeline(48000.0);
+
+    // Build realistic Mastering and Listening chains
+    auto masterChain = std::make_unique<AudioChain>("Master Chain", ChainPurpose::MasteringChain);
+    masterChain->appendNode(std::make_shared<ParametricEqNode>("PEQ"));
+    masterChain->appendNode(std::make_shared<GraphicEqNode>("GEQ"));
+    masterChain->appendNode(std::make_shared<HighLowPassNode>("Filter"));
+    masterChain->appendNode(std::make_shared<CompressorNode>("Compressor"));
+    masterChain->appendNode(std::make_shared<ReverbNode>("Reverb"));
+    masterChain->appendNode(std::make_shared<PeakLimiterNode>("Limiter"));
+    pipeline.swapMasterChain(std::move(masterChain));
+
+    auto listeningChain = std::make_unique<AudioChain>("Listening Chain", ChainPurpose::ListeningCorrectionChain);
+    listeningChain->appendNode(std::make_shared<ParametricEqNode>("Listening Correction"));
+    pipeline.swapListeningChain(std::move(listeningChain));
+
+    std::atomic<bool> stopAudioThread{false};
+    std::atomic<size_t> blocksProcessed{0};
+
+    // Reset allocation trackers
+    s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_allocationCount.store(0, std::memory_order_relaxed);
+    s_trackAllocations.store(true, std::memory_order_relaxed);
+
+    // Spin up Audio Thread
+    std::thread audioThread([&]() {
+        const size_t frames = 256;
+        std::array<double, frames> left;
+        std::array<double, frames> right;
+        std::array<float, frames * 2> out;
+        left.fill(0.5);
+        right.fill(-0.5);
+        out.fill(0.0f);
+
+        t_isAudioThread = true;
+
+        while (!stopAudioThread.load(std::memory_order_acquire)) {
+            pipeline.process(left.data(), right.data(), frames, out.data(),
+                             desk32::engine::format::SampleFormat::Float32, false);
+            blocksProcessed.fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::yield();
+        }
+    });
+
+    // Control Thread: Issue 1,000 rapid updates across all DSP modules
+    for (int i = 0; i < 1000; ++i) {
+        // Continuous Mailbox updates
+        pipeline.paramMailbox().setFilterParams(
+            static_cast<float>(20.0 + (i % 200)),
+            static_cast<float>(10000.0 - (i % 500)),
+            1, 0, true, true
+        );
+        pipeline.paramMailbox().setListeningPreset("Monitor Flat");
+
+        // Discrete Command updates (Compressor, Limiter, Reverb bypass/params)
+        desk32::engine::dsp::DspCommand cmd;
+        if (i % 4 == 0) {
+            cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+            cmd.index = 2; // Filter
+            cmd.boolFlag1 = (i % 8 == 0) ? 1 : 0;
+        } else if (i % 4 == 1) {
+            cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+            cmd.index = 3; // Compressor
+            cmd.boolFlag1 = (i % 8 == 1) ? 1 : 0;
+        } else if (i % 4 == 2) {
+            cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+            cmd.index = 5; // Limiter
+            cmd.boolFlag1 = (i % 8 == 2) ? 1 : 0;
+        } else {
+            cmd.type = desk32::engine::dsp::DspCommandType::SetGlobalBypass;
+            cmd.boolFlag1 = (i % 16 == 3) ? 1 : 0;
+        }
+        pipeline.paramQueue().push(cmd);
+
+        // Prepared instance updates
+        if (i % 10 == 0) {
+            pipeline.updateCompressor(-12.0 - (i % 10), 3.0, 10.0, 100.0, 2.0, 4.0, true);
+            pipeline.updatePeakLimiter(-1.0 - (i % 3) * 0.5, 50.0, 3.0, true);
+            pipeline.updateReverb(0.6 + (i % 4) * 0.1, 0.5, 0.2, 20.0, true, true);
+        }
+
+        if (i % 50 == 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
+
+    // Allow Audio Thread to finish processing updates
+    while (blocksProcessed.load(std::memory_order_relaxed) < 100) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    stopAudioThread.store(true, std::memory_order_release);
+    audioThread.join();
+
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+
+    // CRITICAL ASSERTION: Audio Thread allocation count must be STRICTLY 0!
+    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+    QVERIFY(blocksProcessed.load() >= 100);
+
+    // Test Queue Full condition: fill queue to capacity (512 items) and verify process() doesn't block or allocate
+    s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_trackAllocations.store(true, std::memory_order_relaxed);
+
+    for (size_t i = 0; i < 512; ++i) {
+        desk32::engine::dsp::DspCommand fullCmd;
+        fullCmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
+        fullCmd.index = 0;
+        pipeline.paramQueue().push(fullCmd);
+    }
+
+    const size_t frames = 256;
+    std::array<double, frames> left;
+    std::array<double, frames> right;
+    std::array<float, frames * 2> out;
+    left.fill(0.1);
+    right.fill(0.1);
+    out.fill(0.0f);
+
+    t_isAudioThread = true;
+    pipeline.process(left.data(), right.data(), frames, out.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+    t_isAudioThread = false;
+
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+}
+
+void TestPhase2Dsp::testDspNodeBypassParameterPreservation() {
+    // P1-2: Verify that toggling node bypass does NOT destroy or reset parameter values
+    HighLowPassNode filterNode("Test Filter");
+    filterNode.configure(48000.0, 120.0, 8000.0,
+                         HighLowPassFilter::FilterSlope::Slope24dB,
+                         HighLowPassFilter::FilterSlope::Slope12dB);
+
+    CompressorNode compNode("Test Comp");
+    compNode.configure(48000.0);
+    compNode.prepareInstance(48000.0, -18.0, 4.0, 15.0, 120.0, 3.5, 6.0, true);
+
+    PeakLimiterNode limNode("Test Limiter");
+    limNode.configure(48000.0);
+    limNode.prepareInstance(48000.0, -1.5, 35.0, 4.0, true);
+
+    ReverbNode revNode("Test Reverb");
+    revNode.configure(48000.0);
+    revNode.prepareInstance(48000.0, 0.75, 0.45, 0.35, 25.0, true, true);
+
+    // Process single block to swap prepared instances into active
+    double dL = 0.0, dR = 0.0;
+    compNode.process(&dL, &dR, 1);
+    limNode.process(&dL, &dR, 1);
+    revNode.process(&dL, &dR, 1);
+
+    // Bypass all
+    filterNode.setBypassed(true);
+    compNode.setBypassed(true);
+    limNode.setBypassed(true);
+    revNode.setBypassed(true);
+
+    QCOMPARE(filterNode.isBypassed(), true);
+    QCOMPARE(compNode.isBypassed(), true);
+    QCOMPARE(limNode.isBypassed(), true);
+    QCOMPARE(revNode.isBypassed(), true);
+
+    // Unbypass all
+    filterNode.setBypassed(false);
+    compNode.setBypassed(false);
+    limNode.setBypassed(false);
+    revNode.setBypassed(false);
+
+    QCOMPARE(filterNode.isBypassed(), false);
+    QCOMPARE(compNode.isBypassed(), false);
+    QCOMPARE(limNode.isBypassed(), false);
+    QCOMPARE(revNode.isBypassed(), false);
+
+    // Verify all parameters are intact
+    QCOMPARE(filterNode.dsp().hpfFrequency(), 120.0);
+    QCOMPARE(filterNode.dsp().lpfFrequency(), 8000.0);
+    QCOMPARE(filterNode.dsp().isHpfEnabled(), true);
+    QCOMPARE(filterNode.dsp().isLpfEnabled(), true);
+
+    QCOMPARE(compNode.thresholdDb(), -18.0);
+    QCOMPARE(compNode.ratio(), 4.0);
+    QCOMPARE(compNode.attackMs(), 15.0);
+    QCOMPARE(compNode.releaseMs(), 120.0);
+    QCOMPARE(compNode.makeupGainDb(), 3.5);
+    QCOMPARE(compNode.kneeDb(), 6.0);
+
+    QCOMPARE(limNode.ceilingDb(), -1.5);
+    QCOMPARE(limNode.releaseMs(), 35.0);
+    QCOMPARE(limNode.lookaheadMs(), 4.0);
+
+    QCOMPARE(revNode.roomSize(), 0.75);
+    QCOMPARE(revNode.damping(), 0.45);
+    QCOMPARE(revNode.wetLevel(), 0.35);
+    QCOMPARE(revNode.predelayMs(), 25.0);
+    QCOMPARE(revNode.isTailPreserving(), true);
 }
 
 QTEST_MAIN(TestPhase2Dsp)

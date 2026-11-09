@@ -475,43 +475,160 @@ void EngineController::setOutputRoutingMode(int path) {
 }
 
 void EngineController::setGlobalDspBypass(bool bypass) {
-    if (m_globalDspBypass.exchange(bypass) != bypass) {
-        if (m_pipeline) {
-            engine::dsp::DspCommand cmdMaster;
-            cmdMaster.type = engine::dsp::DspCommandType::SetGlobalBypass;
-            cmdMaster.subIndex = 0; // Master
-            cmdMaster.boolFlag1 = bypass ? 1 : 0;
-            if (!m_pipeline->paramQueue().push(cmdMaster)) {
-                log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Master global bypass push queue full", "DSPQueue", "Pipeline");
-                emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
-            }
+    const bool prevBypass = m_globalDspBypass.load(std::memory_order_relaxed);
+    if (prevBypass == bypass && !m_globalBypassDesynced.load(std::memory_order_relaxed)) {
+        return;
+    }
 
-            engine::dsp::DspCommand cmdListen;
-            cmdListen.type = engine::dsp::DspCommandType::SetGlobalBypass;
-            cmdListen.subIndex = 1; // Listening
-            cmdListen.boolFlag1 = bypass ? 1 : 0;
-            if (!m_pipeline->paramQueue().push(cmdListen)) {
-                log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Listen global bypass push queue full", "DSPQueue", "Pipeline");
-                emit dspQueueOverflowWarning(static_cast<int>(cmdListen.type));
-            }
-        }
-        // Section 10.2.3 & 5.9: Global DSP Bypass is temporary and does NOT destroy individual DSP node ON/OFF states!
+    if (!m_pipeline) {
+        m_globalDspBypass.store(bypass, std::memory_order_relaxed);
+        m_globalBypassDesynced.store(false, std::memory_order_relaxed);
         emit globalDspBypassChanged(bypass);
-        emit peqParametersChanged();
-        emit geqParametersChanged();
-        emit filterParametersChanged();
-        emit compressorParametersChanged();
-        emit limiterParametersChanged();
-        emit reverbParametersChanged();
+        return;
+    }
+
+    engine::dsp::DspCommand cmdMaster;
+    cmdMaster.type = engine::dsp::DspCommandType::SetGlobalBypass;
+    cmdMaster.subIndex = 0; // Master
+    cmdMaster.boolFlag1 = bypass ? 1 : 0;
+
+    engine::dsp::DspCommand cmdListen;
+    cmdListen.type = engine::dsp::DspCommandType::SetGlobalBypass;
+    cmdListen.subIndex = 1; // Listening
+    cmdListen.boolFlag1 = bypass ? 1 : 0;
+
+    // Check capacity first to avoid partial enqueue (P1-1)
+    if (!m_pipeline->paramQueue().hasSpace(2)) {
         log::LogService::instance().log(
             "DSP",
             "GlobalBypass",
+            "Failed",
+            QString("Failed to queue Global DSP Bypass: queue full (code: 3001)"),
+            "DSPQueue",
+            "Pipeline"
+        );
+        emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
+        emit globalDspBypassChanged(prevBypass);
+        return;
+    }
+
+    bool masterOk = m_pipeline->paramQueue().push(cmdMaster);
+    bool listenOk = m_pipeline->paramQueue().push(cmdListen);
+
+    if (!masterOk || !listenOk) {
+        if (masterOk && !listenOk) {
+            // Partial failure recovery: Master succeeded but Listening failed -> Rollback Master
+            engine::dsp::DspCommand cmdRollback;
+            cmdRollback.type = engine::dsp::DspCommandType::SetGlobalBypass;
+            cmdRollback.subIndex = 0;
+            cmdRollback.boolFlag1 = prevBypass ? 1 : 0;
+            bool rollbackOk = m_pipeline->paramQueue().push(cmdRollback);
+            if (!rollbackOk) {
+                m_globalBypassDesynced.store(true, std::memory_order_relaxed);
+            }
+            log::LogService::instance().log(
+                "DSP",
+                "GlobalBypass",
+                "Failed",
+                QString("Partial Global DSP Bypass failure: Listening queue full, Master rolled back (code: 3002)"),
+                "DSPQueue",
+                "Pipeline"
+            );
+        } else if (!masterOk && listenOk) {
+            // Partial failure recovery: Listening succeeded but Master failed -> Rollback Listening
+            engine::dsp::DspCommand cmdRollback;
+            cmdRollback.type = engine::dsp::DspCommandType::SetGlobalBypass;
+            cmdRollback.subIndex = 1;
+            cmdRollback.boolFlag1 = prevBypass ? 1 : 0;
+            bool rollbackOk = m_pipeline->paramQueue().push(cmdRollback);
+            if (!rollbackOk) {
+                m_globalBypassDesynced.store(true, std::memory_order_relaxed);
+            }
+            log::LogService::instance().log(
+                "DSP",
+                "GlobalBypass",
+                "Failed",
+                QString("Partial Global DSP Bypass failure: Master queue full, Listening rolled back (code: 3004)"),
+                "DSPQueue",
+                "Pipeline"
+            );
+        } else {
+            log::LogService::instance().log(
+                "DSP",
+                "GlobalBypass",
+                "Failed",
+                QString("Failed to queue Global DSP Bypass: queue full (code: 3001)"),
+                "DSPQueue",
+                "Pipeline"
+            );
+        }
+        emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
+        emit globalDspBypassChanged(prevBypass);
+        return;
+    }
+
+    m_globalDspBypass.store(bypass, std::memory_order_relaxed);
+    m_globalBypassDesynced.store(false, std::memory_order_relaxed);
+
+    // Section 10.2.3 & 5.9: Global DSP Bypass is temporary and does NOT destroy individual DSP node ON/OFF states!
+    emit globalDspBypassChanged(bypass);
+    emit peqParametersChanged();
+    emit geqParametersChanged();
+    emit filterParametersChanged();
+    emit compressorParametersChanged();
+    emit limiterParametersChanged();
+    emit reverbParametersChanged();
+    log::LogService::instance().log(
+        "DSP",
+        "GlobalBypass",
+        "Success",
+        bypass ? "Global DSP Bypass Engaged" : "Global DSP Bypass Disengaged",
+        "DSPChain",
+        "Master"
+    );
+}
+
+bool EngineController::resyncGlobalDspBypass() {
+    if (!m_pipeline) return false;
+    const bool target = m_globalDspBypass.load(std::memory_order_relaxed);
+
+    engine::dsp::DspCommand cmdMaster;
+    cmdMaster.type = engine::dsp::DspCommandType::SetGlobalBypass;
+    cmdMaster.subIndex = 0;
+    cmdMaster.boolFlag1 = target ? 1 : 0;
+
+    engine::dsp::DspCommand cmdListen;
+    cmdListen.type = engine::dsp::DspCommandType::SetGlobalBypass;
+    cmdListen.subIndex = 1;
+    cmdListen.boolFlag1 = target ? 1 : 0;
+
+    if (!m_pipeline->paramQueue().hasSpace(2)) {
+        log::LogService::instance().log(
+            "DSP",
+            "GlobalBypassResync",
+            "Failed",
+            "Failed to resynchronize Global DSP Bypass: parameter queue full (code: 3005)",
+            "DSPQueue",
+            "Pipeline"
+        );
+        return false;
+    }
+
+    if (m_pipeline->paramQueue().pushTwo(cmdMaster, cmdListen)) {
+        m_globalBypassDesynced.store(false, std::memory_order_relaxed);
+        log::LogService::instance().log(
+            "DSP",
+            "GlobalBypassResync",
             "Success",
-            bypass ? "Global DSP Bypass Engaged" : "Global DSP Bypass Disengaged",
+            "Global DSP Bypass resynchronized successfully",
             "DSPChain",
             "Master"
         );
+        emit globalDspBypassChanged(target);
+        return true;
     }
+
+    return false;
 }
 
 void EngineController::setMasterMute(bool mute) {
@@ -950,6 +1067,7 @@ QVariantMap EngineController::getFilterParams() {
     map["lpfFrequency"] = m_uiFilter.lpfFrequency();
     map["lpfEnabled"] = m_uiFilter.isLpfEnabled();
     map["lpfSlope"] = m_uiFilter.lpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1 : 0;
+    map["bypassed"] = m_filterBypassed.load(std::memory_order_relaxed);
     return map;
 }
 
@@ -995,6 +1113,7 @@ QVariantMap EngineController::getCompressorParams() {
     map["makeupGainDb"] = m_uiComp.makeupGainDb();
     map["kneeDb"] = m_uiComp.kneeDb();
     map["enabled"] = m_uiComp.isEnabled();
+    map["bypassed"] = m_compBypassed.load(std::memory_order_relaxed);
     map["gainReductionDb"] = m_pipeline ? m_pipeline->compressorGainReductionDb() : 0.0;
     return map;
 }
@@ -1018,6 +1137,7 @@ QVariantMap EngineController::getLimiterParams() {
     map["lookaheadMs"] = m_uiLimiter.lookaheadMs();
     map["latencyFrames"] = m_pipeline ? m_pipeline->limiterLatencyFrames() : static_cast<int>(m_uiLimiter.latencyFrames());
     map["enabled"] = m_uiLimiter.isEnabled();
+    map["bypassed"] = m_limiterBypassed.load(std::memory_order_relaxed);
     map["gainReductionDb"] = m_pipeline ? m_pipeline->limiterGainReductionDb() : 0.0;
     return map;
 }
@@ -1042,6 +1162,7 @@ QVariantMap EngineController::getReverbParams() {
     map["predelayMs"] = m_uiReverb.predelayMs();
     map["tailPreserving"] = m_uiReverb.isTailPreserving();
     map["enabled"] = m_uiReverb.isEnabled();
+    map["bypassed"] = m_reverbBypassed.load(std::memory_order_relaxed);
     return map;
 }
 
@@ -1070,67 +1191,134 @@ void EngineController::setListeningPreset(const QString& presetName) {
     }
 }
 
+bool EngineController::findDspNode(const QString& nodeName, uint8_t& outChain, uint8_t& outIndex) const noexcept {
+    if (nodeName == "PEQ") { outChain = 0; outIndex = 0; return true; }
+    if (nodeName == "GEQ") { outChain = 0; outIndex = 1; return true; }
+    if (nodeName == "Filter") { outChain = 0; outIndex = 2; return true; }
+    if (nodeName == "Compressor") { outChain = 0; outIndex = 3; return true; }
+    if (nodeName == "ExternalInsert" || nodeName == "Insert") { outChain = 0; outIndex = 4; return true; }
+    if (nodeName == "Reverb") { outChain = 0; outIndex = 5; return true; }
+    if (nodeName == "Limiter") { outChain = 0; outIndex = 6; return true; }
+    if (nodeName == "ListeningCorrection") { outChain = 1; outIndex = 0; return true; }
+    return false;
+}
+
+void EngineController::emitDspNodeSignal(const QString& nodeName) {
+    if (nodeName == "PEQ") emit peqParametersChanged();
+    else if (nodeName == "GEQ") emit geqParametersChanged();
+    else if (nodeName == "Filter") emit filterParametersChanged();
+    else if (nodeName == "Compressor") emit compressorParametersChanged();
+    else if (nodeName == "ExternalInsert" || nodeName == "Insert") emit externalInsertStatusChanged();
+    else if (nodeName == "Reverb") emit reverbParametersChanged();
+    else if (nodeName == "Limiter") emit limiterParametersChanged();
+    else if (nodeName == "ListeningCorrection") emit outputRoutingModeChanged(m_outputRoutingMode.load(std::memory_order_relaxed));
+}
+
 void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
     uint8_t targetChain = 0;
     uint8_t nodeIndex = 0;
-    bool found = false;
-
-    if (nodeName == "PEQ") {
-        targetChain = 0; nodeIndex = 0; found = true;
-        m_peqBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiPeq.setEnabled(!bypass);
-        emit peqParametersChanged();
-    } else if (nodeName == "GEQ") {
-        targetChain = 0; nodeIndex = 1; found = true;
-        m_geqBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiGeq.setEnabled(!bypass);
-        emit geqParametersChanged();
-    } else if (nodeName == "Filter") {
-        targetChain = 0; nodeIndex = 2; found = true;
-        m_filterBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiFilter.setHpfEnabled(!bypass);
-        m_uiFilter.setLpfEnabled(!bypass);
-        emit filterParametersChanged();
-    } else if (nodeName == "Compressor") {
-        targetChain = 0; nodeIndex = 3; found = true;
-        m_compBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiComp.setEnabled(!bypass);
-        emit compressorParametersChanged();
-    } else if (nodeName == "ExternalInsert" || nodeName == "Insert") {
-        targetChain = 0; nodeIndex = 4; found = true;
-        m_insertBypassed.store(bypass, std::memory_order_relaxed);
-        if (m_insertNode) {
-            m_insertNode->setBypassed(bypass);
-        }
-        emit externalInsertStatusChanged();
-    } else if (nodeName == "Reverb") {
-        targetChain = 0; nodeIndex = 5; found = true;
-        m_reverbBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiReverb.setEnabled(!bypass);
-        emit reverbParametersChanged();
-    } else if (nodeName == "Limiter") {
-        targetChain = 0; nodeIndex = 6; found = true;
-        m_limiterBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiLimiter.setEnabled(!bypass);
-        emit limiterParametersChanged();
-    } else if (nodeName == "ListeningCorrection") {
-        targetChain = 1; nodeIndex = 0; found = true;
-        m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
-        m_uiListeningCorrection.setEnabled(!bypass);
-        emit outputRoutingModeChanged(m_outputRoutingMode.load(std::memory_order_relaxed));
+    if (!findDspNode(nodeName, targetChain, nodeIndex)) {
+        return;
     }
 
-    if (found && m_pipeline) {
+    const bool prevBypassed = isDspNodeBypassed(nodeName);
+    if (prevBypassed == bypass) {
+        return;
+    }
+
+    if (m_pipeline) {
         engine::dsp::DspCommand cmd;
         cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
         cmd.index = nodeIndex;
         cmd.subIndex = targetChain;
         cmd.boolFlag1 = bypass ? 1 : 0;
         if (!m_pipeline->paramQueue().push(cmd)) {
-            log::LogService::instance().log("DSP", "ParameterQueuePush", "Warning", "Set node bypass push queue full", "DSPQueue", "Pipeline");
+            log::LogService::instance().log(
+                "DSP",
+                "NodeBypass",
+                "Failed",
+                QString("Failed to set bypass for %1: parameter queue full (code: 3001)").arg(nodeName),
+                "DSPNode",
+                nodeName
+            );
             emit dspQueueOverflowWarning(static_cast<int>(cmd.type));
+            // Ensure UI stays synchronized with actual DSP state on failure (P1-2)
+            emitDspNodeSignal(nodeName);
+            return;
         }
     }
+
+    // Command successfully queued into Audio Thread: update state (P1-2)
+    // Parameter values are strictly PRESERVED and not erased or reset on bypass
+    if (nodeName == "PEQ") {
+        m_peqBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "GEQ") {
+        m_geqBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "Filter") {
+        m_filterBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "Compressor") {
+        m_compBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "ExternalInsert" || nodeName == "Insert") {
+        m_insertBypassed.store(bypass, std::memory_order_relaxed);
+        if (m_insertNode) {
+            m_insertNode->setBypassed(bypass);
+        }
+    } else if (nodeName == "Reverb") {
+        m_reverbBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "Limiter") {
+        m_limiterBypassed.store(bypass, std::memory_order_relaxed);
+    } else if (nodeName == "ListeningCorrection") {
+        m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
+    }
+
+    emitDspNodeSignal(nodeName);
+    log::LogService::instance().log(
+        "DSP",
+        "NodeBypass",
+        "Success",
+        QString("%1 Bypass %2").arg(nodeName, bypass ? "Engaged" : "Disengaged"),
+        "DSPNode",
+        nodeName
+    );
+}
+
+bool EngineController::resyncDspNodeBypass(const QString& nodeName) {
+    if (!m_pipeline) return false;
+    uint8_t targetChain = 0;
+    uint8_t nodeIndex = 0;
+    if (!findDspNode(nodeName, targetChain, nodeIndex)) {
+        return false;
+    }
+
+    const bool state = isDspNodeBypassed(nodeName);
+    engine::dsp::DspCommand cmd;
+    cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
+    cmd.index = nodeIndex;
+    cmd.subIndex = targetChain;
+    cmd.boolFlag1 = state ? 1 : 0;
+
+    if (m_pipeline->paramQueue().push(cmd)) {
+        log::LogService::instance().log(
+            "DSP",
+            "NodeBypassResync",
+            "Success",
+            QString("%1 bypass resynchronized to %2").arg(nodeName, state ? "true" : "false"),
+            "DSPNode",
+            nodeName
+        );
+        emitDspNodeSignal(nodeName);
+        return true;
+    }
+
+    log::LogService::instance().log(
+        "DSP",
+        "NodeBypassResync",
+        "Failed",
+        QString("Failed to resynchronize bypass for %1: queue full (code: 3006)").arg(nodeName),
+        "DSPNode",
+        nodeName
+    );
+    return false;
 }
 
 bool EngineController::isDspNodeBypassed(const QString& nodeName) {

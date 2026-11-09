@@ -86,6 +86,31 @@ public:
         return false;
     }
 
+    /// Check if queue has space for at least 'count' commands (thread-safe, non-blocking check).
+    [[nodiscard]] bool hasSpace(size_t count = 1) const noexcept {
+        size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
+        size_t readIdx = m_readIndex.load(std::memory_order_acquire);
+        return (writeIdx - readIdx + count <= CAPACITY);
+    }
+
+    /// Multi-Producer: Atomically push two commands under single lock acquisition (P1-1).
+    /// Guarantees that either both commands are enqueued or neither is.
+    bool pushTwo(const DspCommand& cmd1, const DspCommand& cmd2) noexcept {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        size_t writeIdx = m_writeIndex.load(std::memory_order_relaxed);
+        size_t readIdx = m_readIndex.load(std::memory_order_acquire);
+
+        if (writeIdx - readIdx + 2 <= CAPACITY) {
+            m_buffer[writeIdx & MASK] = cmd1;
+            m_buffer[(writeIdx + 1) & MASK] = cmd2;
+            m_writeIndex.store(writeIdx + 2, std::memory_order_release);
+            return true;
+        }
+
+        m_overflowCount.fetch_add(2, std::memory_order_relaxed);
+        return false;
+    }
+
     /// Audio Thread: Pop single command. Returns true if command retrieved, false if empty.
     bool pop(DspCommand& outCmd) noexcept {
         size_t readIdx = m_readIndex.load(std::memory_order_relaxed);

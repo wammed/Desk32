@@ -165,6 +165,27 @@ public:
     [[nodiscard]] dsp::ParameterCommandQueue& paramQueue() noexcept { return m_paramQueue; }
     [[nodiscard]] dsp::DspParameterMailbox& paramMailbox() noexcept { return m_paramMailbox; }
 
+    /// Runtime bypass status inspection (P1-1, P1-2)
+    [[nodiscard]] bool isMasterGlobalBypassed() const noexcept {
+        auto guard = m_masterReclaimer.enterRead();
+        return guard.chain ? guard.chain->isBypassed() : false;
+    }
+
+    [[nodiscard]] bool isListeningGlobalBypassed() const noexcept {
+        auto guard = m_listeningReclaimer.enterRead();
+        return guard.chain ? guard.chain->isBypassed() : false;
+    }
+
+    [[nodiscard]] bool isMasterNodeBypassed(size_t index) const noexcept {
+        auto guard = m_masterReclaimer.enterRead();
+        return (guard.chain && index < guard.chain->nodeCount()) ? guard.chain->node(index)->isBypassed() : false;
+    }
+
+    [[nodiscard]] bool isListeningNodeBypassed(size_t index) const noexcept {
+        auto guard = m_listeningReclaimer.enterRead();
+        return (guard.chain && index < guard.chain->nodeCount()) ? guard.chain->node(index)->isBypassed() : false;
+    }
+
     /// Hot-swap Mastering Chain (Control Thread execution).
     /// Safe, lock-free swap verified by EpochReclaimer.
     void swapMasterChain(std::unique_ptr<AudioChain> newChain) {

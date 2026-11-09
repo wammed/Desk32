@@ -142,11 +142,14 @@ public:
     [[nodiscard]] int renderTrackIndex() const;
     [[nodiscard]] int renderTotalTracks() const;
     [[nodiscard]] QString renderLastOutputDir() const;
+    [[nodiscard]] std::shared_ptr<engine::pipeline::AudioPipeline> pipeline() const noexcept { return m_pipeline; }
 
     // Property setters & QML invokables
     Q_INVOKABLE void setSwitchingMode(int mode);
     Q_INVOKABLE void setOutputRoutingMode(int path);
     Q_INVOKABLE void setGlobalDspBypass(bool bypass);
+    Q_INVOKABLE bool resyncGlobalDspBypass();
+    [[nodiscard]] bool isGlobalDspBypassDesynced() const noexcept { return m_globalBypassDesynced.load(std::memory_order_relaxed); }
     Q_INVOKABLE void setMasterGain(double gain);
     Q_INVOKABLE void setMasterGainL(double gain);
     Q_INVOKABLE void setMasterGainR(double gain);
@@ -199,6 +202,7 @@ public:
     Q_INVOKABLE void setListeningPreset(const QString& presetName);
 
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
+    Q_INVOKABLE bool resyncDspNodeBypass(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
 
@@ -305,10 +309,15 @@ private:
     std::atomic<int> m_switchingMode{0}; // 0 = Normal, 1 = Comparative
     std::atomic<int> m_outputRoutingMode{0}; // 0 = Listening, 1 = RenderMonitor
     std::atomic<bool> m_globalDspBypass{false};
+    std::atomic<bool> m_globalBypassDesynced{false};
     std::atomic<double> m_masterGain{1.0};
     std::atomic<double> m_masterGainL{1.0};
     std::atomic<double> m_masterGainR{1.0};
     std::atomic<bool> m_masterMute{false};
+
+    // Private helpers for DSP node lookup and signal dispatch (P1-1, P1-2)
+    void emitDspNodeSignal(const QString& nodeName);
+    bool findDspNode(const QString& nodeName, uint8_t& outChain, uint8_t& outIndex) const noexcept;
 
     // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
     engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};

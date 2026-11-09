@@ -123,6 +123,13 @@ public:
         m_filter.setLpfEnabled(true);
     }
 
+    void configure(double sampleRate, double hpfFreq, double lpfFreq,
+                   HighLowPassFilter::FilterSlope hpfSlope = HighLowPassFilter::FilterSlope::Slope12dB,
+                   HighLowPassFilter::FilterSlope lpfSlope = HighLowPassFilter::FilterSlope::Slope12dB) {
+        AudioNode::configure(sampleRate);
+        m_filter.configure(sampleRate, hpfFreq, lpfFreq, hpfSlope, lpfSlope);
+    }
+
     void reset() override {
         m_filter.reset();
         m_filter.setHpfEnabled(true);
