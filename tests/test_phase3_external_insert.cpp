@@ -676,13 +676,13 @@ void TestPhase3ExternalInsert::testGlobalDspBypassQueueConsistencyAndRollback() 
     EngineController& controller = EngineController::instance();
     auto pipe = controller.pipeline();
     QVERIFY(pipe != nullptr);
+    desk32::engine::dsp::DspCommand dummy;
 
     // Initial state: disengaged
     controller.setGlobalDspBypass(false);
     QCOMPARE(controller.globalDspBypass(), false);
 
     // Drain any pending commands
-    desk32::engine::dsp::DspCommand dummy;
     while (pipe->paramQueue().pop(dummy)) {}
 
     // Case 1: Normal toggle succeeds on both chains
@@ -849,15 +849,15 @@ void TestPhase3ExternalInsert::testDspNodeBypassQueueFailureAndConsistency() {
     EngineController& controller = EngineController::instance();
     auto pipe = controller.pipeline();
     QVERIFY(pipe != nullptr);
-
-    // Drain queue
     desk32::engine::dsp::DspCommand dummy;
-    while (pipe->paramQueue().pop(dummy)) {}
 
-    // Initial state: ensure Filter is not bypassed
+    // Initial state: ensure Filter is not bypassed (both Accepted and Applied in Audio Thread)
+    controller.setDspNodeBypass("Filter", true);
     controller.setDspNodeBypass("Filter", false);
-    while (pipe->paramQueue().pop(dummy)) {}
+    std::vector<float> initPcm(256 * 2, 0.0f);
+    controller.renderOfflineBlock(initPcm.data(), 256);
     QCOMPARE(controller.isDspNodeBypassed("Filter"), false);
+    QCOMPARE(controller.isDspNodeAppliedBypassed("Filter"), false);
 
     // Case 1: Requested -> Accepted -> Applied lifecycle verification (P1-2)
     QSignalSpy filterSpy(&controller, &EngineController::filterParametersChanged);
