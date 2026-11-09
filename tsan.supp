@@ -25,3 +25,9 @@ mutex:libpipewire-0.3.so
 #    Reason: Precompiled distribution libQt6Core lacks TSan annotations for cross-thread event dispatching.
 #    Scope : Strictly scoped to QObject::event symbol.
 race:QObject::event
+
+# 6. Target: Qt6 QMetaObject::invokeMethod cross-thread queued functor event lifecycle
+#    Reason: Precompiled distribution libQt6Core lacks TSan annotations for cross-thread queued functor delivery.
+#    Scope : Strictly scoped to Qt internal QFunctorSlotObject and QMetaCallEvent.
+race:QFunctorSlotObject
+race:QMetaCallEvent

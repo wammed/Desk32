@@ -23,6 +23,7 @@ using namespace desk32::core;
 // Real-time heap allocation tracking for Audio Thread safety verification
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
+static thread_local bool t_isAudioThread{false};
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -30,28 +31,28 @@ static std::atomic<size_t> s_allocationCount{0};
 #endif
 
 void* operator new(size_t size) {
-    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+    if (s_trackAllocations.load(std::memory_order_relaxed) && t_isAudioThread) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
 }
 
 void* operator new(size_t size, const std::nothrow_t&) noexcept {
-    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+    if (s_trackAllocations.load(std::memory_order_relaxed) && t_isAudioThread) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
 }
 
 void* operator new[](size_t size) {
-    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+    if (s_trackAllocations.load(std::memory_order_relaxed) && t_isAudioThread) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
 }
 
 void* operator new[](size_t size, const std::nothrow_t&) noexcept {
-    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+    if (s_trackAllocations.load(std::memory_order_relaxed) && t_isAudioThread) {
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
     }
     return std::malloc(size);
@@ -391,7 +392,8 @@ void TestPhase3ExternalInsert::testZeroDynamicAllocationInInsertNode() {
     // Prime the processor
     node.process(left.data(), right.data(), 256);
 
-    // Enable heap allocation tracking
+    // Enable heap allocation tracking on audio thread
+    t_isAudioThread = true;
     s_allocationCount.store(0, std::memory_order_relaxed);
     s_trackAllocations.store(true, std::memory_order_release);
 
@@ -401,6 +403,7 @@ void TestPhase3ExternalInsert::testZeroDynamicAllocationInInsertNode() {
     }
 
     s_trackAllocations.store(false, std::memory_order_release);
+    t_isAudioThread = false;
     size_t allocations = s_allocationCount.load(std::memory_order_relaxed);
 
     QCOMPARE(allocations, size_t(0));
