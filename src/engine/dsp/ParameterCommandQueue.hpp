@@ -79,6 +79,7 @@ public:
         if (writeIdx - readIdx < CAPACITY) {
             m_buffer[writeIdx & MASK] = cmd;
             m_writeIndex.store(writeIdx + 1, std::memory_order_release);
+            m_enqueuedCount.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
 
@@ -104,6 +105,7 @@ public:
             m_buffer[writeIdx & MASK] = cmd1;
             m_buffer[(writeIdx + 1) & MASK] = cmd2;
             m_writeIndex.store(writeIdx + 2, std::memory_order_release);
+            m_enqueuedCount.fetch_add(2, std::memory_order_relaxed);
             return true;
         }
 
@@ -137,7 +139,12 @@ public:
         return m_overflowCount.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] uint64_t enqueuedCount() const noexcept {
+        return m_enqueuedCount.load(std::memory_order_relaxed);
+    }
+
     void resetStatistics() noexcept {
+        m_enqueuedCount.store(0, std::memory_order_relaxed);
         m_overflowCount.store(0, std::memory_order_relaxed);
     }
 
@@ -147,6 +154,7 @@ private:
     alignas(64) std::atomic<size_t> m_writeIndex{0};
     alignas(64) std::atomic<size_t> m_readIndex{0};
 
+    alignas(64) std::atomic<uint64_t> m_enqueuedCount{0};
     alignas(64) std::atomic<uint64_t> m_overflowCount{0};
 };
 

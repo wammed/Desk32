@@ -165,6 +165,27 @@ public:
     [[nodiscard]] dsp::ParameterCommandQueue& paramQueue() noexcept { return m_paramQueue; }
     [[nodiscard]] dsp::DspParameterMailbox& paramMailbox() noexcept { return m_paramMailbox; }
 
+    [[nodiscard]] uint64_t commandsConsumed() const noexcept {
+        return m_commandsConsumed.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t commandsApplied() const noexcept {
+        return m_commandsApplied.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t mailboxConsumed() const noexcept {
+        return m_mailboxConsumed.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t mailboxApplied() const noexcept {
+        return m_mailboxApplied.load(std::memory_order_relaxed);
+    }
+    void resetStatistics() noexcept {
+        m_commandsConsumed.store(0, std::memory_order_relaxed);
+        m_commandsApplied.store(0, std::memory_order_relaxed);
+        m_mailboxConsumed.store(0, std::memory_order_relaxed);
+        m_mailboxApplied.store(0, std::memory_order_relaxed);
+        m_paramQueue.resetStatistics();
+        m_paramMailbox.resetStatistics();
+    }
+
     /// Runtime bypass status inspection (P1-1, P1-2)
     [[nodiscard]] bool isMasterGlobalBypassed() const noexcept {
         auto guard = m_masterReclaimer.enterRead();
@@ -332,12 +353,16 @@ private:
         dsp::DspCommand cmd;
         size_t drained = 0;
         while (drained < MAX_COMMANDS_PER_BLOCK && m_paramQueue.pop(cmd)) {
-            applyDspCommand(cmd, master, listening);
+            if (applyDspCommand(cmd, master, listening)) {
+                m_commandsApplied.fetch_add(1, std::memory_order_relaxed);
+            }
+            m_commandsConsumed.fetch_add(1, std::memory_order_relaxed);
             ++drained;
         }
     }
 
-    void applyDspCommand(const dsp::DspCommand& cmd, AudioChain* master, AudioChain* listening) noexcept {
+    bool applyDspCommand(const dsp::DspCommand& cmd, AudioChain* master, AudioChain* listening) noexcept {
+        bool applied = false;
         switch (cmd.type) {
         // P0-26, P0-27: Continuous parameters (GEQ, PEQ, Filter) are updated exclusively
         // via DspParameterMailbox to prevent double-update racing and parameter rewind.
@@ -352,6 +377,7 @@ private:
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* compNode = dynamic_cast<CompressorNode*>(master->node(i))) {
                         compNode->setBypassed(cmd.boolFlag1 == 0);
+                        applied = true;
                         break;
                     }
                 }
@@ -363,6 +389,7 @@ private:
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* limiterNode = dynamic_cast<PeakLimiterNode*>(master->node(i))) {
                         limiterNode->setBypassed(cmd.boolFlag1 == 0);
+                        applied = true;
                         break;
                     }
                 }
@@ -374,6 +401,7 @@ private:
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* reverbNode = dynamic_cast<ReverbNode*>(master->node(i))) {
                         reverbNode->setBypassed(cmd.boolFlag1 == 0);
+                        applied = true;
                         break;
                     }
                 }
@@ -383,10 +411,12 @@ private:
             if (cmd.subIndex == 1) {
                 if (listening && cmd.index < listening->nodeCount()) {
                     listening->node(cmd.index)->setBypassed(cmd.boolFlag1 != 0);
+                    applied = true;
                 }
             } else {
                 if (master && cmd.index < master->nodeCount()) {
                     master->node(cmd.index)->setBypassed(cmd.boolFlag1 != 0);
+                    applied = true;
                 }
             }
             break;
@@ -394,16 +424,19 @@ private:
             if (cmd.subIndex == 1) {
                 if (listening) {
                     listening->setBypassed(cmd.boolFlag1 != 0);
+                    applied = true;
                 }
             } else {
                 if (master) {
                     master->setBypassed(cmd.boolFlag1 != 0);
+                    applied = true;
                 }
             }
             break;
         default:
             break;
         }
+        return applied;
     }
 
     void drainParameterMailbox(AudioChain* master, AudioChain* listening) noexcept {
@@ -411,13 +444,16 @@ private:
         if (!m_paramMailbox.fetchUpdates(params)) {
             return;
         }
+        m_mailboxConsumed.fetch_add(1, std::memory_order_relaxed);
 
+        bool appliedAny = false;
         if (master) {
             // 1. Graphic EQ: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.geqModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
                         geqNode->applyAllCoefficients(params.geqCoefficients);
+                        appliedAny = true;
                         break;
                     }
                 }
@@ -433,6 +469,7 @@ private:
                             params.peqLeftEnabled,
                             params.peqRightEnabled
                         );
+                        appliedAny = true;
                         break;
                     }
                 }
@@ -443,6 +480,7 @@ private:
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
                         filterNode->applyCoefficients(params.filterCoefficients);
+                        appliedAny = true;
                         break;
                     }
                 }
@@ -460,10 +498,15 @@ private:
                             params.listeningLeftEnabled,
                             params.listeningRightEnabled
                         );
+                        appliedAny = true;
                         break;
                     }
                 }
             }
+        }
+
+        if (appliedAny) {
+            m_mailboxApplied.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -542,6 +585,10 @@ private:
     mutable DspTelemetry m_cachedTelemetry{};
     mutable std::mutex m_telemetryReadMutex; // UI Thread ONLY
     alignas(64) std::atomic<uint64_t> m_readerExhaustionDrops{0};
+    alignas(64) std::atomic<uint64_t> m_commandsConsumed{0};
+    alignas(64) std::atomic<uint64_t> m_commandsApplied{0};
+    alignas(64) std::atomic<uint64_t> m_mailboxConsumed{0};
+    alignas(64) std::atomic<uint64_t> m_mailboxApplied{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;

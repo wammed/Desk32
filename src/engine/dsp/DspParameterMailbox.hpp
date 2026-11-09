@@ -384,6 +384,10 @@ public:
         return m_updateCounter.load(std::memory_order_relaxed);
     }
 
+    void resetStatistics() noexcept {
+        m_updateCounter.store(0, std::memory_order_relaxed);
+    }
+
     [[nodiscard]] bool isLockFree() const noexcept {
         return m_sharedState.is_lock_free();
     }

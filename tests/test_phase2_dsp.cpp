@@ -31,10 +31,34 @@ using namespace desk32::engine::dsp;
 using namespace desk32::engine::pipeline;
 
 // Heap allocation tracker for real-time safety verification
+// Scope of Interception (P1-4-AC-08):
+// Intercepted C++ Dynamic Allocations:
+//   - operator new(size_t)
+//   - operator new(size_t, const std::nothrow_t&)
+//   - operator new[](size_t)
+//   - operator new[](size_t, const std::nothrow_t&)
+//   - operator new(size_t, std::align_val_t)
+//   - operator new[](size_t, std::align_val_t)
+// Outside Scope / Uninstrumented:
+//   - Direct C-runtime std::malloc / calloc / realloc / free
+//   - Uninstrumented external C library internal heap allocations
 static std::atomic<bool> s_trackAllocations{false};
 static std::atomic<size_t> s_allocationCount{0};
 static thread_local bool t_isAudioThread{false};
 static std::atomic<size_t> s_audioThreadAllocationCount{0};
+
+// Specific category counters for Audio Thread
+static std::atomic<size_t> s_audioScalarNewCount{0};
+static std::atomic<size_t> s_audioArrayNewCount{0};
+static std::atomic<size_t> s_audioAlignedNewCount{0};
+
+/// RAII Scope Guard to strictly delineate Audio Thread execution sections (P1-4 Section 5.3)
+struct AudioThreadScopeGuard {
+    AudioThreadScopeGuard() noexcept { t_isAudioThread = true; }
+    ~AudioThreadScopeGuard() noexcept { t_isAudioThread = false; }
+    AudioThreadScopeGuard(const AudioThreadScopeGuard&) = delete;
+    AudioThreadScopeGuard& operator=(const AudioThreadScopeGuard&) = delete;
+};
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -44,6 +68,7 @@ static std::atomic<size_t> s_audioThreadAllocationCount{0};
 void* operator new(size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioScalarNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -54,6 +79,7 @@ void* operator new(size_t size) {
 void* operator new(size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioScalarNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -64,6 +90,7 @@ void* operator new(size_t size, const std::nothrow_t&) noexcept {
 void* operator new[](size_t size) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioArrayNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -74,6 +101,7 @@ void* operator new[](size_t size) {
 void* operator new[](size_t size, const std::nothrow_t&) noexcept {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioArrayNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -84,6 +112,7 @@ void* operator new[](size_t size, const std::nothrow_t&) noexcept {
 void* operator new(size_t size, std::align_val_t al) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioAlignedNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -98,6 +127,7 @@ void* operator new(size_t size, std::align_val_t al) {
 void* operator new[](size_t size, std::align_val_t al) {
     if (s_trackAllocations.load(std::memory_order_relaxed)) {
         if (t_isAudioThread) {
+            s_audioAlignedNewCount.fetch_add(1, std::memory_order_relaxed);
             s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
         }
         s_allocationCount.fetch_add(1, std::memory_order_relaxed);
@@ -2323,8 +2353,18 @@ void TestPhase2Dsp::testMasterMutePcmAttenuationIntegration() {
 void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     // P1-4: Verify strictly ZERO C++ dynamic memory allocations (operator new / operator new[]) in Audio Thread
     // while Control Thread issues continuous high-frequency DSP parameter updates across all nodes.
-    // Note: C-runtime direct heap allocations (malloc/calloc) outside C++ new are not tracked by operator new override;
-    // this test strictly validates C++ heap allocation safety across all DSP and pipeline processing paths.
+    //
+    // Note on Allocation Interception Scope (P1-4-AC-08):
+    // Intercepted C++ Dynamic Allocations:
+    //   - operator new(size_t)
+    //   - operator new(size_t, const std::nothrow_t&)
+    //   - operator new[](size_t)
+    //   - operator new[](size_t, const std::nothrow_t&)
+    //   - operator new(size_t, std::align_val_t)
+    //   - operator new[](size_t, std::align_val_t)
+    // Outside Scope / Uninstrumented:
+    //   - Direct C-runtime std::malloc / calloc / realloc / free
+    //   - Uninstrumented external C library internal heap allocations
     AudioPipeline pipeline(48000.0);
 
     // Build realistic Mastering and Listening chains
@@ -2342,12 +2382,18 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     pipeline.swapListeningChain(std::move(listeningChain));
 
     std::atomic<bool> stopAudioThread{false};
-    std::atomic<size_t> blocksProcessed{0};
+    std::atomic<uint64_t> blocksProcessed{0};
 
-    // Reset allocation trackers
+    // Reset pipeline statistics and allocation trackers
+    pipeline.resetStatistics();
     s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_audioScalarNewCount.store(0, std::memory_order_relaxed);
+    s_audioArrayNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNewCount.store(0, std::memory_order_relaxed);
     s_allocationCount.store(0, std::memory_order_relaxed);
     s_trackAllocations.store(true, std::memory_order_relaxed);
+
+    const uint64_t initialMailboxCount = pipeline.paramMailbox().updateCount();
 
     // Spin up Audio Thread
     std::thread audioThread([&]() {
@@ -2359,33 +2405,34 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
         right.fill(-0.5);
         out.fill(0.0f);
 
-        t_isAudioThread = true;
-
         while (!stopAudioThread.load(std::memory_order_acquire)) {
-            pipeline.process(left.data(), right.data(), frames, out.data(),
-                             desk32::engine::format::SampleFormat::Float32, false);
+            {
+                AudioThreadScopeGuard guard;
+                pipeline.process(left.data(), right.data(), frames, out.data(),
+                                 desk32::engine::format::SampleFormat::Float32, false);
+            }
             blocksProcessed.fetch_add(1, std::memory_order_relaxed);
             std::this_thread::yield();
         }
-        t_isAudioThread = false;
     });
 
-    size_t updatesRequested = 0;
-    size_t updatesAccepted = 0;
+    uint64_t commandUpdatesRequested = 0;
+    uint64_t commandUpdatesEnqueued = 0;
+    uint64_t commandUpdatesRejected = 0;
 
     // Control Thread: Issue 1,000 rapid updates across all DSP modules
     for (int i = 0; i < 1000; ++i) {
-        updatesRequested++;
-
-        // Continuous Mailbox updates
+        // Continuous Mailbox updates: Filter and Listening preset
         pipeline.paramMailbox().setFilterParams(
             static_cast<float>(20.0 + (i % 200)),
             static_cast<float>(10000.0 - (i % 500)),
             1, 0, true, true
         );
-        pipeline.paramMailbox().setListeningPreset("Monitor Flat");
+        if (i % 10 == 0) {
+            pipeline.paramMailbox().setListeningPreset("Monitor Flat");
+        }
 
-        // Discrete Command updates (Compressor, Limiter, Reverb bypass/params)
+        // Discrete Command updates (Compressor, Limiter, Reverb, Filter bypass / params)
         desk32::engine::dsp::DspCommand cmd;
         if (i % 4 == 0) {
             cmd.type = desk32::engine::dsp::DspCommandType::SetNodeBypass;
@@ -2403,11 +2450,15 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
             cmd.type = desk32::engine::dsp::DspCommandType::SetGlobalBypass;
             cmd.boolFlag1 = (i % 16 == 3) ? 1 : 0;
         }
+
+        commandUpdatesRequested++;
         if (pipeline.paramQueue().push(cmd)) {
-            updatesAccepted++;
+            commandUpdatesEnqueued++;
+        } else {
+            commandUpdatesRejected++;
         }
 
-        // Prepared instance updates
+        // Prepared instance updates on Control Thread
         if (i % 10 == 0) {
             pipeline.updateCompressor(-12.0 - (i % 10), 3.0, 10.0, 100.0, 2.0, 4.0, true);
             pipeline.updatePeakLimiter(-1.0 - (i % 3) * 0.5, 50.0, 3.0, true);
@@ -2419,27 +2470,124 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
         }
     }
 
-    // Allow Audio Thread to finish processing updates
-    while (blocksProcessed.load(std::memory_order_relaxed) < 100) {
+    // P1-4-AC-01, P1-4-AC-02, P1-4-AC-03:
+    // Guarantee processing of >= 1,000 Audio Processing Blocks with timeout detection
+    constexpr uint64_t kRequiredAudioBlocks = 1000;
+    constexpr auto kTimeout = std::chrono::seconds(5);
+    const auto startTime = std::chrono::steady_clock::now();
+    bool timedOut = false;
+
+    while (blocksProcessed.load(std::memory_order_acquire) < kRequiredAudioBlocks) {
+        if (std::chrono::steady_clock::now() - startTime > kTimeout) {
+            timedOut = true;
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     stopAudioThread.store(true, std::memory_order_release);
     audioThread.join();
-
     s_trackAllocations.store(false, std::memory_order_relaxed);
 
-    // Quantitative metrics verification:
-    // 1. Verify updates were actually requested and accepted by the queue
-    QCOMPARE(updatesRequested, size_t(1000));
-    QVERIFY(updatesAccepted > 900); // High acceptance rate without spurious drops
-    // 2. Verify Audio Thread executed at least 100 real-time blocks
-    QVERIFY(blocksProcessed.load(std::memory_order_relaxed) >= 100);
-    // 3. Strictly zero dynamic allocations in Audio Thread (C++ operator new/new[])
-    QCOMPARE(s_audioThreadAllocationCount.load(std::memory_order_relaxed), size_t(0));
+    // Collect structured metrics
+    const uint64_t totalBlocks = blocksProcessed.load(std::memory_order_relaxed);
+    const uint64_t mbPublished = pipeline.paramMailbox().updateCount() - initialMailboxCount;
+    const uint64_t mbConsumed = pipeline.mailboxConsumed();
+    const uint64_t mbApplied = pipeline.mailboxApplied();
+    const uint64_t mbSuperseded = mbPublished >= mbConsumed ? (mbPublished - mbConsumed) : 0;
+
+    const uint64_t cmdEnqueued = commandUpdatesEnqueued;
+    const uint64_t cmdRejected = commandUpdatesRejected;
+    const uint64_t cmdConsumed = pipeline.commandsConsumed();
+    const uint64_t cmdApplied = pipeline.commandsApplied();
+
+    const uint64_t totalRequested = commandUpdatesRequested + mbPublished;
+    const uint64_t totalAccepted = cmdEnqueued + mbPublished;
+    const uint64_t totalRejected = cmdRejected;
+    const uint64_t totalApplied = cmdApplied + mbApplied;
+
+    const size_t audioNewAllocations = s_audioScalarNewCount.load(std::memory_order_relaxed);
+    const size_t audioArrayNewAllocations = s_audioArrayNewCount.load(std::memory_order_relaxed);
+    const size_t audioAlignedAllocations = s_audioAlignedNewCount.load(std::memory_order_relaxed);
+    const size_t totalAudioAllocations = s_audioThreadAllocationCount.load(std::memory_order_relaxed);
+
+    const bool testPassed = !timedOut && (totalBlocks >= kRequiredAudioBlocks) && (totalAudioAllocations == 0);
+
+    // Diagnostic Output (Section 6.1)
+    std::printf("\n===================================================\n"
+                "Audio Thread Zero Allocation Test\n\n"
+                "Sample Rate: 48000 Hz\n"
+                "Block Size: 256\n"
+                "Required Blocks: %llu\n"
+                "Processed Blocks: %llu\n\n"
+                "Updates Requested: %llu\n"
+                "Updates Accepted: %llu\n"
+                "Updates Rejected: %llu\n"
+                "Updates Applied: %llu\n\n"
+                "Mailbox Published: %llu\n"
+                "Mailbox Consumed: %llu\n"
+                "Mailbox Applied: %llu\n"
+                "Mailbox Superseded: %llu\n\n"
+                "Command Enqueued: %llu\n"
+                "Command Consumed: %llu\n"
+                "Command Applied: %llu\n\n"
+                "C++ operator new allocations: %zu\n"
+                "C++ operator new[] allocations: %zu\n"
+                "C++ aligned allocations: %zu\n\n"
+                "Result: %s\n"
+                "===================================================\n",
+                static_cast<unsigned long long>(kRequiredAudioBlocks),
+                static_cast<unsigned long long>(totalBlocks),
+                static_cast<unsigned long long>(totalRequested),
+                static_cast<unsigned long long>(totalAccepted),
+                static_cast<unsigned long long>(totalRejected),
+                static_cast<unsigned long long>(totalApplied),
+                static_cast<unsigned long long>(mbPublished),
+                static_cast<unsigned long long>(mbConsumed),
+                static_cast<unsigned long long>(mbApplied),
+                static_cast<unsigned long long>(mbSuperseded),
+                static_cast<unsigned long long>(cmdEnqueued),
+                static_cast<unsigned long long>(cmdConsumed),
+                static_cast<unsigned long long>(cmdApplied),
+                audioNewAllocations,
+                audioArrayNewAllocations,
+                audioAlignedAllocations,
+                testPassed ? "PASS" : "FAIL");
+    std::fflush(stdout);
+
+    if (timedOut) {
+        QFAIL(qPrintable(QString("Timeout waiting for audio blocks: processed %1 / %2 required blocks")
+            .arg(totalBlocks).arg(kRequiredAudioBlocks)));
+    }
+
+    // Acceptance Criteria Assertions
+    // P1-4-AC-01, P1-4-AC-02: Guaranteed >= 1,000 blocks processed
+    QVERIFY2(totalBlocks >= kRequiredAudioBlocks, "Processed blocks must be >= 1000");
+
+    // P1-4-AC-04: Separation of Requested, Accepted, Rejected
+    QCOMPARE(cmdEnqueued + cmdRejected, commandUpdatesRequested);
+    QCOMPARE(totalAccepted + totalRejected, totalRequested);
+
+    // P1-4-AC-05: Queue push success != Applied. Consumed commands are applied.
+    QCOMPARE(cmdConsumed, cmdEnqueued);
+    QCOMPARE(cmdApplied, cmdConsumed);
+
+    // P1-4-AC-06, P1-4-AC-07: Mailbox updates published, consumed, applied, superseded
+    QVERIFY(mbPublished > 0);
+    QVERIFY(mbConsumed > 0);
+    QVERIFY(mbApplied > 0);
+
+    // P1-4-AC-08, P1-4-AC-09: C++ allocations strictly ZERO
+    QCOMPARE(totalAudioAllocations, size_t(0));
+    QCOMPARE(audioNewAllocations, size_t(0));
+    QCOMPARE(audioArrayNewAllocations, size_t(0));
+    QCOMPARE(audioAlignedAllocations, size_t(0));
 
     // Test Queue Full condition: fill queue to capacity (512 items) and verify process() doesn't block or allocate
     s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_audioScalarNewCount.store(0, std::memory_order_relaxed);
+    s_audioArrayNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNewCount.store(0, std::memory_order_relaxed);
     s_trackAllocations.store(true, std::memory_order_relaxed);
 
     for (size_t i = 0; i < 512; ++i) {
@@ -2457,10 +2605,11 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     right.fill(0.1);
     out.fill(0.0f);
 
-    t_isAudioThread = true;
-    pipeline.process(left.data(), right.data(), frames, out.data(),
-                     desk32::engine::format::SampleFormat::Float32, false);
-    t_isAudioThread = false;
+    {
+        AudioThreadScopeGuard guard;
+        pipeline.process(left.data(), right.data(), frames, out.data(),
+                         desk32::engine::format::SampleFormat::Float32, false);
+    }
 
     s_trackAllocations.store(false, std::memory_order_relaxed);
     QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
