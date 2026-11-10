@@ -198,6 +198,7 @@ target_include_directories(test_audio_pipeline PRIVATE
 )
 
 add_test(NAME test_audio_pipeline COMMAND test_audio_pipeline)
+set_tests_properties(test_audio_pipeline PROPERTIES TIMEOUT 300)
 
 # Phase 1.2: Native PipeWire AudioOutput Implementation
 add_executable(test_pipewire_output
@@ -440,6 +441,7 @@ target_include_directories(test_phase4_export_render SYSTEM PRIVATE
 )
 
 add_test(NAME test_phase4_export_render COMMAND test_phase4_export_render)
+set_tests_properties(test_phase4_export_render PROPERTIES TIMEOUT 300)
 
 
 

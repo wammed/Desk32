@@ -31,6 +31,21 @@ using namespace desk32::engine::session;
 using namespace desk32::core;
 using namespace desk32::core::log;
 
+/// Bounded wait for the render engine to drain; returns false on timeout.
+template <typename Engine>
+static bool waitForRenderIdle(Engine& engine, int timeoutMs = 30000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        if (timer.elapsed() > timeoutMs) {
+            return false;
+        }
+        QTest::qWait(10);
+    }
+    return true;
+}
+
 struct FileSnapshot {
     QByteArray sha256;
     int64_t size = 0;
@@ -606,9 +621,7 @@ void TestPhase4ExportRender::testEngineControllerRenderIntegration()
 
     // Test cancelRender
     controller.cancelRender();
-    while (RenderEngine::instance().queuedTasksCount() > 0 || RenderEngine::instance().isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(RenderEngine::instance()), "Timed out waiting for render engine to become idle");
     RenderEngine::instance().resetTaskInfo();
     QCoreApplication::processEvents();
 
@@ -779,9 +792,7 @@ void TestPhase4ExportRender::testRenderJobDspSnapshotIsolation()
     QVERIFY(!taskId2.isEmpty());
 
     // Wait for all queued tasks to finish
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
 
     // Verify template chain mutation did NOT affect snap1
     QCOMPARE(snap1.peqLeftBands[0].gainDb, 12.0);
@@ -803,9 +814,7 @@ void TestPhase4ExportRender::testCapacityEstimationAndWavLimitOverflow()
     QString taskId = engine.enqueueTrackRender(trackPath, settings);
     QVERIFY(!taskId.isEmpty());
 
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
 
     // Verify 4 GiB limit check constant
     QCOMPARE(RenderEngine::MAX_CLASSIC_WAV_BYTES, 4294967200LL);
@@ -896,9 +905,7 @@ void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
         // Track Render
         QString tId = engine.enqueueTrackRender(trackPath, settings);
         QVERIFY(!tId.isEmpty());
-        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-            QTest::qWait(10);
-        }
+        QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
 
         FileSnapshot afterTrackRender = FileSnapshot::capture(trackPath);
         QVERIFY2(afterTrackRender.matches(baseline, diff), qPrintable("Track render modified original file: " + diff));
@@ -906,9 +913,7 @@ void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
         // Album Render
         QString albId = engine.enqueueAlbumRender(srcDir, settings);
         QVERIFY(!albId.isEmpty());
-        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-            QTest::qWait(10);
-        }
+        QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
 
         FileSnapshot afterAlbumRender = FileSnapshot::capture(trackPath);
         QVERIFY2(afterAlbumRender.matches(baseline, diff), qPrintable("Album render modified original file: " + diff));
@@ -921,9 +926,7 @@ void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
 
         QString cId = engine.enqueueTrackRender(trackPath, settings);
         engine.cancelCurrentRender();
-        while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-            QTest::qWait(10);
-        }
+        QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
         QCoreApplication::processEvents();
 
         FileSnapshot afterCancel = FileSnapshot::capture(trackPath);
@@ -978,9 +981,7 @@ void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
     // P1-RND-01: Verify that when two files in an album have the same base name (e.g. Track01.wav and Track01.flac),
     // Album Render detects the collision upfront during preflight and safely aborts without overwriting or touching files.
     RenderEngine& engine = RenderEngine::instance();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 
     QString albumDir = m_tempDir->filePath("album_dup_test");
@@ -1036,9 +1037,7 @@ void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
     QStringList stagingEntries = albumQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
     QCOMPARE(stagingEntries.count(), 0);
 
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 }
 
@@ -1047,9 +1046,7 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     // P2-RND-02: Verify that if the final output directory already exists (e.g. from an earlier external run or manual creation),
     // RenderEngine detects the collision before creating staging or processing audio, fails safely, and does NOT overwrite or touch the existing folder.
     RenderEngine& engine = RenderEngine::instance();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 
     QString sourceDir = m_tempDir->filePath("preexisting_output_test");
@@ -1143,9 +1140,7 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     RenderStatus nextStatus = static_cast<RenderStatus>(nextArgs.at(1).toInt());
     QCOMPARE(nextStatus, RenderStatus::Completed);
 
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 }
 
@@ -1177,9 +1172,7 @@ void TestPhase4ExportRender::testRenderOutputOutsideSourceFolderRejected()
     // A-T05: Verify that if an output path attempts to escape the original sound source directory (e.g. into an external directory),
     // RenderEngine containment validation detects it upfront, fails safely, and does not create or write files.
     RenderEngine& engine = RenderEngine::instance();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 
     QString sourceDir = m_tempDir->filePath("containment_test_src");
@@ -1223,9 +1216,7 @@ void TestPhase4ExportRender::testRenderOutputOutsideSourceFolderRejected()
     QStringList extEntries = extQDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
     QCOMPARE(extEntries.count(), 0);
 
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 }
 
@@ -1234,9 +1225,7 @@ void TestPhase4ExportRender::testRenderSymlinkTraversalOutsideSourceFolderReject
     // A-T06: Verify that if a symlink inside the source directory points outside,
     // attempting to render into that symlinked directory is detected and strictly rejected.
     RenderEngine& engine = RenderEngine::instance();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 
     QString sourceDir = m_tempDir->filePath("symlink_test_src");
@@ -1285,9 +1274,7 @@ void TestPhase4ExportRender::testRenderSymlinkTraversalOutsideSourceFolderReject
     QStringList extEntries = extQDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
     QCOMPARE(extEntries.count(), 0);
 
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 }
 
@@ -1364,11 +1351,10 @@ void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
         QString symlinkDir = sourceDir + "/symlink_out";
         QString targetDir = m_tempDir->filePath("symlink_target");
         QDir().mkpath(targetDir);
-        if (QFile::link(targetDir, symlinkDir)) {
-            task.finalOutputDir = symlinkDir;
-            QVERIFY(!RenderEngine::validateOutputContainment(task, err));
-            QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
-        }
+        QVERIFY2(QFile::link(targetDir, symlinkDir), "Failed to create output symlink for test");
+        task.finalOutputDir = symlinkDir;
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
     }
 
     // 7. Staging directory path contains or is a symbolic link
@@ -1377,11 +1363,10 @@ void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
         QString symlinkStaging = sourceDir + "/symlink_staging";
         QString stagingTarget = m_tempDir->filePath("staging_target");
         QDir().mkpath(stagingTarget);
-        if (QFile::link(stagingTarget, symlinkStaging)) {
-            task.stagingDir = symlinkStaging;
-            QVERIFY(!RenderEngine::validateOutputContainment(task, err));
-            QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
-        }
+        QVERIFY2(QFile::link(stagingTarget, symlinkStaging), "Failed to create staging symlink for test");
+        task.stagingDir = symlinkStaging;
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
     }
 
     // 8. Filesystem boundary enforcement via StatDevResolver:
@@ -1414,9 +1399,7 @@ void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
 
     // 10. Verify actual paths generated by real RenderEngine during render process satisfy containment
     RenderEngine& engine = RenderEngine::instance();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
-        QTest::qWait(10);
-    }
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render engine to become idle");
     QCoreApplication::processEvents();
 
     RenderSettings settings;

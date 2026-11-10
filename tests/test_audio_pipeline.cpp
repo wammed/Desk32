@@ -1055,6 +1055,7 @@ void TestAudioPipeline::testTelemetrySnapshotThreadSafety()
 
     std::atomic<bool> stop{false};
     std::atomic<uint64_t> totalTelemetryReads{0};
+    std::atomic<bool> invalidTelemetry{false};
 
     // Audio Thread
     std::thread audioThread([&]() {
@@ -1075,7 +1076,9 @@ void TestAudioPipeline::testTelemetrySnapshotThreadSafety()
         uiThreads.emplace_back([&]() {
             while (!stop.load(std::memory_order_relaxed)) {
                 auto tele = pipeline.currentTelemetry();
-                QVERIFY(tele.graphSampleRate > 0.0);
+                if (!(tele.graphSampleRate > 0.0)) {
+                    invalidTelemetry.store(true, std::memory_order_relaxed);
+                }
                 double compGR = pipeline.compressorGainReductionDb();
                 double limGR = pipeline.limiterGainReductionDb();
                 int latency = pipeline.limiterLatencyFrames();
@@ -1095,6 +1098,7 @@ void TestAudioPipeline::testTelemetrySnapshotThreadSafety()
         t.join();
     }
 
+    QVERIFY(!invalidTelemetry.load());
     QVERIFY(totalTelemetryReads.load() > 100);
 }
 
@@ -1262,19 +1266,26 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         TimedBarrier syncPoint(2);
         std::atomic<bool> swapOutcome{false};
 
+        std::atomic<int> barrierReached{0};
+
         std::thread writerThread([&]() {
-            syncPoint.arrive_and_wait(std::chrono::seconds(5));
+            if (syncPoint.arrive_and_wait(std::chrono::seconds(5))) {
+                barrierReached.fetch_add(1, std::memory_order_relaxed);
+            }
             swapOutcome.store(reclaimer.swapChain(std::make_unique<std::string>("FromWriter")));
         });
 
         std::thread shutdownThread([&]() {
-            syncPoint.arrive_and_wait(std::chrono::seconds(5));
+            if (syncPoint.arrive_and_wait(std::chrono::seconds(5))) {
+                barrierReached.fetch_add(1, std::memory_order_relaxed);
+            }
             reclaimer.drainAll();
         });
 
         if (writerThread.joinable()) writerThread.join();
         if (shutdownThread.joinable()) shutdownThread.join();
 
+        QCOMPARE(barrierReached.load(), 2);
         QVERIFY(reclaimer.isClosing());
         QCOMPARE(reclaimer.retiredCount(), 0u);
     }
@@ -1384,10 +1395,13 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         std::vector<std::thread> writers;
         std::atomic<int> successCount{0};
         std::atomic<int> rejectCount{0};
+        std::atomic<int> barrierReached{0};
 
         for (int i = 0; i < numWriters; ++i) {
             writers.emplace_back([&, i]() {
-                syncAll.arrive_and_wait(std::chrono::seconds(5));
+                if (syncAll.arrive_and_wait(std::chrono::seconds(5))) {
+                    barrierReached.fetch_add(1, std::memory_order_relaxed);
+                }
                 bool ok = reclaimer.swapChain(std::make_unique<std::string>("Chain_D_" + std::to_string(i)));
                 if (ok) {
                     successCount.fetch_add(1, std::memory_order_relaxed);
@@ -1398,7 +1412,9 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         }
 
         std::thread drainThread([&]() {
-            syncAll.arrive_and_wait(std::chrono::seconds(5));
+            if (syncAll.arrive_and_wait(std::chrono::seconds(5))) {
+                barrierReached.fetch_add(1, std::memory_order_relaxed);
+            }
             reclaimer.drainAll();
         });
 
@@ -1407,6 +1423,7 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         }
         if (drainThread.joinable()) drainThread.join();
 
+        QCOMPARE(barrierReached.load(), numWriters + 1);
         QVERIFY(reclaimer.isClosing());
         QCOMPARE(reclaimer.retiredCount(), 0u);
         QCOMPARE(successCount.load() + rejectCount.load(), numWriters);
