@@ -31,7 +31,7 @@ using namespace desk32::engine::dsp;
 using namespace desk32::engine::pipeline;
 
 // Heap allocation tracker for real-time safety verification
-// Scope of Interception (P1-4-AC-08):
+// Scope of Interception (P1-4-AC-08, P1-4-R1):
 // Intercepted C++ Dynamic Allocations:
 //   - operator new(size_t)
 //   - operator new(size_t, const std::nothrow_t&)
@@ -39,6 +39,8 @@ using namespace desk32::engine::pipeline;
 //   - operator new[](size_t, const std::nothrow_t&)
 //   - operator new(size_t, std::align_val_t)
 //   - operator new[](size_t, std::align_val_t)
+//   - operator new(size_t, std::align_val_t, const std::nothrow_t&)
+//   - operator new[](size_t, std::align_val_t, const std::nothrow_t&)
 // Outside Scope / Uninstrumented:
 //   - Direct C-runtime std::malloc / calloc / realloc / free
 //   - Uninstrumented external C library internal heap allocations
@@ -51,6 +53,7 @@ static std::atomic<size_t> s_audioThreadAllocationCount{0};
 static std::atomic<size_t> s_audioScalarNewCount{0};
 static std::atomic<size_t> s_audioArrayNewCount{0};
 static std::atomic<size_t> s_audioAlignedNewCount{0};
+static std::atomic<size_t> s_audioAlignedNothrowNewCount{0};
 
 /// RAII Scope Guard to strictly delineate Audio Thread execution sections (P1-4 Section 5.3)
 struct AudioThreadScopeGuard {
@@ -139,6 +142,36 @@ void* operator new[](size_t size, std::align_val_t al) {
     return ptr;
 }
 
+void* operator new(size_t size, std::align_val_t al, const std::nothrow_t&) noexcept {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioAlignedNothrowNewCount.fetch_add(1, std::memory_order_relaxed);
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+        return nullptr;
+    }
+    return ptr;
+}
+
+void* operator new[](size_t size, std::align_val_t al, const std::nothrow_t&) noexcept {
+    if (s_trackAllocations.load(std::memory_order_relaxed)) {
+        if (t_isAudioThread) {
+            s_audioAlignedNothrowNewCount.fetch_add(1, std::memory_order_relaxed);
+            s_audioThreadAllocationCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        s_allocationCount.fetch_add(1, std::memory_order_relaxed);
+    }
+    void* ptr = nullptr;
+    if (posix_memalign(&ptr, static_cast<size_t>(al), size) != 0) {
+        return nullptr;
+    }
+    return ptr;
+}
+
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
@@ -147,6 +180,10 @@ void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void* p, size_t, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, size_t, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, size_t, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
@@ -189,6 +226,8 @@ private slots:
     void testMasterMuteSmoothingAndTelemetry();
     void testMasterMutePcmAttenuationIntegration();
     void testAudioThreadZeroAllocationDuringContinuousDspUpdates();
+    void testAudioThreadAllocationTrackerOverloadsAndIntentionalDetection();
+    void testDspParameterMailboxConsumedAppliedAndSupersededConsistency();
     void testDspNodeBypassParameterPreservation();
     void cleanupTestCase();
 
@@ -2390,6 +2429,7 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     s_audioScalarNewCount.store(0, std::memory_order_relaxed);
     s_audioArrayNewCount.store(0, std::memory_order_relaxed);
     s_audioAlignedNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNothrowNewCount.store(0, std::memory_order_relaxed);
     s_allocationCount.store(0, std::memory_order_relaxed);
     s_trackAllocations.store(true, std::memory_order_relaxed);
 
@@ -2494,7 +2534,10 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     const uint64_t mbPublished = pipeline.paramMailbox().updateCount() - initialMailboxCount;
     const uint64_t mbConsumed = pipeline.mailboxConsumed();
     const uint64_t mbApplied = pipeline.mailboxApplied();
-    const uint64_t mbSuperseded = mbPublished >= mbConsumed ? (mbPublished - mbConsumed) : 0;
+    const uint64_t mbPending = pipeline.paramMailbox().pendingUpdatesCount();
+    const uint64_t mbSuperseded = (mbPublished >= (mbConsumed + mbPending))
+        ? (mbPublished - mbConsumed - mbPending)
+        : 0;
 
     const uint64_t cmdEnqueued = commandUpdatesEnqueued;
     const uint64_t cmdRejected = commandUpdatesRejected;
@@ -2509,6 +2552,7 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     const size_t audioNewAllocations = s_audioScalarNewCount.load(std::memory_order_relaxed);
     const size_t audioArrayNewAllocations = s_audioArrayNewCount.load(std::memory_order_relaxed);
     const size_t audioAlignedAllocations = s_audioAlignedNewCount.load(std::memory_order_relaxed);
+    const size_t audioAlignedNothrowAllocations = s_audioAlignedNothrowNewCount.load(std::memory_order_relaxed);
     const size_t totalAudioAllocations = s_audioThreadAllocationCount.load(std::memory_order_relaxed);
 
     const bool testPassed = !timedOut && (totalBlocks >= kRequiredAudioBlocks) && (totalAudioAllocations == 0);
@@ -2527,13 +2571,15 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
                 "Mailbox Published: %llu\n"
                 "Mailbox Consumed: %llu\n"
                 "Mailbox Applied: %llu\n"
-                "Mailbox Superseded: %llu\n\n"
+                "Mailbox Superseded: %llu\n"
+                "Mailbox Pending: %llu\n\n"
                 "Command Enqueued: %llu\n"
                 "Command Consumed: %llu\n"
                 "Command Applied: %llu\n\n"
                 "C++ operator new allocations: %zu\n"
                 "C++ operator new[] allocations: %zu\n"
-                "C++ aligned allocations: %zu\n\n"
+                "C++ aligned allocations: %zu\n"
+                "C++ aligned nothrow allocations: %zu\n\n"
                 "Result: %s\n"
                 "===================================================\n",
                 static_cast<unsigned long long>(kRequiredAudioBlocks),
@@ -2546,12 +2592,14 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
                 static_cast<unsigned long long>(mbConsumed),
                 static_cast<unsigned long long>(mbApplied),
                 static_cast<unsigned long long>(mbSuperseded),
+                static_cast<unsigned long long>(mbPending),
                 static_cast<unsigned long long>(cmdEnqueued),
                 static_cast<unsigned long long>(cmdConsumed),
                 static_cast<unsigned long long>(cmdApplied),
                 audioNewAllocations,
                 audioArrayNewAllocations,
                 audioAlignedAllocations,
+                audioAlignedNothrowAllocations,
                 testPassed ? "PASS" : "FAIL");
     std::fflush(stdout);
 
@@ -2572,22 +2620,27 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
     QCOMPARE(cmdConsumed, cmdEnqueued);
     QCOMPARE(cmdApplied, cmdConsumed);
 
-    // P1-4-AC-06, P1-4-AC-07: Mailbox updates published, consumed, applied, superseded
+    // P1-4-R2 & P1-4-R3: Mailbox Published, Consumed, Applied, Superseded, Pending consistency
+    QVERIFY(mbConsumed <= mbPublished);
+    QVERIFY(mbApplied <= mbConsumed);
+    QCOMPARE(mbPublished, mbConsumed + mbSuperseded + mbPending);
     QVERIFY(mbPublished > 0);
     QVERIFY(mbConsumed > 0);
     QVERIFY(mbApplied > 0);
 
-    // P1-4-AC-08, P1-4-AC-09: C++ allocations strictly ZERO
+    // P1-4-AC-08, P1-4-AC-09, P1-4-R1: C++ allocations strictly ZERO across all forms
     QCOMPARE(totalAudioAllocations, size_t(0));
     QCOMPARE(audioNewAllocations, size_t(0));
     QCOMPARE(audioArrayNewAllocations, size_t(0));
     QCOMPARE(audioAlignedAllocations, size_t(0));
+    QCOMPARE(audioAlignedNothrowAllocations, size_t(0));
 
     // Test Queue Full condition: fill queue to capacity (512 items) and verify process() doesn't block or allocate
     s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
     s_audioScalarNewCount.store(0, std::memory_order_relaxed);
     s_audioArrayNewCount.store(0, std::memory_order_relaxed);
     s_audioAlignedNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNothrowNewCount.store(0, std::memory_order_relaxed);
     s_trackAllocations.store(true, std::memory_order_relaxed);
 
     for (size_t i = 0; i < 512; ++i) {
@@ -2613,6 +2666,184 @@ void TestPhase2Dsp::testAudioThreadZeroAllocationDuringContinuousDspUpdates() {
 
     s_trackAllocations.store(false, std::memory_order_relaxed);
     QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+}
+
+void TestPhase2Dsp::testAudioThreadAllocationTrackerOverloadsAndIntentionalDetection() {
+    // P1-4-R1: Verify that all C++ dynamic allocation forms are tracked,
+    // including normal scalar/array new, nothrow scalar/array new,
+    // aligned scalar/array new, and aligned+nothrow scalar/array new.
+    // Also verify that intentional allocations on Audio Thread are detected,
+    // while allocations outside Audio Thread are NOT counted toward Audio Thread allocations.
+
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+    s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_audioScalarNewCount.store(0, std::memory_order_relaxed);
+    s_audioArrayNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNewCount.store(0, std::memory_order_relaxed);
+    s_audioAlignedNothrowNewCount.store(0, std::memory_order_relaxed);
+    s_allocationCount.store(0, std::memory_order_relaxed);
+
+    s_trackAllocations.store(true, std::memory_order_relaxed);
+
+    // 1. Outside Audio Thread allocations: must increment s_allocationCount but NOT s_audioThreadAllocationCount
+    {
+        int* p1 = new int(42);
+        int* p2 = new int[5]{1, 2, 3, 4, 5};
+        int* p3 = new (std::nothrow) int(99);
+        int* p4 = new (std::nothrow) int[8];
+        auto* p5 = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}));
+        auto* p6 = static_cast<int*>(operator new[](sizeof(int) * 4, std::align_val_t{64}));
+        auto* p7 = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}, std::nothrow));
+        auto* p8 = static_cast<int*>(operator new[](sizeof(int) * 4, std::align_val_t{64}, std::nothrow));
+
+        QVERIFY(p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8);
+
+        delete p1;
+        delete[] p2;
+        delete p3;
+        delete[] p4;
+        operator delete(p5, std::align_val_t{64});
+        operator delete[](p6, std::align_val_t{64});
+        operator delete(p7, std::align_val_t{64}, std::nothrow);
+        operator delete[](p8, std::align_val_t{64}, std::nothrow);
+    }
+
+    QVERIFY(s_allocationCount.load() >= 8);
+    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+    QCOMPARE(s_audioScalarNewCount.load(), size_t(0));
+    QCOMPARE(s_audioArrayNewCount.load(), size_t(0));
+    QCOMPARE(s_audioAlignedNewCount.load(), size_t(0));
+    QCOMPARE(s_audioAlignedNothrowNewCount.load(), size_t(0));
+
+    // 2. Audio Thread intentional allocations: must be detected and increment category counters
+    {
+        AudioThreadScopeGuard guard;
+
+        // P1-4-R1-AC-01: Aligned + Nothrow scalar new
+        auto* pAlignedNothrowScalar = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}, std::nothrow));
+        QVERIFY(pAlignedNothrowScalar != nullptr);
+        QCOMPARE(reinterpret_cast<uintptr_t>(pAlignedNothrowScalar) % 64, uintptr_t(0));
+        QCOMPARE(s_audioAlignedNothrowNewCount.load(), size_t(1));
+
+        // P1-4-R1-AC-02: Aligned + Nothrow array new[]
+        auto* pAlignedNothrowArray = static_cast<int*>(operator new[](sizeof(int) * 16, std::align_val_t{64}, std::nothrow));
+        QVERIFY(pAlignedNothrowArray != nullptr);
+        QCOMPARE(reinterpret_cast<uintptr_t>(pAlignedNothrowArray) % 64, uintptr_t(0));
+        QCOMPARE(s_audioAlignedNothrowNewCount.load(), size_t(2));
+
+        // Aligned normal scalar & array
+        auto* pAlignedScalar = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}));
+        auto* pAlignedArray = static_cast<int*>(operator new[](sizeof(int) * 8, std::align_val_t{64}));
+        QCOMPARE(s_audioAlignedNewCount.load(), size_t(2));
+
+        // Normal scalar & array
+        int* pScalar = new int(123);
+        int* pArray = new int[4]{1, 2, 3, 4};
+        QCOMPARE(s_audioScalarNewCount.load(), size_t(1));
+        QCOMPARE(s_audioArrayNewCount.load(), size_t(1));
+
+        // Cleanup
+        operator delete(pAlignedNothrowScalar, std::align_val_t{64}, std::nothrow);
+        operator delete[](pAlignedNothrowArray, std::align_val_t{64}, std::nothrow);
+        operator delete(pAlignedScalar, std::align_val_t{64});
+        operator delete[](pAlignedArray, std::align_val_t{64});
+        delete pScalar;
+        delete[] pArray;
+    }
+
+    // P1-4-R1-AC-03: Total intentional allocations detected on Audio Thread
+    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(6));
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+}
+
+void TestPhase2Dsp::testDspParameterMailboxConsumedAppliedAndSupersededConsistency() {
+    // P1-4-R2 & P1-4-R3: Verify accurate separation of Published, Consumed, Applied, Superseded,
+    // and Pending/Unconsumed updates, along with unapplied diagnostic tracking.
+    AudioPipeline pipeline(48000.0);
+    pipeline.resetStatistics();
+
+    // 1. Initial State: all counts zero
+    QCOMPARE(pipeline.paramMailbox().updateCount(), uint64_t(0));
+    QCOMPARE(pipeline.mailboxConsumed(), uint64_t(0));
+    QCOMPARE(pipeline.mailboxApplied(), uint64_t(0));
+    QCOMPARE(pipeline.paramMailbox().pendingUpdatesCount(), uint64_t(0));
+
+    // 2. Publish 1 update without processing (Pending state verification)
+    pipeline.paramMailbox().setFilterParams(100.0f, 5000.0f, 1, 0, true, true);
+    QCOMPARE(pipeline.paramMailbox().updateCount(), uint64_t(1));
+    QCOMPARE(pipeline.paramMailbox().pendingUpdatesCount(), uint64_t(1)); // Exactly 1 pending
+
+    // 3. Publish 3 more updates without processing -> previous 3 are superseded, 1 is pending
+    pipeline.paramMailbox().setFilterParams(120.0f, 4800.0f, 1, 0, true, true);
+    pipeline.paramMailbox().setFilterParams(140.0f, 4600.0f, 1, 0, true, true);
+    pipeline.paramMailbox().setFilterParams(160.0f, 4400.0f, 1, 0, true, true);
+    QCOMPARE(pipeline.paramMailbox().updateCount(), uint64_t(4));
+    QCOMPARE(pipeline.paramMailbox().pendingUpdatesCount(), uint64_t(1));
+
+    // P1-4-R2-AC-02 & AC-03: Superseded vs Pending distinction before consumption
+    // Published = 4, Consumed = 0, Pending = 1 => Superseded = 4 - 0 - 1 = 3
+    uint64_t pub = pipeline.paramMailbox().updateCount();
+    uint64_t con = pipeline.mailboxConsumed();
+    uint64_t pen = pipeline.paramMailbox().pendingUpdatesCount();
+    uint64_t sup = (pub >= con + pen) ? (pub - con - pen) : 0;
+    QCOMPARE(sup, uint64_t(3));
+    QCOMPARE(pen, uint64_t(1));
+    QCOMPARE(pub, con + sup + pen);
+
+    // 4. Audio Thread processes 1 block with no master/listening chain attached
+    // -> Update is consumed, but DSP nodes are not present, so Applied remains 0!
+    const size_t frames = 256;
+    std::array<double, frames> left{};
+    std::array<double, frames> right{};
+    std::array<float, frames * 2> out{};
+
+    pipeline.process(left.data(), right.data(), frames, out.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    // Now: Published = 4, Consumed = 1, Applied = 0, Pending = 0, Superseded = 3
+    pub = pipeline.paramMailbox().updateCount();
+    con = pipeline.mailboxConsumed();
+    uint64_t app = pipeline.mailboxApplied();
+    pen = pipeline.paramMailbox().pendingUpdatesCount();
+    sup = (pub >= con + pen) ? (pub - con - pen) : 0;
+
+    QCOMPARE(con, uint64_t(1));
+    QCOMPARE(pen, uint64_t(0));
+    QCOMPARE(sup, uint64_t(3));
+    QCOMPARE(pub, con + sup + pen);
+
+    // P1-4-R3-AC-01, AC-02, AC-03:
+    // Consumed <= Published, Applied <= Consumed, unapplied detected when target node not present
+    QVERIFY(con <= pub);
+    QVERIFY(app <= con);
+    QCOMPARE(app, uint64_t(0)); // Unapplied because node is not present in empty pipeline
+    uint64_t unapplied = con - app;
+    QCOMPARE(unapplied, uint64_t(1)); // Diagnosed: 1 update consumed but unapplied
+
+    // 5. Attach master chain with FilterNode and publish update with modified mask
+    auto masterChain = std::make_unique<AudioChain>("Master", ChainPurpose::MasteringChain);
+    masterChain->appendNode(std::make_shared<HighLowPassNode>("Filter"));
+    pipeline.swapMasterChain(std::move(masterChain));
+
+    pipeline.paramMailbox().setFilterParams(200.0f, 4000.0f, 1, 0, true, true);
+    pipeline.process(left.data(), right.data(), frames, out.data(),
+                     desk32::engine::format::SampleFormat::Float32, false);
+
+    // Now: Published = 5, Consumed = 2, Applied = 1 (this new one was applied!), Pending = 0, Superseded = 3
+    pub = pipeline.paramMailbox().updateCount();
+    con = pipeline.mailboxConsumed();
+    app = pipeline.mailboxApplied();
+    pen = pipeline.paramMailbox().pendingUpdatesCount();
+    sup = (pub >= con + pen) ? (pub - con - pen) : 0;
+
+    QCOMPARE(pub, uint64_t(5));
+    QCOMPARE(con, uint64_t(2));
+    QCOMPARE(app, uint64_t(1));
+    QCOMPARE(pen, uint64_t(0));
+    QCOMPARE(sup, uint64_t(3));
+    QCOMPARE(pub, con + sup + pen);
+    QVERIFY(con <= pub);
+    QVERIFY(app <= con);
 }
 
 void TestPhase2Dsp::testDspNodeBypassParameterPreservation() {

@@ -388,6 +388,14 @@ public:
         m_updateCounter.store(0, std::memory_order_relaxed);
     }
 
+    [[nodiscard]] bool hasPendingUpdates() const noexcept {
+        return (m_sharedState.load(std::memory_order_acquire) & DIRTY_FLAG) != 0;
+    }
+
+    [[nodiscard]] uint64_t pendingUpdatesCount() const noexcept {
+        return (m_sharedState.load(std::memory_order_acquire) & DIRTY_FLAG) ? 1 : 0;
+    }
+
     [[nodiscard]] bool isLockFree() const noexcept {
         return m_sharedState.is_lock_free();
     }

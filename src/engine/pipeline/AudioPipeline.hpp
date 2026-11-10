@@ -177,11 +177,15 @@ public:
     [[nodiscard]] uint64_t mailboxApplied() const noexcept {
         return m_mailboxApplied.load(std::memory_order_relaxed);
     }
+    [[nodiscard]] uint64_t mailboxLastConsumedSequence() const noexcept {
+        return m_lastConsumedSequence.load(std::memory_order_relaxed);
+    }
     void resetStatistics() noexcept {
         m_commandsConsumed.store(0, std::memory_order_relaxed);
         m_commandsApplied.store(0, std::memory_order_relaxed);
         m_mailboxConsumed.store(0, std::memory_order_relaxed);
         m_mailboxApplied.store(0, std::memory_order_relaxed);
+        m_lastConsumedSequence.store(0, std::memory_order_relaxed);
         m_paramQueue.resetStatistics();
         m_paramMailbox.resetStatistics();
     }
@@ -445,6 +449,7 @@ private:
             return;
         }
         m_mailboxConsumed.fetch_add(1, std::memory_order_relaxed);
+        m_lastConsumedSequence.store(params.sequenceNumber, std::memory_order_relaxed);
 
         bool appliedAny = false;
         if (master) {
@@ -589,6 +594,7 @@ private:
     alignas(64) std::atomic<uint64_t> m_commandsApplied{0};
     alignas(64) std::atomic<uint64_t> m_mailboxConsumed{0};
     alignas(64) std::atomic<uint64_t> m_mailboxApplied{0};
+    alignas(64) std::atomic<uint64_t> m_lastConsumedSequence{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;
