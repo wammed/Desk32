@@ -250,6 +250,16 @@ public:
         return m_retiredChains.size();
     }
 
+    [[nodiscard]] size_t activeReaders() const noexcept {
+        size_t count = 0;
+        for (size_t i = 0; i < MAX_READERS; ++i) {
+            if (m_slots[i].active.load(std::memory_order_acquire)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
     [[nodiscard]] bool isClosing() const noexcept {
         return m_closing.load(std::memory_order_seq_cst);
     }

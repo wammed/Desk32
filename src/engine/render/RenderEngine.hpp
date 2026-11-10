@@ -12,6 +12,7 @@
 #include <atomic>
 
 #include "WavFileWriter.hpp"
+#include <functional>
 #include "RenderSequenceManager.hpp"
 #include "RenderChain.hpp"
 #include "engine/session/FolderSession.hpp"
@@ -145,8 +146,12 @@ private:
                                          const RenderSettings& settings,
                                          const QString& testOutputDir);
 
+    using StatDevResolver = std::function<bool(const QString& path, dev_t& outDev)>;
+
     /// Validates that output and staging directories are strictly contained in source folder on same filesystem
-    static bool validateOutputContainment(const RenderTaskInfo& task, QString& outError);
+    static bool validateOutputContainment(const RenderTaskInfo& task,
+                                         QString& outError,
+                                         StatDevResolver statDevFn = nullptr);
 
     void workerLoop();
     bool processTask(RenderTaskInfo& task, RenderSequenceManager& seqMgr);

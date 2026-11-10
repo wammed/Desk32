@@ -1113,6 +1113,36 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     QStringList stagingEntries = srcQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
     QCOMPARE(stagingEntries.count(), 0);
 
+    // 5. Verify sequence management and subsequent render are NOT corrupted by the collision
+    RenderSequenceManager seqMgr(m_tempDir->filePath("collision_seq_test.db"));
+    QVERIFY(seqMgr.initialize());
+    QString s1 = seqMgr.allocateNextSerial(sourceDir);
+    QVERIFY(!s1.isEmpty());
+    QString s2 = seqMgr.allocateNextSerial(sourceDir);
+    QVERIFY(!s2.isEmpty());
+    QVERIFY(s1 != s2);
+
+    // Subsequent normal render completes successfully without being blocked by prior collision
+    QSignalSpy spyNextFinished(&engine, &RenderEngine::renderTaskFinished);
+    QString nextTaskId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!nextTaskId.isEmpty());
+
+    QVariantList nextArgs;
+    timer.restart();
+    while (timer.elapsed() < 5000) {
+        for (int i = 0; i < spyNextFinished.count(); ++i) {
+            if (spyNextFinished.at(i).at(0).toString() == nextTaskId) {
+                nextArgs = spyNextFinished.at(i);
+                break;
+            }
+        }
+        if (!nextArgs.isEmpty()) break;
+        spyNextFinished.wait(50);
+    }
+    QVERIFY2(!nextArgs.isEmpty(), "Timed out waiting for subsequent normal renderTaskFinished signal");
+    RenderStatus nextStatus = static_cast<RenderStatus>(nextArgs.at(1).toInt());
+    QCOMPARE(nextStatus, RenderStatus::Completed);
+
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         QTest::qWait(10);
     }
@@ -1263,20 +1293,166 @@ void TestPhase4ExportRender::testRenderSymlinkTraversalOutsideSourceFolderReject
 
 void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
 {
-    // A-T08: Verify that staging and final output directory are verified to reside on the same filesystem
-    // as the source folder (st_dev comparison).
-    QString sourceDir = m_tempDir->filePath("fs_test_src");
+    // A-T08: Substantive verification of RenderEngine::validateOutputContainment
+    // Exercises all containment invariant checks: source folder canonical containment, staging containment,
+    // symlink rejection, source file overwrite prevention, track file name collision prevention,
+    // and POSIX filesystem boundary (st_dev) enforcement.
+
+    QString sourceDir = m_tempDir->filePath("containment_substantive_src");
     QDir().mkpath(sourceDir);
+    QString trackFile = "audio_track_01.wav";
+    QString sourcePath = sourceDir + "/" + trackFile;
+    QVERIFY(createTestWav(sourcePath, 48000.0, 4800, 440.0));
 
-    struct stat stSource{}, stParent{};
-    QVERIFY(stat(sourceDir.toLocal8Bit().constData(), &stSource) == 0);
+    QString canonicalSource = QFileInfo(sourceDir).canonicalFilePath();
+    QVERIFY(!canonicalSource.isEmpty());
 
-    QString simulatedOutputDir = sourceDir + "/A_20261110_120000";
-    QFileInfo outInfo(simulatedOutputDir);
-    QString parentPath = outInfo.dir().canonicalPath();
-    QVERIFY(stat(parentPath.toLocal8Bit().constData(), &stParent) == 0);
+    RenderTaskInfo baseTask;
+    baseTask.taskId = "containment_test_task";
+    baseTask.sourceFolder = sourceDir;
+    baseTask.sourcePath = sourcePath;
+    baseTask.trackFiles.append(trackFile);
+    baseTask.finalOutputDir = sourceDir + "/A20261110_120000_123";
+    baseTask.stagingDir = sourceDir + "/.desk32_staging_A20261110_120000_123";
 
-    QCOMPARE(stSource.st_dev, stParent.st_dev);
+    QString err;
+
+    // 1. Valid task: output and staging strictly inside source folder on same filesystem
+    QVERIFY2(RenderEngine::validateOutputContainment(baseTask, err), qPrintable(err));
+    QVERIFY(err.isEmpty());
+
+    // 2. Output directory escapes source folder (parent is outside source directory)
+    {
+        RenderTaskInfo task = baseTask;
+        QString outsideDir = m_tempDir->filePath("outside_containment_dir");
+        QDir().mkpath(outsideDir);
+        task.finalOutputDir = outsideDir + "/A20261110_120000_123";
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("escapes original sound source directory"), qPrintable(err));
+    }
+
+    // 3. Staging directory escapes source folder
+    {
+        RenderTaskInfo task = baseTask;
+        QString outsideDir = m_tempDir->filePath("outside_staging_dir");
+        QDir().mkpath(outsideDir);
+        task.stagingDir = outsideDir + "/.desk32_staging_A20261110_120000_123";
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("escapes original sound source directory"), qPrintable(err));
+    }
+
+    // 4. Output directory points directly to original sound source file (overwriting prevention)
+    {
+        RenderTaskInfo task = baseTask;
+        task.finalOutputDir = sourcePath;
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("conflicts with original sound source file"), qPrintable(err));
+    }
+
+    // 5. Output directory name matches one of the track files
+    {
+        RenderTaskInfo task = baseTask;
+        task.finalOutputDir = sourceDir + "/" + trackFile;
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+        QVERIFY2(err.contains("matches original sound source file") || err.contains("conflicts with original sound source file"),
+                 qPrintable(err));
+    }
+
+    // 6. Output directory path contains or is a symbolic link
+    {
+        RenderTaskInfo task = baseTask;
+        QString symlinkDir = sourceDir + "/symlink_out";
+        QString targetDir = m_tempDir->filePath("symlink_target");
+        QDir().mkpath(targetDir);
+        if (QFile::link(targetDir, symlinkDir)) {
+            task.finalOutputDir = symlinkDir;
+            QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+            QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
+        }
+    }
+
+    // 7. Staging directory path contains or is a symbolic link
+    {
+        RenderTaskInfo task = baseTask;
+        QString symlinkStaging = sourceDir + "/symlink_staging";
+        QString stagingTarget = m_tempDir->filePath("staging_target");
+        QDir().mkpath(stagingTarget);
+        if (QFile::link(stagingTarget, symlinkStaging)) {
+            task.stagingDir = symlinkStaging;
+            QVERIFY(!RenderEngine::validateOutputContainment(task, err));
+            QVERIFY2(err.contains("symbolic link") || err.contains("escapes"), qPrintable(err));
+        }
+    }
+
+    // 8. Filesystem boundary enforcement via StatDevResolver:
+    // When st_dev of output parent differs from source folder (simulating cross-filesystem / mount point escape)
+    {
+        RenderTaskInfo task = baseTask;
+        int callIndex = 0;
+        auto mismatchResolver = [&](const QString& /*path*/, dev_t& outDev) -> bool {
+            if (++callIndex == 1) {
+                outDev = 1001; // Mock device A for source
+                return true;
+            } else {
+                outDev = 2002; // Mock device B for output (different filesystem)
+                return true;
+            }
+        };
+        QVERIFY(!RenderEngine::validateOutputContainment(task, err, mismatchResolver));
+        QVERIFY2(err.contains("same filesystem as source"), qPrintable(err));
+    }
+
+    // 9. When StatDevResolver returns matching st_dev
+    {
+        RenderTaskInfo task = baseTask;
+        auto matchingResolver = [&](const QString& /*path*/, dev_t& outDev) -> bool {
+            outDev = 1001; // Same mock device
+            return true;
+        };
+        QVERIFY2(RenderEngine::validateOutputContainment(task, err, matchingResolver), qPrintable(err));
+    }
+
+    // 10. Verify actual paths generated by real RenderEngine during render process satisfy containment
+    RenderEngine& engine = RenderEngine::instance();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+
+    RenderSettings settings;
+    QSignalSpy spyStarted(&engine, &RenderEngine::renderTaskStarted);
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueTrackRender(sourcePath, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000) {
+        if (spyFinished.count() > 0) break;
+        spyFinished.wait(50);
+    }
+    QVERIFY2(spyFinished.count() > 0, "Timed out waiting for renderTaskFinished");
+
+    // Retrieve finished task
+    QVariantList args = spyFinished.takeFirst();
+    RenderStatus status = static_cast<RenderStatus>(args.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Completed);
+    QString outputFolder = args.at(2).toString();
+    QVERIFY(!outputFolder.isEmpty());
+
+    // Verify output directory strictly satisfies containment
+    RenderTaskInfo generatedTask;
+    generatedTask.sourceFolder = sourceDir;
+    generatedTask.sourcePath = sourcePath;
+    generatedTask.trackFiles.append(trackFile);
+    generatedTask.finalOutputDir = outputFolder;
+    generatedTask.stagingDir = sourceDir + "/.desk32_staging_test";
+    QVERIFY2(RenderEngine::validateOutputContainment(generatedTask, err), qPrintable(err));
+
+    // Verify parent of outputFolder is canonicalSource
+    QFileInfo outGenInfo(outputFolder);
+    QCOMPARE(QDir::cleanPath(outGenInfo.dir().canonicalPath()), QDir::cleanPath(canonicalSource));
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

@@ -1,6 +1,7 @@
 #include <QTest>
 #include <QObject>
-#include <latch>
+#include <condition_variable>
+#include <mutex>
 #include <chrono>
 #include <cstdlib>
 #include <atomic>
@@ -54,6 +55,49 @@ struct RtAllocationTracker {
 
     [[nodiscard]] size_t totalDeallocations() const noexcept {
         return opDeleteCount.load() + opDeleteArrayCount.load() + cFreeCount.load();
+    }
+};
+
+/// Deterministic, bounded-timeout synchronization helper for test threads (eliminates unbounded latch/wait)
+struct TimedGate {
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool signaled{false};
+
+    void open() {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            signaled = true;
+        }
+        cv.notify_all();
+    }
+
+    bool waitUntilOpen(std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+        std::unique_lock<std::mutex> lock(mtx);
+        return cv.wait_for(lock, timeout, [this]() { return signaled; });
+    }
+};
+
+/// Deterministic, bounded-timeout barrier for multi-thread test rendezvous
+struct TimedBarrier {
+    std::mutex mtx;
+    std::condition_variable cv;
+    const size_t totalThreads;
+    size_t arrived{0};
+    size_t generation{0};
+
+    explicit TimedBarrier(size_t threads) : totalThreads(threads) {}
+
+    bool arrive_and_wait(std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+        std::unique_lock<std::mutex> lock(mtx);
+        size_t gen = generation;
+        if (++arrived == totalThreads) {
+            arrived = 0;
+            ++generation;
+            cv.notify_all();
+            return true;
+        }
+        return cv.wait_for(lock, timeout, [this, gen]() { return generation != gen; });
     }
 };
 
@@ -740,65 +784,75 @@ void TestAudioPipeline::testSampleRateChangeConcurrentWithTelemetry()
 void TestAudioPipeline::testShutdownWaitsForActiveReaders()
 {
     // P0-13, P0-20: drainAll() must wait until an active reader completes reading before destroying
-    // Strictly ZERO sleep_for() reliance: Deterministic synchronization via std::latch
+    // Deterministic synchronization with bounded timeout gates and guaranteed thread cleanup before assertions
     auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
     reclaimer->swapChain(std::make_unique<std::string>("ProtectedString"));
 
-    std::latch readerInsideLatch(1);
-    std::latch drainStartedLatch(1);
-    std::atomic<bool> releaseReader{false};
+    TimedGate readerHoldingGate;
+    TimedGate releaseReaderGate;
+    std::atomic<bool> readerValid{false};
     std::atomic<bool> readerDone{false};
     std::atomic<bool> drained{false};
 
     std::thread readerThread([&]() {
         auto guard = reclaimer->enterRead();
-        QVERIFY(guard.chain != nullptr);
-        QCOMPARE(*guard.chain, std::string("ProtectedString"));
+        if (guard.isValid() && guard.chain != nullptr && *guard.chain == "ProtectedString") {
+            readerValid.store(true, std::memory_order_release);
+        }
 
         // Signal that reader has acquired guard and is inside the protected epoch
-        readerInsideLatch.count_down();
+        readerHoldingGate.open();
 
-        // Wait until drainThread has entered drainAll() and is actively waiting for this reader (bounded timeout B-1, B-2)
-        drainStartedLatch.wait();
-        const auto readerTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!releaseReader.load(std::memory_order_acquire)) {
-            if (std::chrono::steady_clock::now() >= readerTimeout) {
-                break;
-            }
-            std::this_thread::yield();
-        }
+        // Wait until test signals that drainAll is waiting, bounded by 5s timeout
+        releaseReaderGate.waitUntilOpen(std::chrono::seconds(5));
 
         // Reader completes reading; guard will be destroyed upon function return
         readerDone.store(true, std::memory_order_release);
     });
 
-    // 1. Wait until readerThread has entered the epoch read guard
-    readerInsideLatch.wait();
+    // 1. Wait with timeout until readerThread has entered the epoch read guard
+    bool readerAcquiredInTime = readerHoldingGate.waitUntilOpen(std::chrono::seconds(5));
+    bool readerHoldingConfirmed = (reclaimer->activeReaders() > 0);
 
     std::thread drainThread([&]() {
-        // Signal that drainThread is starting drainAll()
-        drainStartedLatch.count_down();
         reclaimer->drainAll();
         drained.store(true, std::memory_order_release);
     });
 
-    // 2. Wait until drainThread has called count_down() and entered drainAll()
-    drainStartedLatch.wait();
-
-    // 3. Verify that drainThread is strictly BLOCKED waiting for the active reader
-    for (int i = 0; i < 50; ++i) {
-        QVERIFY(!drained.load(std::memory_order_acquire));
+    // 2. Wait with timeout until drainThread enters the active reader wait loop (isWaitingForReaders() == true)
+    bool drainWaitingConfirmed = false;
+    const auto drainWaitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < drainWaitDeadline) {
+        if (reclaimer->isWaitingForReaders()) {
+            drainWaitingConfirmed = true;
+            break;
+        }
         std::this_thread::yield();
     }
 
-    // 4. Now release the readerThread to exit its read guard
-    releaseReader.store(true, std::memory_order_release);
+    // 3. Record whether drainThread is blocked waiting for the active reader
+    bool drainBlockedWhileHeld = !drained.load(std::memory_order_acquire);
 
-    drainThread.join();
-    readerThread.join();
+    // 4. Always release reader and join ALL threads before any assertions
+    releaseReaderGate.open();
 
+    if (drainThread.joinable()) {
+        drainThread.join();
+    }
+    if (readerThread.joinable()) {
+        readerThread.join();
+    }
+
+    // 5. Assertions executed strictly AFTER all threads have joined
+    QVERIFY2(readerAcquiredInTime, "Timed out waiting for reader to enter read guard");
+    QVERIFY(readerValid.load());
+    QVERIFY(readerHoldingConfirmed);
+    QVERIFY2(drainWaitingConfirmed, "Timed out waiting for drainAll to enter waiting-for-readers state");
+    QVERIFY(drainBlockedWhileHeld);
     QVERIFY(readerDone.load());
     QVERIFY(drained.load());
+    QVERIFY(reclaimer->isClosing());
+    QCOMPARE(reclaimer->retiredCount(), 0u);
 }
 
 void TestAudioPipeline::testReaderSlotExhaustionRejectsUnshieldedPointer()
@@ -1053,6 +1107,7 @@ void TestAudioPipeline::testEpochReclaimerShutdownConcurrentSafety()
     std::atomic<bool> stopReaders{false};
     std::atomic<uint64_t> successfulReads{0};
     std::atomic<uint64_t> rejectedReads{0};
+    std::atomic<bool> unexpectedNonNullOnReject{false};
 
     // 4 concurrent reader threads attempting enterRead() before, during, and after drainAll()
     std::vector<std::thread> readers;
@@ -1067,34 +1122,45 @@ void TestAudioPipeline::testEpochReclaimerShutdownConcurrentSafety()
                     (void)len;
                 } else {
                     rejectedReads.fetch_add(1, std::memory_order_relaxed);
-                    QVERIFY(guard.chain == nullptr);
+                    if (guard.chain != nullptr) {
+                        unexpectedNonNullOnReject.store(true, std::memory_order_relaxed);
+                    }
                 }
                 std::this_thread::yield();
             }
         });
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Wait until readers have completed some initial reads
+    const auto readDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (successfulReads.load(std::memory_order_relaxed) < 20) {
+        if (std::chrono::steady_clock::now() >= readDeadline) break;
+        std::this_thread::yield();
+    }
 
     // Shutdown while readers are vigorously querying
     reclaimer->drainAll();
-    QVERIFY(reclaimer->isClosing());
+    bool isClosingAfterDrain = reclaimer->isClosing();
 
     // Subsequent enterRead() MUST strictly reject
     auto postGuard = reclaimer->enterRead();
-    QVERIFY(!postGuard.isValid());
-    QVERIFY(postGuard.chain == nullptr);
+    bool postGuardInvalid = (!postGuard.isValid() && postGuard.chain == nullptr);
 
     // swapChain on closed reclaimer is a safe no-op
     reclaimer->swapChain(std::make_unique<std::string>("ShouldBeIgnored"));
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Signal readers to stop and join all threads BEFORE assertions
     stopReaders.store(true, std::memory_order_relaxed);
-
     for (auto& t : readers) {
-        t.join();
+        if (t.joinable()) {
+            t.join();
+        }
     }
 
+    // Assertions strictly AFTER joining all reader threads
+    QVERIFY(isClosingAfterDrain);
+    QVERIFY(postGuardInvalid);
+    QVERIFY(!unexpectedNonNullOnReject.load());
     QVERIFY(successfulReads.load() > 0);
     QVERIFY(rejectedReads.load() > 0);
 }
@@ -1143,29 +1209,42 @@ void TestAudioPipeline::testEpochReclaimerWriterShutdownSerialization()
         });
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    // Wait until some initial swaps and reads occur
+    const auto workDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (successfulSwaps.load(std::memory_order_relaxed) < 20 || successfulReads.load(std::memory_order_relaxed) < 20) {
+        if (std::chrono::steady_clock::now() >= workDeadline) break;
+        std::this_thread::yield();
+    }
 
     // Shutdown while writers and readers are actively working
     reclaimer->drainAll();
-    QVERIFY(reclaimer->isClosing());
+    bool isClosingAfterDrain = reclaimer->isClosing();
 
     // Subsequent swapChain MUST be rejected
     auto lateChain = std::make_unique<std::string>("LateChain");
     bool swapResult = reclaimer->swapChain(std::move(lateChain));
-    QVERIFY(!swapResult);
 
     // All retired objects MUST be cleaned up
-    QCOMPARE(reclaimer->retiredCount(), 0u);
+    size_t retiredCountAfterClose = reclaimer->retiredCount();
 
     // Subsequent enterRead() MUST return nullptr
     auto postGuard = reclaimer->enterRead();
-    QVERIFY(!postGuard.isValid());
-    QVERIFY(postGuard.chain == nullptr);
+    bool postGuardInvalid = (!postGuard.isValid() && postGuard.chain == nullptr);
 
+    // Stop workers and join ALL threads BEFORE assertions
     stopWorkers.store(true, std::memory_order_relaxed);
-    for (auto& w : writers) w.join();
-    for (auto& r : readers) r.join();
+    for (auto& w : writers) {
+        if (w.joinable()) w.join();
+    }
+    for (auto& r : readers) {
+        if (r.joinable()) r.join();
+    }
 
+    // Assertions strictly AFTER all threads have joined
+    QVERIFY(isClosingAfterDrain);
+    QVERIFY(!swapResult);
+    QCOMPARE(retiredCountAfterClose, 0u);
+    QVERIFY(postGuardInvalid);
     QVERIFY(successfulSwaps.load() > 0);
     QVERIFY(rejectedSwaps.load() > 0);
     QVERIFY(successfulReads.load() > 0);
@@ -1180,21 +1259,21 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         EpochReclaimer<std::string> reclaimer;
         reclaimer.swapChain(std::make_unique<std::string>("Initial"));
 
-        std::latch syncPoint(2);
+        TimedBarrier syncPoint(2);
         std::atomic<bool> swapOutcome{false};
 
         std::thread writerThread([&]() {
-            syncPoint.arrive_and_wait();
+            syncPoint.arrive_and_wait(std::chrono::seconds(5));
             swapOutcome.store(reclaimer.swapChain(std::make_unique<std::string>("FromWriter")));
         });
 
         std::thread shutdownThread([&]() {
-            syncPoint.arrive_and_wait();
+            syncPoint.arrive_and_wait(std::chrono::seconds(5));
             reclaimer.drainAll();
         });
 
-        writerThread.join();
-        shutdownThread.join();
+        if (writerThread.joinable()) writerThread.join();
+        if (shutdownThread.joinable()) shutdownThread.join();
 
         QVERIFY(reclaimer.isClosing());
         QCOMPARE(reclaimer.retiredCount(), 0u);
@@ -1205,58 +1284,72 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         EpochReclaimer<std::string> reclaimer;
         reclaimer.swapChain(std::make_unique<std::string>("ReaderActiveChain"));
 
-        std::latch readerHolding(1);
-        std::atomic<bool> releaseReader{false};
+        TimedGate readerHoldingGate;
+        TimedGate releaseReaderGate;
+        std::atomic<bool> readerValid{false};
         std::atomic<bool> readerFinished{false};
         std::atomic<bool> drainDone{false};
 
         std::thread readerThread([&]() {
             auto guard = reclaimer.enterRead();
-            QVERIFY(guard.isValid() && guard.chain != nullptr);
-            QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
-            readerHolding.count_down();
-
-            // Wait deterministically for Shutdown drainAll to reach the waiting loop (bounded timeout B-1, B-2)
-            const auto readerTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!releaseReader.load(std::memory_order_acquire)) {
-                if (std::chrono::steady_clock::now() >= readerTimeout) {
-                    break;
-                }
-                std::this_thread::yield();
+            if (guard.isValid() && guard.chain != nullptr && *guard.chain == "ReaderActiveChain") {
+                readerValid.store(true, std::memory_order_release);
             }
+            readerHoldingGate.open();
+
+            // Wait deterministically for Shutdown drainAll to reach the waiting loop (bounded timeout 5s)
+            releaseReaderGate.waitUntilOpen(std::chrono::seconds(5));
+
             // Verify data is still intact (never prematurely freed)
-            QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
-            readerFinished.store(true, std::memory_order_release);
+            if (guard.isValid() && guard.chain != nullptr && *guard.chain == "ReaderActiveChain") {
+                readerFinished.store(true, std::memory_order_release);
+            }
         });
 
-        readerHolding.wait();
-        // Retire the chain that reader is observing
-        reclaimer.swapChain(std::make_unique<std::string>("NewerChain"));
+        // 1. Wait with timeout until Reader holds guard
+        bool readerHeldInTime = readerHoldingGate.waitUntilOpen(std::chrono::seconds(5));
+        bool readerHoldingConfirmed = (reclaimer.activeReaders() > 0);
 
-        // Launch drainAll which MUST block waiting for readerThread to finish
+        // Retire the chain that reader is observing
+        bool swapOk = reclaimer.swapChain(std::make_unique<std::string>("NewerChain"));
+
+        // 2. Launch drainAll in drainThread which MUST block waiting for readerThread to finish
         std::thread drainThread([&]() {
             reclaimer.drainAll();
             drainDone.store(true, std::memory_order_release);
         });
 
-        // Deterministically wait for drainAll to enter its active reader wait loop (bounded timeout B-1, B-2)
+        // 3. Deterministically wait for drainAll to enter its active reader wait loop with bounded timeout
+        bool enteredWaitingInTime = false;
         const auto waitTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while (!reclaimer.isWaitingForReaders()) {
-            if (std::chrono::steady_clock::now() >= waitTimeout) {
+        while (std::chrono::steady_clock::now() < waitTimeout) {
+            if (reclaimer.isWaitingForReaders()) {
+                enteredWaitingInTime = true;
                 break;
             }
             std::this_thread::yield();
         }
 
-        // While reader has not finished, drainAll must NOT have completed
-        QVERIFY(!drainDone.load(std::memory_order_acquire));
+        // 4. Record whether drain was still blocked while reader is held
+        bool drainBlockedWhileHeld = !drainDone.load(std::memory_order_acquire);
 
-        // Signal reader to finish and release its guard
-        releaseReader.store(true, std::memory_order_release);
+        // 5. Always release reader and join ALL threads BEFORE assertions
+        releaseReaderGate.open();
 
-        readerThread.join();
-        drainThread.join();
+        if (readerThread.joinable()) {
+            readerThread.join();
+        }
+        if (drainThread.joinable()) {
+            drainThread.join();
+        }
 
+        // 6. Assertions strictly AFTER all threads have joined
+        QVERIFY2(readerHeldInTime, "Timed out waiting for reader to hold guard in Case B");
+        QVERIFY(readerValid.load());
+        QVERIFY(readerHoldingConfirmed);
+        QVERIFY(swapOk);
+        QVERIFY2(enteredWaitingInTime, "Timed out waiting for reclaimer.isWaitingForReaders() in Case B");
+        QVERIFY(drainBlockedWhileHeld);
         QVERIFY(readerFinished.load());
         QVERIFY(drainDone.load());
         QVERIFY(reclaimer.isClosing());
@@ -1286,7 +1379,7 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         reclaimer.swapChain(std::make_unique<std::string>("InitialD"));
 
         const int numWriters = 4;
-        std::latch syncAll(numWriters + 1);
+        TimedBarrier syncAll(numWriters + 1);
 
         std::vector<std::thread> writers;
         std::atomic<int> successCount{0};
@@ -1294,7 +1387,7 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
 
         for (int i = 0; i < numWriters; ++i) {
             writers.emplace_back([&, i]() {
-                syncAll.arrive_and_wait();
+                syncAll.arrive_and_wait(std::chrono::seconds(5));
                 bool ok = reclaimer.swapChain(std::make_unique<std::string>("Chain_D_" + std::to_string(i)));
                 if (ok) {
                     successCount.fetch_add(1, std::memory_order_relaxed);
@@ -1305,12 +1398,14 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         }
 
         std::thread drainThread([&]() {
-            syncAll.arrive_and_wait();
+            syncAll.arrive_and_wait(std::chrono::seconds(5));
             reclaimer.drainAll();
         });
 
-        for (auto& w : writers) w.join();
-        drainThread.join();
+        for (auto& w : writers) {
+            if (w.joinable()) w.join();
+        }
+        if (drainThread.joinable()) drainThread.join();
 
         QVERIFY(reclaimer.isClosing());
         QCOMPARE(reclaimer.retiredCount(), 0u);
@@ -1321,66 +1416,94 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
 void TestAudioPipeline::testEpochReclaimerTimeoutSafetyAndThreadCleanup()
 {
     // B-T03, B-T04, B-T05, B-T06: Verification of timeout safety, thread joining, and shared object lifetime
-    // Simulates a reader thread that does not advance its cycle count, verifying finite timeout,
-    // guaranteed thread joining, and safe memory reclamation with zero hanging or leak.
+    // under prolonged Reader Guard holding.
+    // Recommended 10-step verification:
+    // 1. Reader thread acquires guard (enterRead()).
+    // 2. Guard is held while waiting for release signal with finite deadline.
+    // 3. Test verifies Reader is holding guard (activeReaders() > 0).
+    // 4. In that state, start EpochReclaimer shutdown (drainAll()) in drainThread.
+    // 5. Verify shutdown blocks waiting for the active reader.
+    // 6. Verify waiting state with bounded timeout (isWaitingForReaders() == true).
+    // 7. Signal reader to release guard.
+    // 8. Reader thread completes and exits.
+    // 9. All threads joined before ANY assertion.
+    // 10. Run assertions strictly after threads are joined.
+
     auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
     reclaimer->swapChain(std::make_unique<std::string>("InitialProtectedString"));
 
-    std::atomic<bool> stopReader{false};
-    std::atomic<uint64_t> readCycles{0};
-    std::atomic<bool> readerStarted{false};
+    TimedGate readerHoldingGate;
+    TimedGate releaseReaderGate;
+    std::atomic<bool> readerAcquired{false};
+    std::atomic<bool> readerGuardValid{false};
+    std::atomic<bool> readerCompleted{false};
+    std::atomic<bool> drainDone{false};
 
-    // Reader thread simulates a stalled condition (does not increment readCycles)
+    // 1 & 2. Reader thread acquires Guard and holds it until released by test
     std::thread readerThread([&]() {
-        readerStarted.store(true, std::memory_order_release);
-        while (!stopReader.load(std::memory_order_relaxed)) {
-            // Actively observing epoch without advancing cycle count (simulating stall/block)
-            auto guard = reclaimer->enterRead();
-            if (guard.chain) {
-                volatile size_t sz = guard.chain->size();
-                (void)sz;
-            }
-            std::this_thread::yield();
+        auto guard = reclaimer->enterRead();
+        if (guard.isValid() && guard.chain != nullptr && *guard.chain == "InitialProtectedString") {
+            readerGuardValid.store(true, std::memory_order_release);
+        }
+        readerAcquired.store(true, std::memory_order_release);
+        readerHoldingGate.open();
+
+        // Hold the guard while waiting for test release signal, bounded by finite 5s timeout
+        releaseReaderGate.waitUntilOpen(std::chrono::seconds(5));
+
+        // Verify guard was intact while held
+        if (guard.isValid() && guard.chain != nullptr && *guard.chain == "InitialProtectedString") {
+            readerCompleted.store(true, std::memory_order_release);
         }
     });
 
-    // Wait until reader thread actually starts
-    const auto startTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!readerStarted.load(std::memory_order_acquire)) {
-        if (std::chrono::steady_clock::now() >= startTimeout) break;
-        std::this_thread::yield();
-    }
-    QVERIFY(readerStarted.load());
+    // 3. Verify reader acquired and is actively holding Guard (activeReaders() > 0)
+    bool readerAcquiredInTime = readerHoldingGate.waitUntilOpen(std::chrono::seconds(5));
+    bool readerHoldingConfirmed = (reclaimer->activeReaders() > 0);
 
-    // 1. Verify finite timeout detection (B-T03)
-    const auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-    bool targetReached = false;
-    while (std::chrono::steady_clock::now() < timeoutDeadline) {
-        if (readCycles.load(std::memory_order_relaxed) >= 100) {
-            targetReached = true;
+    // 4. Start EpochReclaimer shutdown in drainThread while Reader is still holding guard
+    std::thread drainThread([&]() {
+        reclaimer->drainAll();
+        drainDone.store(true, std::memory_order_release);
+    });
+
+    // 5 & 6. Verify shutdown waits for reader with bounded timeout
+    bool isWaitingConfirmed = false;
+    const auto waitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < waitDeadline) {
+        if (reclaimer->isWaitingForReaders()) {
+            isWaitingConfirmed = true;
             break;
         }
         std::this_thread::yield();
     }
+    bool drainBlockedWhileHeld = !drainDone.load(std::memory_order_acquire);
 
-    // Must have timed out because reader was stalled
-    QVERIFY(!targetReached);
+    // 7. Test signals reader to release guard
+    releaseReaderGate.open();
 
-    // 2. Guaranteed thread stop and cleanup even when timed out (B-T04)
-    stopReader.store(true, std::memory_order_relaxed);
-    QVERIFY(readerThread.joinable());
-    readerThread.join();
+    // 8 & 9. Join ALL threads before any assertions
+    if (readerThread.joinable()) {
+        readerThread.join();
+    }
+    if (drainThread.joinable()) {
+        drainThread.join();
+    }
 
-    // 3. Shared object lifetime validation (B-T05):
-    // Reclaimer must still be 100% valid, intact, and safe to drain/reclaim
-    reclaimer->swapChain(std::make_unique<std::string>("PostTimeoutChain"));
-    reclaimer->reclaimRetired();
+    // 10. Run assertions strictly after threads are joined
+    QVERIFY2(readerAcquiredInTime, "Timed out waiting for reader thread to enter read guard");
+    QVERIFY(readerAcquired.load());
+    QVERIFY(readerGuardValid.load());
+    QVERIFY(readerHoldingConfirmed);
+    QVERIFY2(isWaitingConfirmed, "Timed out waiting for reclaimer to enter isWaitingForReaders state");
+    QVERIFY(drainBlockedWhileHeld);
+    QVERIFY(readerCompleted.load());
+    QVERIFY(drainDone.load());
+    QVERIFY(reclaimer->isClosing());
     QCOMPARE(reclaimer->retiredCount(), 0u);
 
-    // Drain all and destroy safely
-    reclaimer->drainAll();
-    QVERIFY(reclaimer->isClosing());
-    reclaimer.reset(); // Safe destruction without use-after-free
+    // Verify shared object safe cleanup and reclamation
+    reclaimer.reset();
 }
 
 void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
@@ -1480,8 +1603,10 @@ void TestAudioPipeline::testRealTimeSafetyInLivePipeline()
         std::this_thread::yield();
     }
 
-    // Ensure audio thread renders at least 50 blocks
+    // Ensure audio thread renders at least 50 blocks with bounded timeout
+    const auto blockDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (blocksRendered.load(std::memory_order_relaxed) < 50) {
+        if (std::chrono::steady_clock::now() >= blockDeadline) break;
         std::this_thread::yield();
     }
 

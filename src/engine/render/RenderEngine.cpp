@@ -106,7 +106,9 @@ bool RenderEngine::validatePreflight(const QString& sourceFolder, qint64 require
     return true;
 }
 
-bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task, QString& outError) {
+bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task,
+                                            QString& outError,
+                                            StatDevResolver statDevFn) {
     if (task.sourceFolder.isEmpty() || task.finalOutputDir.isEmpty()) {
         outError = "Source folder or output directory path is empty.";
         return false;
@@ -157,7 +159,7 @@ bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task, QString
     }
 
     // 4. Output directory must not be a symlink
-    if (outDirInfo.isSymLink()) {
+    if (outDirInfo.isSymLink() || QFileInfo(outDirInfo.dir().absolutePath()).isSymLink()) {
         outError = QString("Output directory cannot be a symbolic link: %1").arg(task.finalOutputDir);
         return false;
     }
@@ -172,25 +174,42 @@ bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task, QString
                            .arg(task.stagingDir, task.sourceFolder);
             return false;
         }
-        if (stagingInfo.isSymLink()) {
+        if (stagingInfo.isSymLink() || QFileInfo(stagingInfo.dir().absolutePath()).isSymLink()) {
             outError = QString("Staging directory cannot be a symbolic link: %1").arg(task.stagingDir);
             return false;
         }
     }
 
     // 6. Verify same filesystem (stat st_dev match between source folder and output parent)
-    struct stat stSource{}, stParent{};
-    if (stat(canonicalSource.toLocal8Bit().constData(), &stSource) != 0) {
-        outError = QString("Failed to stat source directory: %1").arg(canonicalSource);
-        return false;
+    dev_t sourceDev = 0;
+    dev_t parentDev = 0;
+
+    if (statDevFn) {
+        if (!statDevFn(canonicalSource, sourceDev)) {
+            outError = QString("Failed to resolve device for source directory: %1").arg(canonicalSource);
+            return false;
+        }
+        if (!statDevFn(canonicalParent, parentDev)) {
+            outError = QString("Failed to resolve device for output parent directory: %1").arg(canonicalParent);
+            return false;
+        }
+    } else {
+        struct stat stSource{}, stParent{};
+        if (stat(canonicalSource.toLocal8Bit().constData(), &stSource) != 0) {
+            outError = QString("Failed to stat source directory: %1").arg(canonicalSource);
+            return false;
+        }
+        if (stat(canonicalParent.toLocal8Bit().constData(), &stParent) != 0) {
+            outError = QString("Failed to stat output parent directory: %1").arg(canonicalParent);
+            return false;
+        }
+        sourceDev = stSource.st_dev;
+        parentDev = stParent.st_dev;
     }
-    if (stat(canonicalParent.toLocal8Bit().constData(), &stParent) != 0) {
-        outError = QString("Failed to stat output parent directory: %1").arg(canonicalParent);
-        return false;
-    }
-    if (stSource.st_dev != stParent.st_dev) {
+
+    if (sourceDev != parentDev) {
         outError = QString("Staging and output directories must reside on the same filesystem as source: "
-                           "source dev=%1, parent dev=%2").arg(stSource.st_dev).arg(stParent.st_dev);
+                           "source dev=%1, parent dev=%2").arg(sourceDev).arg(parentDev);
         return false;
     }
 
