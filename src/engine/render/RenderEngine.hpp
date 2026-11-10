@@ -114,8 +114,8 @@ public:
     /// Capture an immutable DSP snapshot from live template chain (P0-03)
     [[nodiscard]] RenderDspSnapshot captureTemplateSnapshot() const;
 
-    /// Queue a single track render task
-    QString enqueueTrackRender(const QString& trackPath, const RenderSettings& settings = RenderSettings());
+    /// Queue a single track render task (optional explicit output directory)
+    QString enqueueTrackRender(const QString& trackPath, const RenderSettings& settings = RenderSettings(), const QString& explicitOutputDir = QString());
 
     /// Queue an album render task (all audio files in folder in natural sort order)
     QString enqueueAlbumRender(const QString& folderPath, const RenderSettings& settings = RenderSettings());

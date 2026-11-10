@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QThread>
 #include <QDebug>
+#include <QSet>
 #include <array>
 #include <algorithm>
 
@@ -104,7 +105,7 @@ bool RenderEngine::validatePreflight(const QString& sourceFolder, qint64 require
     return true;
 }
 
-QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderSettings& settings) {
+QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderSettings& settings, const QString& explicitOutputDir) {
     QFileInfo fi(trackPath);
     if (!fi.exists() || !fi.isFile()) {
         qWarning() << "RenderEngine: track file does not exist:" << trackPath;
@@ -121,6 +122,9 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
     task.settings = settings;
     task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
+    if (!explicitOutputDir.isEmpty()) {
+        task.finalOutputDir = explicitOutputDir;
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -338,6 +342,26 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         return false;
     }
 
+    // P1-RND-01: In Album Render, detect duplicate output base names upfront to prevent overwriting
+    if (task.type == RenderType::Album && task.trackFiles.size() > 1) {
+        QSet<QString> seenBaseNames;
+        for (const auto& f : task.trackFiles) {
+            QString baseName = QFileInfo(f).completeBaseName();
+            if (seenBaseNames.contains(baseName)) {
+                task.status = RenderStatus::Failed;
+                task.errorMessage = QString("Duplicate output track base name detected in album: '%1.wav'. "
+                                            "Render aborted to prevent data overwrite.")
+                                        .arg(baseName);
+                core::log::LogService::instance().log(
+                    "Render", "AlbumRender", "Failed", task.errorMessage, "AudioFile", task.sourceFolder, "{}",
+                    parentOpId, ""
+                );
+                return false;
+            }
+            seenBaseNames.insert(baseName);
+        }
+    }
+
     // 2. Allocate non-reusable serial letter via worker-owned manager (P0-01, P0-02)
     task.serial = seqMgr.allocateNextSerial(task.sourceFolder);
     if (task.serial.isEmpty()) {
@@ -353,8 +377,38 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     QDateTime now = QDateTime::currentDateTime();
     QString folderSuffix = RenderSequenceManager::formatFolderName(task.serial, now);
 
-    task.stagingDir = task.sourceFolder + "/.desk32_staging_" + folderSuffix;
-    task.finalOutputDir = task.sourceFolder + "/" + folderSuffix;
+    if (task.stagingDir.isEmpty()) {
+        task.stagingDir = task.sourceFolder + "/.desk32_staging_" + folderSuffix;
+    }
+    if (task.finalOutputDir.isEmpty()) {
+        task.finalOutputDir = task.sourceFolder + "/" + folderSuffix;
+    }
+
+    // P2-RND-02: Pre-flight check for final output directory collision (never overwrite or touch existing)
+    if (QFileInfo::exists(task.finalOutputDir)) {
+        task.status = RenderStatus::Failed;
+        task.errorMessage = QString("Final output directory already exists: %1. "
+                                    "Render aborted to prevent collision with existing data.")
+                                .arg(task.finalOutputDir);
+        core::log::LogService::instance().log(
+            "Render", "Preflight", "Failed", task.errorMessage, "FileSystem", task.finalOutputDir, "{}",
+            parentOpId, ""
+        );
+        return false;
+    }
+
+    // P2-RND-02: Staging directory must also not pre-exist
+    if (QFileInfo::exists(task.stagingDir)) {
+        task.status = RenderStatus::Failed;
+        task.errorMessage = QString("Staging directory already exists: %1. "
+                                    "Render aborted to prevent collision.")
+                                .arg(task.stagingDir);
+        core::log::LogService::instance().log(
+            "Render", "Preflight", "Failed", task.errorMessage, "FileSystem", task.stagingDir, "{}",
+            parentOpId, ""
+        );
+        return false;
+    }
 
     // Create staging folder
     if (!QDir().mkpath(task.stagingDir)) {
@@ -398,6 +452,22 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         QString inputFilePath = task.sourceFolder + "/" + trackFile;
         QString baseName = QFileInfo(trackFile).completeBaseName();
         QString outputFilePath = task.stagingDir + "/" + baseName + ".wav";
+
+        // P1-RND-01: Ensure destination file does not already exist in staging directory
+        if (QFileInfo::exists(outputFilePath)) {
+            allTracksOk = false;
+            task.status = RenderStatus::Failed;
+            task.errorMessage = QString("Output file already exists in staging directory: %1. "
+                                        "Render aborted to prevent data overwrite.")
+                                    .arg(outputFilePath);
+            core::log::LogService::instance().log(
+                "Render", "RenderTrack", "Failed",
+                QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
+                "AudioFile", inputFilePath, "{}",
+                trackOpId, parentOpId
+            );
+            break;
+        }
 
         double trackFraction = 0.0;
         QString trackError;

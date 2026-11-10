@@ -159,6 +159,12 @@ private slots:
     // 14. SYS-08: Non-destructive Original Sound Source Immutability (Phase C)
     void testSys08OriginalSoundSourceImmutability();
 
+    // 15. P1-RND-01: Album Render duplicate base name collision prevention
+    void testAlbumRenderDuplicateBaseNameCollision();
+
+    // 16. P2-RND-02: Final output directory pre-existence check and non-overwrite safety
+    void testFinalOutputDirPreExistingCollision();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
     QString m_dbPath;
@@ -950,6 +956,122 @@ void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
         bool openDeleted = decoder.open(tamperedPath.toStdString());
         QVERIFY(!openDeleted);
         QVERIFY(!QFile::exists(tamperedPath));
+    }
+}
+
+void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
+{
+    // P1-RND-01: Verify that when two files in an album have the same base name (e.g. Track01.wav and Track01.flac),
+    // Album Render detects the collision upfront during preflight and safely aborts without overwriting or touching files.
+    RenderEngine& engine = RenderEngine::instance();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+
+    QString albumDir = m_tempDir->filePath("album_dup_test");
+    QDir().mkpath(albumDir);
+
+    // Create two test audio files with the exact same base name "Track01" but different extensions
+    QString wavPath = albumDir + "/Track01.wav";
+    QString flacPath = albumDir + "/Track01.flac";
+    QVERIFY(createTestWav(wavPath, 48000.0, 4800, 220.0));
+    QVERIFY(QFile::copy(wavPath, flacPath));
+
+    FileSnapshot baselineWav = FileSnapshot::capture(wavPath);
+    FileSnapshot baselineFlac = FileSnapshot::capture(flacPath);
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    QString taskId = engine.enqueueAlbumRender(albumDir, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    QVERIFY(spyFinished.wait(5000));
+    QCOMPARE(spyFinished.count(), 1);
+
+    auto arguments = spyFinished.takeFirst();
+    RenderStatus status = static_cast<RenderStatus>(arguments.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Failed);
+
+    QString errorMsg = arguments.at(3).toString();
+    QVERIFY2(errorMsg.contains("Duplicate output track base name detected in album"), qPrintable(errorMsg));
+
+    // Verify original files are 100% untouched
+    QString diff;
+    FileSnapshot afterWav = FileSnapshot::capture(wavPath);
+    FileSnapshot afterFlac = FileSnapshot::capture(flacPath);
+    QVERIFY2(afterWav.matches(baselineWav, diff), qPrintable("WAV modified on duplicate collision: " + diff));
+    QVERIFY2(afterFlac.matches(baselineFlac, diff), qPrintable("FLAC modified on duplicate collision: " + diff));
+
+    // Verify staging directory was not created or was removed
+    QDir albumQDir(albumDir);
+    QStringList stagingEntries = albumQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(stagingEntries.count(), 0);
+
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+}
+
+void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
+{
+    // P2-RND-02: Verify that if the final output directory already exists (e.g. from an earlier external run or manual creation),
+    // RenderEngine detects the collision before creating staging or processing audio, fails safely, and does NOT overwrite or touch the existing folder.
+    RenderEngine& engine = RenderEngine::instance();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+
+    QString sourceDir = m_tempDir->filePath("preexisting_output_test");
+    QDir().mkpath(sourceDir);
+
+    QString trackPath = sourceDir + "/test_song.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    // Pre-create the collision output directory
+    QString preExistingDir = sourceDir + "/PreExistingRenderFolder";
+    QDir().mkpath(preExistingDir);
+
+    // Place an existing canary file inside preExistingDir
+    QString canaryPath = preExistingDir + "/CANARY_DO_NOT_DELETE.txt";
+    {
+        QFile canary(canaryPath);
+        QVERIFY(canary.open(QIODevice::WriteOnly));
+        canary.write("PRE_EXISTING_CANARY_DATA");
+        canary.close();
+    }
+    FileSnapshot canaryBaseline = FileSnapshot::capture(canaryPath);
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    // Enqueue track render explicitly pointing to preExistingDir
+    QString taskId = engine.enqueueTrackRender(trackPath, settings, preExistingDir);
+    QVERIFY(!taskId.isEmpty());
+
+    QVERIFY(spyFinished.wait(5000));
+    QCOMPARE(spyFinished.count(), 1);
+
+    auto arguments = spyFinished.takeFirst();
+    RenderStatus status = static_cast<RenderStatus>(arguments.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Failed);
+
+    QString errorMsg = arguments.at(3).toString();
+    QVERIFY2(errorMsg.contains("Final output directory already exists"), qPrintable(errorMsg));
+
+    // Verify pre-existing canary file and folder are 100% untouched
+    QString diff;
+    FileSnapshot canaryAfter = FileSnapshot::capture(canaryPath);
+    QVERIFY2(canaryAfter.matches(canaryBaseline, diff), qPrintable("Canary file was modified on collision: " + diff));
+    QVERIFY(QDir(preExistingDir).exists());
+
+    // Staging directory must not remain
+    QDir srcQDir(sourceDir);
+    QStringList stagingEntries = srcQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(stagingEntries.count(), 0);
+
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
     }
 }
 
