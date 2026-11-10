@@ -2688,13 +2688,21 @@ void TestPhase2Dsp::testAudioThreadAllocationTrackerOverloadsAndIntentionalDetec
     // 1. Outside Audio Thread allocations: must increment s_allocationCount but NOT s_audioThreadAllocationCount
     {
         int* p1 = new int(42);
+        asm volatile("" : "+r"(p1) : : "memory");
         int* p2 = new int[5]{1, 2, 3, 4, 5};
+        asm volatile("" : "+r"(p2) : : "memory");
         int* p3 = new (std::nothrow) int(99);
+        asm volatile("" : "+r"(p3) : : "memory");
         int* p4 = new (std::nothrow) int[8];
+        asm volatile("" : "+r"(p4) : : "memory");
         auto* p5 = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}));
+        asm volatile("" : "+r"(p5) : : "memory");
         auto* p6 = static_cast<int*>(operator new[](sizeof(int) * 4, std::align_val_t{64}));
+        asm volatile("" : "+r"(p6) : : "memory");
         auto* p7 = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}, std::nothrow));
+        asm volatile("" : "+r"(p7) : : "memory");
         auto* p8 = static_cast<int*>(operator new[](sizeof(int) * 4, std::align_val_t{64}, std::nothrow));
+        asm volatile("" : "+r"(p8) : : "memory");
 
         QVERIFY(p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8);
 
@@ -2721,24 +2729,30 @@ void TestPhase2Dsp::testAudioThreadAllocationTrackerOverloadsAndIntentionalDetec
 
         // P1-4-R1-AC-01: Aligned + Nothrow scalar new
         auto* pAlignedNothrowScalar = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}, std::nothrow));
+        asm volatile("" : "+r"(pAlignedNothrowScalar) : : "memory");
         QVERIFY(pAlignedNothrowScalar != nullptr);
         QCOMPARE(reinterpret_cast<uintptr_t>(pAlignedNothrowScalar) % 64, uintptr_t(0));
         QCOMPARE(s_audioAlignedNothrowNewCount.load(), size_t(1));
 
         // P1-4-R1-AC-02: Aligned + Nothrow array new[]
         auto* pAlignedNothrowArray = static_cast<int*>(operator new[](sizeof(int) * 16, std::align_val_t{64}, std::nothrow));
+        asm volatile("" : "+r"(pAlignedNothrowArray) : : "memory");
         QVERIFY(pAlignedNothrowArray != nullptr);
         QCOMPARE(reinterpret_cast<uintptr_t>(pAlignedNothrowArray) % 64, uintptr_t(0));
         QCOMPARE(s_audioAlignedNothrowNewCount.load(), size_t(2));
 
         // Aligned normal scalar & array
         auto* pAlignedScalar = static_cast<int*>(operator new(sizeof(int), std::align_val_t{64}));
+        asm volatile("" : "+r"(pAlignedScalar) : : "memory");
         auto* pAlignedArray = static_cast<int*>(operator new[](sizeof(int) * 8, std::align_val_t{64}));
+        asm volatile("" : "+r"(pAlignedArray) : : "memory");
         QCOMPARE(s_audioAlignedNewCount.load(), size_t(2));
 
         // Normal scalar & array
         int* pScalar = new int(123);
+        asm volatile("" : "+r"(pScalar) : : "memory");
         int* pArray = new int[4]{1, 2, 3, 4};
+        asm volatile("" : "+r"(pArray) : : "memory");
         QCOMPARE(s_audioScalarNewCount.load(), size_t(1));
         QCOMPARE(s_audioArrayNewCount.load(), size_t(1));
 
