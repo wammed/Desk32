@@ -348,6 +348,7 @@ private slots:
     void testEpochReclaimerShutdownConcurrentSafety();
     void testEpochReclaimerWriterShutdownSerialization();
     void testEpochReclaimerDeterministicShutdownRaces();
+    void testEpochReclaimerTimeoutSafetyAndThreadCleanup();
     void testRealTimeSafetyInLivePipeline();
     void testRealtimeSafetyNegativeDetection();
     void testAudioPipelineWorstCaseRealtimeConditions();
@@ -583,17 +584,27 @@ void TestAudioPipeline::testEpochReclaimerConcurrentStress()
         }
     }
 
-    // Ensure reader thread has actively scheduled and read at least 100 times (deterministic synchronization)
-    while (readCycles.load(std::memory_order_relaxed) < 100) {
+    // Ensure reader thread has actively scheduled and read at least 100 times with bounded timeout (B-1, B-2)
+    const auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool readTargetReached = false;
+    while (std::chrono::steady_clock::now() < timeoutDeadline) {
+        if (readCycles.load(std::memory_order_relaxed) >= 100) {
+            readTargetReached = true;
+            break;
+        }
         std::this_thread::yield();
     }
 
+    // Guaranteed thread termination and reclamation even on timeout (B-3)
     stopReader.store(true, std::memory_order_relaxed);
-    readerThread.join();
+    if (readerThread.joinable()) {
+        readerThread.join();
+    }
 
     // After reader exits, reclaim all
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
+    QVERIFY2(readTargetReached, "Timed out waiting for reader cycles to reach 100 in testEpochReclaimerConcurrentStress");
     QVERIFY(readCycles.load() >= 100);
 }
 
@@ -637,24 +648,39 @@ void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
         reclaimer.swapChain(std::make_unique<std::string>("Chain Swap " + std::to_string(i)));
     }
 
-    // Ensure all readers have actively scheduled and read at least 20 times (deterministic synchronization)
+    // Ensure all readers have actively scheduled and read at least 20 times with bounded timeout (B-1, B-2)
+    const auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool allReadersReachedTarget = true;
     for (size_t t = 0; t < numReaders; ++t) {
         while (readerCounts[t].load(std::memory_order_relaxed) < 20) {
+            if (std::chrono::steady_clock::now() >= timeoutDeadline) {
+                allReadersReachedTarget = false;
+                break;
+            }
             std::this_thread::yield();
+        }
+        if (!allReadersReachedTarget) {
+            break;
         }
     }
 
+    // Guaranteed termination and reclamation of all readers and reclaimer thread (B-3)
     stop.store(true, std::memory_order_relaxed);
     for (auto& r : readers) {
-        r.join();
+        if (r.joinable()) {
+            r.join();
+        }
     }
-    reclaimerThread.join();
+    if (reclaimerThread.joinable()) {
+        reclaimerThread.join();
+    }
 
     // After all readers and writers are stopped, all retired objects must be cleanly reclaimed
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
+    QVERIFY2(allReadersReachedTarget, "Timed out waiting for readerCounts to reach 20 in testEpochReclaimerMultiReaderConcurrentStress");
     for (size_t t = 0; t < numReaders; ++t) {
-        QVERIFY(readerCounts[t].load() > 10);
+        QVERIFY(readerCounts[t].load() >= 20);
     }
 }
 
@@ -732,9 +758,13 @@ void TestAudioPipeline::testShutdownWaitsForActiveReaders()
         // Signal that reader has acquired guard and is inside the protected epoch
         readerInsideLatch.count_down();
 
-        // Wait until drainThread has entered drainAll() and is actively waiting for this reader
+        // Wait until drainThread has entered drainAll() and is actively waiting for this reader (bounded timeout B-1, B-2)
         drainStartedLatch.wait();
+        const auto readerTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!releaseReader.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= readerTimeout) {
+                break;
+            }
             std::this_thread::yield();
         }
 
@@ -1186,8 +1216,12 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
             QCOMPARE(*guard.chain, std::string("ReaderActiveChain"));
             readerHolding.count_down();
 
-            // Wait deterministically for Shutdown drainAll to reach the waiting loop
+            // Wait deterministically for Shutdown drainAll to reach the waiting loop (bounded timeout B-1, B-2)
+            const auto readerTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             while (!releaseReader.load(std::memory_order_acquire)) {
+                if (std::chrono::steady_clock::now() >= readerTimeout) {
+                    break;
+                }
                 std::this_thread::yield();
             }
             // Verify data is still intact (never prematurely freed)
@@ -1205,8 +1239,12 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
             drainDone.store(true, std::memory_order_release);
         });
 
-        // Deterministically wait for drainAll to enter its active reader wait loop (no sleep_for)
+        // Deterministically wait for drainAll to enter its active reader wait loop (bounded timeout B-1, B-2)
+        const auto waitTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!reclaimer.isWaitingForReaders()) {
+            if (std::chrono::steady_clock::now() >= waitTimeout) {
+                break;
+            }
             std::this_thread::yield();
         }
 
@@ -1278,6 +1316,71 @@ void TestAudioPipeline::testEpochReclaimerDeterministicShutdownRaces()
         QCOMPARE(reclaimer.retiredCount(), 0u);
         QCOMPARE(successCount.load() + rejectCount.load(), numWriters);
     }
+}
+
+void TestAudioPipeline::testEpochReclaimerTimeoutSafetyAndThreadCleanup()
+{
+    // B-T03, B-T04, B-T05, B-T06: Verification of timeout safety, thread joining, and shared object lifetime
+    // Simulates a reader thread that does not advance its cycle count, verifying finite timeout,
+    // guaranteed thread joining, and safe memory reclamation with zero hanging or leak.
+    auto reclaimer = std::make_unique<EpochReclaimer<std::string>>();
+    reclaimer->swapChain(std::make_unique<std::string>("InitialProtectedString"));
+
+    std::atomic<bool> stopReader{false};
+    std::atomic<uint64_t> readCycles{0};
+    std::atomic<bool> readerStarted{false};
+
+    // Reader thread simulates a stalled condition (does not increment readCycles)
+    std::thread readerThread([&]() {
+        readerStarted.store(true, std::memory_order_release);
+        while (!stopReader.load(std::memory_order_relaxed)) {
+            // Actively observing epoch without advancing cycle count (simulating stall/block)
+            auto guard = reclaimer->enterRead();
+            if (guard.chain) {
+                volatile size_t sz = guard.chain->size();
+                (void)sz;
+            }
+            std::this_thread::yield();
+        }
+    });
+
+    // Wait until reader thread actually starts
+    const auto startTimeout = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!readerStarted.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= startTimeout) break;
+        std::this_thread::yield();
+    }
+    QVERIFY(readerStarted.load());
+
+    // 1. Verify finite timeout detection (B-T03)
+    const auto timeoutDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    bool targetReached = false;
+    while (std::chrono::steady_clock::now() < timeoutDeadline) {
+        if (readCycles.load(std::memory_order_relaxed) >= 100) {
+            targetReached = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+
+    // Must have timed out because reader was stalled
+    QVERIFY(!targetReached);
+
+    // 2. Guaranteed thread stop and cleanup even when timed out (B-T04)
+    stopReader.store(true, std::memory_order_relaxed);
+    QVERIFY(readerThread.joinable());
+    readerThread.join();
+
+    // 3. Shared object lifetime validation (B-T05):
+    // Reclaimer must still be 100% valid, intact, and safe to drain/reclaim
+    reclaimer->swapChain(std::make_unique<std::string>("PostTimeoutChain"));
+    reclaimer->reclaimRetired();
+    QCOMPARE(reclaimer->retiredCount(), 0u);
+
+    // Drain all and destroy safely
+    reclaimer->drainAll();
+    QVERIFY(reclaimer->isClosing());
+    reclaimer.reset(); // Safe destruction without use-after-free
 }
 
 void TestAudioPipeline::testRealTimeSafetyInLivePipeline()

@@ -8,6 +8,7 @@
 #include <QThread>
 #include <QDebug>
 #include <QSet>
+#include <sys/stat.h>
 #include <array>
 #include <algorithm>
 
@@ -105,7 +106,98 @@ bool RenderEngine::validatePreflight(const QString& sourceFolder, qint64 require
     return true;
 }
 
-QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderSettings& settings, const QString& explicitOutputDir) {
+bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task, QString& outError) {
+    if (task.sourceFolder.isEmpty() || task.finalOutputDir.isEmpty()) {
+        outError = "Source folder or output directory path is empty.";
+        return false;
+    }
+
+    QFileInfo srcFolderInfo(task.sourceFolder);
+    if (!srcFolderInfo.exists() || !srcFolderInfo.isDir()) {
+        outError = QString("Source folder does not exist or is not a directory: %1").arg(task.sourceFolder);
+        return false;
+    }
+
+    // 1. Resolve canonical source directory
+    QString canonicalSource = srcFolderInfo.canonicalFilePath();
+    if (canonicalSource.isEmpty()) {
+        outError = QString("Failed to resolve canonical path for source folder: %1").arg(task.sourceFolder);
+        return false;
+    }
+
+    // 2. Output directory parent must be strictly contained inside canonical source folder
+    QFileInfo outDirInfo(task.finalOutputDir);
+    QDir parentDir = outDirInfo.dir();
+    QString canonicalParent = parentDir.canonicalPath();
+    if (canonicalParent.isEmpty()) {
+        outError = QString("Failed to resolve parent directory for output path: %1").arg(task.finalOutputDir);
+        return false;
+    }
+
+    // Output must be an immediate child of the source folder (prevent directory traversal or external paths)
+    if (QDir::cleanPath(canonicalParent) != QDir::cleanPath(canonicalSource)) {
+        outError = QString("Render output directory '%1' escapes original sound source directory '%2'.")
+                       .arg(task.finalOutputDir, task.sourceFolder);
+        return false;
+    }
+
+    // 3. Output directory cannot point to source file itself or any track file
+    if (!task.sourcePath.isEmpty()) {
+        QFileInfo srcFileInfo(task.sourcePath);
+        if (QDir::cleanPath(outDirInfo.absoluteFilePath()) == QDir::cleanPath(srcFileInfo.absoluteFilePath())) {
+            outError = "Output directory conflicts with original sound source file.";
+            return false;
+        }
+    }
+    for (const auto& tf : task.trackFiles) {
+        if (outDirInfo.fileName() == tf) {
+            outError = QString("Output directory name matches original sound source file: %1").arg(tf);
+            return false;
+        }
+    }
+
+    // 4. Output directory must not be a symlink
+    if (outDirInfo.isSymLink()) {
+        outError = QString("Output directory cannot be a symbolic link: %1").arg(task.finalOutputDir);
+        return false;
+    }
+
+    // 5. Staging directory must also be directly inside canonical source folder
+    if (!task.stagingDir.isEmpty()) {
+        QFileInfo stagingInfo(task.stagingDir);
+        QDir stagingParent = stagingInfo.dir();
+        QString canonicalStagingParent = stagingParent.canonicalPath();
+        if (QDir::cleanPath(canonicalStagingParent) != QDir::cleanPath(canonicalSource)) {
+            outError = QString("Staging directory '%1' escapes original sound source directory '%2'.")
+                           .arg(task.stagingDir, task.sourceFolder);
+            return false;
+        }
+        if (stagingInfo.isSymLink()) {
+            outError = QString("Staging directory cannot be a symbolic link: %1").arg(task.stagingDir);
+            return false;
+        }
+    }
+
+    // 6. Verify same filesystem (stat st_dev match between source folder and output parent)
+    struct stat stSource{}, stParent{};
+    if (stat(canonicalSource.toLocal8Bit().constData(), &stSource) != 0) {
+        outError = QString("Failed to stat source directory: %1").arg(canonicalSource);
+        return false;
+    }
+    if (stat(canonicalParent.toLocal8Bit().constData(), &stParent) != 0) {
+        outError = QString("Failed to stat output parent directory: %1").arg(canonicalParent);
+        return false;
+    }
+    if (stSource.st_dev != stParent.st_dev) {
+        outError = QString("Staging and output directories must reside on the same filesystem as source: "
+                           "source dev=%1, parent dev=%2").arg(stSource.st_dev).arg(stParent.st_dev);
+        return false;
+    }
+
+    return true;
+}
+
+QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderSettings& settings) {
     QFileInfo fi(trackPath);
     if (!fi.exists() || !fi.isFile()) {
         qWarning() << "RenderEngine: track file does not exist:" << trackPath;
@@ -122,9 +214,36 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
     task.settings = settings;
     task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
-    if (!explicitOutputDir.isEmpty()) {
-        task.finalOutputDir = explicitOutputDir;
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+            m_currentTask = task;
+        }
+        m_taskQueue.push(task);
     }
+    m_queueCv.notify_one();
+    return task.taskId;
+}
+
+QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, const RenderSettings& settings, const QString& testOutputDir) {
+    QFileInfo fi(trackPath);
+    if (!fi.exists() || !fi.isFile()) {
+        qWarning() << "RenderEngine: test track file does not exist:" << trackPath;
+        return QString();
+    }
+
+    RenderTaskInfo task;
+    task.taskId = QString("test_track_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    task.type = RenderType::SingleTrack;
+    task.sourcePath = trackPath;
+    task.sourceFolder = fi.absolutePath();
+    task.trackFiles.append(fi.fileName());
+    task.totalTracks = 1;
+    task.settings = settings;
+    task.dspSnapshot = captureTemplateSnapshot();
+    task.status = RenderStatus::Queued;
+    task.finalOutputDir = testOutputDir;
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -382,6 +501,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     }
     if (task.finalOutputDir.isEmpty()) {
         task.finalOutputDir = task.sourceFolder + "/" + folderSuffix;
+    }
+
+    // A-3 / SYS-08: Validate output and staging containment inside source folder on same filesystem
+    QString containmentErr;
+    if (!validateOutputContainment(task, containmentErr)) {
+        task.status = RenderStatus::Failed;
+        task.errorMessage = containmentErr;
+        core::log::LogService::instance().log(
+            "Render", "ContainmentCheck", "Failed", task.errorMessage, "FileSystem", task.finalOutputDir, "{}",
+            parentOpId, ""
+        );
+        return false;
     }
 
     // P2-RND-02: Pre-flight check for final output directory collision (never overwrite or touch existing)

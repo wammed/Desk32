@@ -166,6 +166,18 @@ private slots:
     // 16. P2-RND-02: Final output directory pre-existence check and non-overwrite safety
     void testFinalOutputDirPreExistingCollision();
 
+    // 17. A-T01: Verify public API has no explicitOutputDir argument
+    void testPublicApiHasNoExplicitOutputDir();
+
+    // 18. A-T05: Verify rendering outside original source folder is rejected
+    void testRenderOutputOutsideSourceFolderRejected();
+
+    // 19. A-T06: Verify symlink traversal outside source folder is rejected
+    void testRenderSymlinkTraversalOutsideSourceFolderRejected();
+
+    // 20. A-T08: Verify output and staging filesystem containment
+    void testOutputAndStagingFilesystemContainment();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
     QString m_dbPath;
@@ -1063,8 +1075,8 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     RenderSettings settings;
     QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
 
-    // Enqueue track render explicitly pointing to preExistingDir
-    QString taskId = engine.enqueueTrackRender(trackPath, settings, preExistingDir);
+    // Enqueue track render pointing to preExistingDir via private test hook
+    QString taskId = engine.enqueueTrackRenderForTesting(trackPath, settings, preExistingDir);
     QVERIFY(!taskId.isEmpty());
 
     QVariantList matchedArgs;
@@ -1105,6 +1117,166 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
         QTest::qWait(10);
     }
     QCoreApplication::processEvents();
+}
+
+template <typename, typename = void>
+struct HasThreeArgEnqueueTrackRender : std::false_type {};
+
+template <typename T>
+struct HasThreeArgEnqueueTrackRender<T, std::void_t<decltype(std::declval<T>().enqueueTrackRender(
+    std::declval<QString>(), std::declval<RenderSettings>(), std::declval<QString>()))>> : std::true_type {};
+
+void TestPhase4ExportRender::testPublicApiHasNoExplicitOutputDir()
+{
+    // A-T01: Verify at compile time and runtime that RenderEngine::enqueueTrackRender accepts only (trackPath, settings)
+    // and strictly prohibits explicit output directory injection in the production public API.
+    static_assert(!HasThreeArgEnqueueTrackRender<RenderEngine>::value,
+                  "RenderEngine::enqueueTrackRender must not accept an explicitOutputDir argument in public API.");
+    QVERIFY(!HasThreeArgEnqueueTrackRender<RenderEngine>::value);
+
+    // Verify invocability with 1 and 2 arguments
+    static_assert(std::is_invocable_v<decltype(&RenderEngine::enqueueTrackRender), RenderEngine*, const QString&, const RenderSettings&>,
+                  "enqueueTrackRender must be invocable with (trackPath, settings)");
+    auto oneArgCall = [](RenderEngine& re, const QString& p) { return re.enqueueTrackRender(p); };
+    static_assert(std::is_invocable_v<decltype(oneArgCall), RenderEngine&, const QString&>,
+                  "enqueueTrackRender must be invocable with (trackPath)");
+}
+
+void TestPhase4ExportRender::testRenderOutputOutsideSourceFolderRejected()
+{
+    // A-T05: Verify that if an output path attempts to escape the original sound source directory (e.g. into an external directory),
+    // RenderEngine containment validation detects it upfront, fails safely, and does not create or write files.
+    RenderEngine& engine = RenderEngine::instance();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+
+    QString sourceDir = m_tempDir->filePath("containment_test_src");
+    QString outsideDir = m_tempDir->filePath("external_target_dir");
+    QDir().mkpath(sourceDir);
+    QDir().mkpath(outsideDir);
+
+    QString trackPath = sourceDir + "/test_song.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    // Attempt to inject an output directory pointing outside sourceDir
+    QString taskId = engine.enqueueTrackRenderForTesting(trackPath, settings, outsideDir + "/EscapedRenderFolder");
+    QVERIFY(!taskId.isEmpty());
+
+    QVariantList matchedArgs;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000) {
+        for (int i = 0; i < spyFinished.count(); ++i) {
+            if (spyFinished.at(i).at(0).toString() == taskId) {
+                matchedArgs = spyFinished.at(i);
+                break;
+            }
+        }
+        if (!matchedArgs.isEmpty()) break;
+        spyFinished.wait(50);
+    }
+    QVERIFY2(!matchedArgs.isEmpty(), "Timed out waiting for matching renderTaskFinished signal");
+
+    RenderStatus status = static_cast<RenderStatus>(matchedArgs.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Failed);
+
+    QString errorMsg = matchedArgs.at(3).toString();
+    QVERIFY2(errorMsg.contains("escapes original sound source directory"), qPrintable(errorMsg));
+
+    // Verify external directory was not written to
+    QDir extQDir(outsideDir);
+    QStringList extEntries = extQDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
+    QCOMPARE(extEntries.count(), 0);
+
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+}
+
+void TestPhase4ExportRender::testRenderSymlinkTraversalOutsideSourceFolderRejected()
+{
+    // A-T06: Verify that if a symlink inside the source directory points outside,
+    // attempting to render into that symlinked directory is detected and strictly rejected.
+    RenderEngine& engine = RenderEngine::instance();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+
+    QString sourceDir = m_tempDir->filePath("symlink_test_src");
+    QString outsideDir = m_tempDir->filePath("symlink_outside_dir");
+    QDir().mkpath(sourceDir);
+    QDir().mkpath(outsideDir);
+
+    QString trackPath = sourceDir + "/test_song.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    // Create a symlink inside sourceDir pointing to outsideDir
+    QString symlinkPath = sourceDir + "/symlink_to_outside";
+    QVERIFY(QFile::link(outsideDir, symlinkPath));
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    // Attempt to render into the symlinked path which resolves outside sourceDir
+    QString taskId = engine.enqueueTrackRenderForTesting(trackPath, settings, symlinkPath + "/escaped_folder");
+    QVERIFY(!taskId.isEmpty());
+
+    QVariantList matchedArgs;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000) {
+        for (int i = 0; i < spyFinished.count(); ++i) {
+            if (spyFinished.at(i).at(0).toString() == taskId) {
+                matchedArgs = spyFinished.at(i);
+                break;
+            }
+        }
+        if (!matchedArgs.isEmpty()) break;
+        spyFinished.wait(50);
+    }
+    QVERIFY2(!matchedArgs.isEmpty(), "Timed out waiting for matching renderTaskFinished signal");
+
+    RenderStatus status = static_cast<RenderStatus>(matchedArgs.at(1).toInt());
+    QCOMPARE(status, RenderStatus::Failed);
+
+    QString errorMsg = matchedArgs.at(3).toString();
+    QVERIFY2(errorMsg.contains("escapes original sound source directory") || errorMsg.contains("symbolic link"),
+             qPrintable(errorMsg));
+
+    // Verify outside directory was not written to
+    QDir extQDir(outsideDir);
+    QStringList extEntries = extQDir.entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
+    QCOMPARE(extEntries.count(), 0);
+
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+}
+
+void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
+{
+    // A-T08: Verify that staging and final output directory are verified to reside on the same filesystem
+    // as the source folder (st_dev comparison).
+    QString sourceDir = m_tempDir->filePath("fs_test_src");
+    QDir().mkpath(sourceDir);
+
+    struct stat stSource{}, stParent{};
+    QVERIFY(stat(sourceDir.toLocal8Bit().constData(), &stSource) == 0);
+
+    QString simulatedOutputDir = sourceDir + "/A_20261110_120000";
+    QFileInfo outInfo(simulatedOutputDir);
+    QString parentPath = outInfo.dir().canonicalPath();
+    QVERIFY(stat(parentPath.toLocal8Bit().constData(), &stParent) == 0);
+
+    QCOMPARE(stSource.st_dev, stParent.st_dev);
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

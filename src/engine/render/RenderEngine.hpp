@@ -17,6 +17,8 @@
 #include "engine/session/FolderSession.hpp"
 #include "core/log/LogService.hpp"
 
+class TestPhase4ExportRender;
+
 namespace desk32::engine::render {
 
 enum class RenderBitDepth {
@@ -114,8 +116,8 @@ public:
     /// Capture an immutable DSP snapshot from live template chain (P0-03)
     [[nodiscard]] RenderDspSnapshot captureTemplateSnapshot() const;
 
-    /// Queue a single track render task (optional explicit output directory)
-    QString enqueueTrackRender(const QString& trackPath, const RenderSettings& settings = RenderSettings(), const QString& explicitOutputDir = QString());
+    /// Queue a single track render task (output folder is automatically created inside source folder)
+    QString enqueueTrackRender(const QString& trackPath, const RenderSettings& settings = RenderSettings());
 
     /// Queue an album render task (all audio files in folder in natural sort order)
     QString enqueueAlbumRender(const QString& folderPath, const RenderSettings& settings = RenderSettings());
@@ -136,6 +138,16 @@ signals:
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
 
 private:
+    friend class ::TestPhase4ExportRender;
+
+    /// Test-only hook to verify pre-existing collision and containment handling without exposing in public API
+    QString enqueueTrackRenderForTesting(const QString& trackPath,
+                                         const RenderSettings& settings,
+                                         const QString& testOutputDir);
+
+    /// Validates that output and staging directories are strictly contained in source folder on same filesystem
+    static bool validateOutputContainment(const RenderTaskInfo& task, QString& outError);
+
     void workerLoop();
     bool processTask(RenderTaskInfo& task, RenderSequenceManager& seqMgr);
     bool renderSingleFile(const QString& inputFilePath,
