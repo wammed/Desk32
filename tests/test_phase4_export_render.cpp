@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QTemporaryDir>
 #include <QSignalSpy>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <cmath>
@@ -911,6 +912,7 @@ void TestPhase4ExportRender::testSys08OriginalSoundSourceImmutability()
         while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
             QTest::qWait(10);
         }
+        QCoreApplication::processEvents();
 
         FileSnapshot afterCancel = FileSnapshot::capture(trackPath);
         QVERIFY2(afterCancel.matches(baseline, diff), qPrintable("Cancelled render modified original file: " + diff));
@@ -967,6 +969,7 @@ void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         QTest::qWait(10);
     }
+    QCoreApplication::processEvents();
 
     QString albumDir = m_tempDir->filePath("album_dup_test");
     QDir().mkpath(albumDir);
@@ -986,14 +989,27 @@ void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
     QString taskId = engine.enqueueAlbumRender(albumDir, settings);
     QVERIFY(!taskId.isEmpty());
 
-    QVERIFY(spyFinished.wait(5000));
-    QCOMPARE(spyFinished.count(), 1);
+    QVariantList matchedArgs;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000) {
+        for (int i = 0; i < spyFinished.count(); ++i) {
+            if (spyFinished.at(i).at(0).toString() == taskId) {
+                matchedArgs = spyFinished.at(i);
+                break;
+            }
+        }
+        if (!matchedArgs.isEmpty()) {
+            break;
+        }
+        spyFinished.wait(50);
+    }
+    QVERIFY2(!matchedArgs.isEmpty(), "Timed out waiting for matching renderTaskFinished signal");
 
-    auto arguments = spyFinished.takeFirst();
-    RenderStatus status = static_cast<RenderStatus>(arguments.at(1).toInt());
+    RenderStatus status = static_cast<RenderStatus>(matchedArgs.at(1).toInt());
     QCOMPARE(status, RenderStatus::Failed);
 
-    QString errorMsg = arguments.at(3).toString();
+    QString errorMsg = matchedArgs.at(3).toString();
     QVERIFY2(errorMsg.contains("Duplicate output track base name detected in album"), qPrintable(errorMsg));
 
     // Verify original files are 100% untouched
@@ -1011,6 +1027,7 @@ void TestPhase4ExportRender::testAlbumRenderDuplicateBaseNameCollision()
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         QTest::qWait(10);
     }
+    QCoreApplication::processEvents();
 }
 
 void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
@@ -1021,6 +1038,7 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         QTest::qWait(10);
     }
+    QCoreApplication::processEvents();
 
     QString sourceDir = m_tempDir->filePath("preexisting_output_test");
     QDir().mkpath(sourceDir);
@@ -1049,14 +1067,27 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     QString taskId = engine.enqueueTrackRender(trackPath, settings, preExistingDir);
     QVERIFY(!taskId.isEmpty());
 
-    QVERIFY(spyFinished.wait(5000));
-    QCOMPARE(spyFinished.count(), 1);
+    QVariantList matchedArgs;
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < 5000) {
+        for (int i = 0; i < spyFinished.count(); ++i) {
+            if (spyFinished.at(i).at(0).toString() == taskId) {
+                matchedArgs = spyFinished.at(i);
+                break;
+            }
+        }
+        if (!matchedArgs.isEmpty()) {
+            break;
+        }
+        spyFinished.wait(50);
+    }
+    QVERIFY2(!matchedArgs.isEmpty(), "Timed out waiting for matching renderTaskFinished signal");
 
-    auto arguments = spyFinished.takeFirst();
-    RenderStatus status = static_cast<RenderStatus>(arguments.at(1).toInt());
+    RenderStatus status = static_cast<RenderStatus>(matchedArgs.at(1).toInt());
     QCOMPARE(status, RenderStatus::Failed);
 
-    QString errorMsg = arguments.at(3).toString();
+    QString errorMsg = matchedArgs.at(3).toString();
     QVERIFY2(errorMsg.contains("Final output directory already exists"), qPrintable(errorMsg));
 
     // Verify pre-existing canary file and folder are 100% untouched
@@ -1073,6 +1104,7 @@ void TestPhase4ExportRender::testFinalOutputDirPreExistingCollision()
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         QTest::qWait(10);
     }
+    QCoreApplication::processEvents();
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

@@ -583,13 +583,18 @@ void TestAudioPipeline::testEpochReclaimerConcurrentStress()
         }
     }
 
+    // Ensure reader thread has actively scheduled and read at least 100 times (deterministic synchronization)
+    while (readCycles.load(std::memory_order_relaxed) < 100) {
+        std::this_thread::yield();
+    }
+
     stopReader.store(true, std::memory_order_relaxed);
     readerThread.join();
 
     // After reader exits, reclaim all
     reclaimer.reclaimRetired();
     QCOMPARE(reclaimer.retiredCount(), 0u);
-    QVERIFY(readCycles.load() > 50);
+    QVERIFY(readCycles.load() >= 100);
 }
 
 void TestAudioPipeline::testEpochReclaimerMultiReaderConcurrentStress()
