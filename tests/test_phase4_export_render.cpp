@@ -3,6 +3,7 @@
 #include <QTemporaryDir>
 #include <QSignalSpy>
 #include <QElapsedTimer>
+#include <atomic>
 #include <QDir>
 #include <QFile>
 #include <cmath>
@@ -31,7 +32,37 @@ using namespace desk32::engine::session;
 using namespace desk32::core;
 using namespace desk32::core::log;
 
+/// Records that a render-wait timeout happened and the follow-up cleanup did not
+/// restore the engine to idle. Checked in cleanup()/cleanupTestCase() so the
+/// failure is reported even if the timed-out test already returned.
+static std::atomic<bool> g_renderCleanupFailed{false};
+static std::atomic<bool> g_renderTimeoutOccurred{false};
+
+/// Bounded cancel-and-drain of the render engine. Each cancel request is consumed by
+/// one task, so it is re-issued until the active job and all queued jobs are gone or
+/// the deadline expires. Returns true only if the engine reached idle in time.
+/// NOTE: std::thread::join() has no timeout; this only polls engine state. The CTest
+/// TIMEOUT remains the last line of defence.
+template <typename Engine>
+static bool cancelAndDrainRenderEngine(Engine& engine, int timeoutMs = 10000)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+        if (timer.elapsed() > timeoutMs) {
+            return false;
+        }
+        engine.cancelCurrentRender();
+        QTest::qWait(10);
+    }
+    QCoreApplication::processEvents();
+    engine.resetTaskInfo();
+    return true;
+}
+
 /// Bounded wait for the render engine to drain; returns false on timeout.
+/// On timeout the active render is cancelled, queued jobs are drained within a bounded
+/// time, and the outcome is recorded so the run is ultimately reported as failed.
 template <typename Engine>
 static bool waitForRenderIdle(Engine& engine, int timeoutMs = 30000)
 {
@@ -39,6 +70,10 @@ static bool waitForRenderIdle(Engine& engine, int timeoutMs = 30000)
     timer.start();
     while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
         if (timer.elapsed() > timeoutMs) {
+            g_renderTimeoutOccurred.store(true);
+            if (!cancelAndDrainRenderEngine(engine)) {
+                g_renderCleanupFailed.store(true);
+            }
             return false;
         }
         QTest::qWait(10);
@@ -132,6 +167,7 @@ class TestPhase4ExportRender : public QObject {
 private slots:
     void initTestCase();
     void cleanupTestCase();
+    void cleanup();
 
     // 1. WAV File Writer (16-bit, 24-bit, 32-bit float, RIFF headers, TPDF dither)
     void testWavFileWriterHeaderAndPCM();
@@ -192,6 +228,7 @@ private slots:
 
     // 20. A-T08: Verify output and staging filesystem containment
     void testOutputAndStagingFilesystemContainment();
+    void testRenderTimeoutCancelAndDrainCleanup();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -227,6 +264,16 @@ void TestPhase4ExportRender::initTestCase()
     LogService::instance().start(m_dbPath);
     RenderSequenceManager::instance().initialize(m_dbPath);
     RenderEngine::instance().setDatabasePath(m_dbPath);
+}
+
+void TestPhase4ExportRender::cleanup()
+{
+    // Per-test isolation guard: a render-wait timeout must leave the engine idle,
+    // otherwise the next test would inherit in-flight state.
+    QVERIFY2(!g_renderCleanupFailed.load(),
+             "Render engine could not be cancelled/drained after a wait timeout; test isolation compromised");
+    QVERIFY2(RenderEngine::instance().queuedTasksCount() == 0 && !RenderEngine::instance().isRendering(),
+             "Render engine not idle at end of test");
 }
 
 void TestPhase4ExportRender::cleanupTestCase()
@@ -1439,4 +1486,45 @@ void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)
+void TestPhase4ExportRender::testRenderTimeoutCancelAndDrainCleanup()
+{
+    // Exercises the timeout cleanup path directly: queue several jobs, then cancel and
+    // drain with a bounded deadline. Verifies the engine is idle afterwards (so a later
+    // test cannot inherit in-flight state) and that no completed-state leaks remain.
+    RenderEngine& engine = RenderEngine::instance();
+
+    QString sourceDir = m_tempDir->filePath("cleanup_source");
+    QDir().mkpath(sourceDir);
+    RenderSettings settings;
+    settings.bitDepth = RenderBitDepth::Int24;
+    settings.rateMode = RenderSampleRateMode::Original;
+
+    QStringList taskIds;
+    for (int i = 0; i < 3; ++i) {
+        QString trackPath = sourceDir + QString("/cleanup_%1.wav").arg(i);
+        QVERIFY(createTestWav(trackPath, 48000.0, 480000, 440.0)); // 10 s each
+        QString id = engine.enqueueTrackRender(trackPath, settings);
+        QVERIFY(!id.isEmpty());
+        taskIds << id;
+    }
+
+    const bool drained = cancelAndDrainRenderEngine(engine, 10000);
+    QVERIFY2(drained, "cancelAndDrainRenderEngine did not reach idle within its deadline");
+    QCOMPARE(engine.queuedTasksCount(), 0);
+    QVERIFY(!engine.isRendering());
+
+    // Engine must remain usable for a subsequent normal render (state not poisoned).
+    QString trackPath = sourceDir + "/after_cleanup.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 24000, 440.0));
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+    QString nextId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!nextId.isEmpty());
+    QVERIFY(waitForRenderIdle(engine));
+    QCoreApplication::processEvents();
+    QVERIFY(spyFinished.count() >= 1);
+    const int lastStatus = spyFinished.last().at(1).toInt();
+    QCOMPARE(lastStatus, static_cast<int>(RenderStatus::Completed));
+    engine.resetTaskInfo();
+}
+
 #include "test_phase4_export_render.moc"
