@@ -49,6 +49,13 @@ enum class RenderStatus {
     Cancelled
 };
 
+enum class RenderWorkerState {
+    Idle,
+    Starting,
+    Rendering,
+    Stopping
+};
+
 enum class RenderType {
     SingleTrack,
     Album
@@ -126,6 +133,11 @@ public:
     /// Request cancellation of currently active render task
     void cancelCurrentRender();
 
+    /// Request cancellation of currently active render task and all queued tasks
+    void cancelAllRenders();
+
+    [[nodiscard]] RenderWorkerState workerState() const noexcept;
+    [[nodiscard]] bool isIdle() const noexcept;
     [[nodiscard]] bool isRendering() const noexcept;
     [[nodiscard]] int queuedTasksCount() const noexcept;
     [[nodiscard]] RenderTaskInfo currentTaskInfo() const;
@@ -145,6 +157,15 @@ private:
     QString enqueueTrackRenderForTesting(const QString& trackPath,
                                          const RenderSettings& settings,
                                          const QString& testOutputDir);
+
+    using TestTaskHook = std::function<void(const QString& taskId,
+                                            RenderWorkerState state,
+                                            const std::atomic<bool>& cancelFlag)>;
+    using TestHookCleanupCallback = std::function<void()>;
+
+    void setTestTaskHook(TestTaskHook hook, TestHookCleanupCallback cleanupCb = nullptr);
+    void clearTestTaskHook();
+    [[nodiscard]] std::shared_ptr<TestTaskHook> getTestTaskHook() const;
 
     using StatDevResolver = std::function<bool(const QString& path, dev_t& outDev)>;
 
@@ -171,10 +192,17 @@ private:
     std::condition_variable m_queueCv;
     std::queue<RenderTaskInfo> m_taskQueue;
     RenderTaskInfo m_currentTask;
+    std::atomic<RenderWorkerState> m_workerState{RenderWorkerState::Idle};
     std::atomic<bool> m_isRendering{false};
     std::atomic<bool> m_cancelRequested{false};
+    std::atomic<bool> m_cancelAllRequested{false};
     std::atomic<bool> m_stopWorker{false};
+    std::atomic<uint64_t> m_nextTaskSeq{1};
     std::thread m_workerThread;
+
+    mutable std::mutex m_testHookMutex;
+    std::shared_ptr<TestTaskHook> m_testTaskHook;
+    TestHookCleanupCallback m_testHookCleanupCb;
 };
 
 } // namespace desk32::engine::render

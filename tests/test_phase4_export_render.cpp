@@ -32,47 +32,51 @@ using namespace desk32::engine::session;
 using namespace desk32::core;
 using namespace desk32::core::log;
 
-/// Records that a render-wait timeout happened and the follow-up cleanup did not
-/// restore the engine to idle. Checked in cleanup()/cleanupTestCase() so the
-/// failure is reported even if the timed-out test already returned.
+/// Records whether a render-wait timeout occurred and whether the post-timeout
+/// cancel-and-drain cleanup failed. Both flags are evaluated in cleanup() (Option A,
+/// Section 6): even if post-timeout cleanup succeeds, a timeout is still recorded
+/// and treated as a test failure; if cleanup itself fails, it is recorded as a
+/// critical test environment abnormality.
 static std::atomic<bool> g_renderCleanupFailed{false};
 static std::atomic<bool> g_renderTimeoutOccurred{false};
 
-/// Bounded cancel-and-drain of the render engine. Each cancel request is consumed by
-/// one task, so it is re-issued until the active job and all queued jobs are gone or
-/// the deadline expires. Returns true only if the engine reached idle in time.
+/// Bounded cancel-and-drain of the render engine using the unified isIdle() state check.
+/// Cancels both the active render and all queued tasks via cancelAllRenders(), then
+/// polls until the engine reaches RenderWorkerState::Idle with an empty queue or the
+/// deadline expires.
 /// NOTE: std::thread::join() has no timeout; this only polls engine state. The CTest
-/// TIMEOUT remains the last line of defence.
+/// TIMEOUT (300s) remains the last line of defence.
 template <typename Engine>
 static bool cancelAndDrainRenderEngine(Engine& engine, int timeoutMs = 10000)
 {
     QElapsedTimer timer;
     timer.start();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+    engine.cancelAllRenders();
+    while (!engine.isIdle()) {
         if (timer.elapsed() > timeoutMs) {
             return false;
         }
-        engine.cancelCurrentRender();
+        engine.cancelAllRenders();
         QTest::qWait(10);
     }
     QCoreApplication::processEvents();
     engine.resetTaskInfo();
-    return true;
+    return engine.isIdle();
 }
 
-/// Bounded wait for the render engine to drain; returns false on timeout.
-/// On timeout the active render is cancelled, queued jobs are drained within a bounded
-/// time, and the outcome is recorded so the run is ultimately reported as failed.
+/// Bounded wait for the render engine to become idle; returns false on timeout.
+/// On timeout, records g_renderTimeoutOccurred = true, attempts bounded cancel-and-drain,
+/// and sets g_renderCleanupFailed = true if the drain fails.
 template <typename Engine>
-static bool waitForRenderIdle(Engine& engine, int timeoutMs = 30000)
+static bool waitForRenderIdle(Engine& engine, int timeoutMs = 30000, int cleanupTimeoutMs = 10000)
 {
     QElapsedTimer timer;
     timer.start();
-    while (engine.queuedTasksCount() > 0 || engine.isRendering()) {
+    while (!engine.isIdle()) {
         if (timer.elapsed() > timeoutMs) {
-            g_renderTimeoutOccurred.store(true);
-            if (!cancelAndDrainRenderEngine(engine)) {
-                g_renderCleanupFailed.store(true);
+            g_renderTimeoutOccurred.store(true, std::memory_order_release);
+            if (!cancelAndDrainRenderEngine(engine, cleanupTimeoutMs)) {
+                g_renderCleanupFailed.store(true, std::memory_order_release);
             }
             return false;
         }
@@ -167,6 +171,7 @@ class TestPhase4ExportRender : public QObject {
 private slots:
     void initTestCase();
     void cleanupTestCase();
+    void init();
     void cleanup();
 
     // 1. WAV File Writer (16-bit, 24-bit, 32-bit float, RIFF headers, TPDF dither)
@@ -228,9 +233,221 @@ private slots:
 
     // 20. A-T08: Verify output and staging filesystem containment
     void testOutputAndStagingFilesystemContainment();
+
+    // 21. RCT-01, RCT-02, RCT-03, RCT-05, RCT-06: Deterministic render start gate, active cancellation, queue drain, and recovery
     void testRenderTimeoutCancelAndDrainCleanup();
 
+    // 22. RCT-04: Verify Idle state race window is eliminated during RenderWorkerState::Starting
+    void testRenderWorkerStateIdleRaceWindowEliminated();
+
+    // 23. RCT-07, RCT-08, RCT-09, RCT-10: Verify gate timeout, wait timeout, cleanup failure detection, and state isolation
+    void testRenderCleanupFailureAndTimeoutDetection();
+
 private:
+    struct CleanupEvaluation {
+        bool passed = true;
+        bool hadRenderTimeout = false;
+        bool hadCleanupFailure = false;
+        bool engineLeftBusy = false;
+        QString failureMessage;
+    };
+
+    static CleanupEvaluation performTestCleanupCycle(RenderEngine& engine,
+                                                     int drainTimeoutMs = 10000,
+                                                     bool clearHooksFirst = true)
+    {
+        CleanupEvaluation eval;
+        eval.hadRenderTimeout = g_renderTimeoutOccurred.exchange(false, std::memory_order_acq_rel);
+        eval.hadCleanupFailure = g_renderCleanupFailed.exchange(false, std::memory_order_acq_rel);
+
+        if (clearHooksFirst) {
+            // Releases any active test gate via its registered cleanup callback and removes the hook
+            engine.clearTestTaskHook();
+        }
+
+        // Always perform recovery/drain before reporting failure (Section 5.3)
+        if (!engine.isIdle()) {
+            if (!cancelAndDrainRenderEngine(engine, drainTimeoutMs)) {
+                eval.hadCleanupFailure = true;
+            }
+        } else {
+            QCoreApplication::processEvents();
+            engine.resetTaskInfo();
+        }
+
+        eval.engineLeftBusy = !engine.isIdle();
+
+        if (eval.hadCleanupFailure || eval.engineLeftBusy) {
+            eval.passed = false;
+            eval.failureMessage = QStringLiteral(
+                "CRITICAL TEST ENVIRONMENT ABNORMALITY: Render engine cleanup/drain failed "
+                "(hadRenderTimeout=%1, hadCleanupFailure=%2, engineLeftBusy=%3)")
+                .arg(eval.hadRenderTimeout ? 1 : 0)
+                .arg(eval.hadCleanupFailure ? 1 : 0)
+                .arg(eval.engineLeftBusy ? 1 : 0);
+        } else if (eval.hadRenderTimeout) {
+            eval.passed = false;
+            eval.failureMessage = QStringLiteral(
+                "Render wait timed out during test (post-timeout cancel-and-drain cleanup succeeded, "
+                "but the timeout itself is recorded as a test failure)");
+        }
+
+        return eval;
+    }
+
+    /// Reference-counted, bounded-timeout, RAII-safe test synchronization gate for RenderEngine.
+    /// Shared state lives on the heap via std::shared_ptr<GateState> so the worker thread can
+    /// never access dangling memory even if the gate is released/detached concurrently.
+    class ScopedRenderTestGate {
+    public:
+        struct GateState {
+            std::mutex mtx;
+            std::condition_variable cv;
+            RenderWorkerState targetState = RenderWorkerState::Rendering;
+            bool releaseOnCancel = false;
+            int workerWaitLimitMs = 5000;
+            bool alreadyTriggered = false;
+            bool arrived = false;
+            bool released = false;
+            bool workerInHook = false;
+            bool workerExited = false;
+            bool workerTimedOut = false;
+            QString arrivedTaskId;
+            RenderWorkerState arrivedState = RenderWorkerState::Idle;
+        };
+
+        explicit ScopedRenderTestGate(RenderEngine& engine,
+                                      RenderWorkerState targetState = RenderWorkerState::Rendering,
+                                      bool releaseOnCancel = false,
+                                      int workerWaitLimitMs = 5000)
+            : m_engine(engine)
+            , m_state(std::make_shared<GateState>())
+        {
+            m_state->targetState = targetState;
+            m_state->releaseOnCancel = releaseOnCancel;
+            m_state->workerWaitLimitMs = workerWaitLimitMs;
+
+            auto stateCopy = m_state;
+            auto stateForCleanup = m_state;
+
+            m_engine.setTestTaskHook(
+                [stateCopy](const QString& taskId,
+                            RenderWorkerState wState,
+                            const std::atomic<bool>& cancelFlag) {
+                    std::unique_lock<std::mutex> lock(stateCopy->mtx);
+                    if (wState != stateCopy->targetState || stateCopy->alreadyTriggered) {
+                        return;
+                    }
+                    stateCopy->alreadyTriggered = true;
+                    stateCopy->arrived = true;
+                    stateCopy->workerInHook = true;
+                    stateCopy->arrivedTaskId = taskId;
+                    stateCopy->arrivedState = wState;
+                    stateCopy->cv.notify_all();
+
+                    const auto deadline = std::chrono::steady_clock::now() +
+                                          std::chrono::milliseconds(stateCopy->workerWaitLimitMs);
+                    while (!stateCopy->released) {
+                        if (stateCopy->releaseOnCancel &&
+                            cancelFlag.load(std::memory_order_acquire)) {
+                            break;
+                        }
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now >= deadline) {
+                            stateCopy->workerTimedOut = true;
+                            break;
+                        }
+                        const auto slice = std::min<std::chrono::milliseconds>(
+                            std::chrono::milliseconds(10),
+                            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now) +
+                                std::chrono::milliseconds(1));
+                        stateCopy->cv.wait_for(lock, slice);
+                    }
+
+                    stateCopy->workerInHook = false;
+                    stateCopy->workerExited = true;
+                    stateCopy->cv.notify_all();
+                },
+                [stateForCleanup]() {
+                    std::lock_guard<std::mutex> lock(stateForCleanup->mtx);
+                    stateForCleanup->released = true;
+                    stateForCleanup->cv.notify_all();
+                }
+            );
+        }
+
+        ~ScopedRenderTestGate() {
+            releaseAndDetach();
+        }
+
+        ScopedRenderTestGate(const ScopedRenderTestGate&) = delete;
+        ScopedRenderTestGate& operator=(const ScopedRenderTestGate&) = delete;
+
+        bool waitForArrival(int timeoutMs = 5000) {
+            QElapsedTimer timer;
+            timer.start();
+            while (timer.elapsed() < timeoutMs) {
+                {
+                    std::unique_lock<std::mutex> lock(m_state->mtx);
+                    if (m_state->arrived) {
+                        return true;
+                    }
+                    m_state->cv.wait_for(lock, std::chrono::milliseconds(10), [this]() {
+                        return m_state->arrived;
+                    });
+                    if (m_state->arrived) {
+                        return true;
+                    }
+                }
+                QCoreApplication::processEvents();
+            }
+            return false;
+        }
+
+        void enableReleaseOnCancel() {
+            std::lock_guard<std::mutex> lock(m_state->mtx);
+            m_state->releaseOnCancel = true;
+            m_state->cv.notify_all();
+        }
+
+        void release() {
+            std::lock_guard<std::mutex> lock(m_state->mtx);
+            m_state->released = true;
+            m_state->cv.notify_all();
+        }
+
+        bool waitForWorkerExit(int timeoutMs = 5000) {
+            std::unique_lock<std::mutex> lock(m_state->mtx);
+            return m_state->cv.wait_for(lock, std::chrono::milliseconds(timeoutMs), [this]() {
+                return !m_state->workerInHook && (!m_state->arrived || m_state->workerExited);
+            });
+        }
+
+        void releaseAndDetach(int timeoutMs = 5000) {
+            release();
+            m_engine.clearTestTaskHook();
+            (void)waitForWorkerExit(timeoutMs);
+        }
+
+        [[nodiscard]] QString arrivedTaskId() const {
+            std::lock_guard<std::mutex> lock(m_state->mtx);
+            return m_state->arrivedTaskId;
+        }
+
+        [[nodiscard]] RenderWorkerState arrivedState() const {
+            std::lock_guard<std::mutex> lock(m_state->mtx);
+            return m_state->arrivedState;
+        }
+
+        [[nodiscard]] bool workerTimedOut() const {
+            std::lock_guard<std::mutex> lock(m_state->mtx);
+            return m_state->workerTimedOut;
+        }
+
+    private:
+        RenderEngine& m_engine;
+        std::shared_ptr<GateState> m_state;
+    };
     std::unique_ptr<QTemporaryDir> m_tempDir;
     QString m_dbPath;
 
@@ -266,14 +483,21 @@ void TestPhase4ExportRender::initTestCase()
     RenderEngine::instance().setDatabasePath(m_dbPath);
 }
 
+void TestPhase4ExportRender::init()
+{
+    g_renderTimeoutOccurred.store(false, std::memory_order_release);
+    g_renderCleanupFailed.store(false, std::memory_order_release);
+    RenderEngine::instance().clearTestTaskHook();
+    QVERIFY2(RenderEngine::instance().isIdle(), "Render engine must be idle at start of test");
+}
+
 void TestPhase4ExportRender::cleanup()
 {
-    // Per-test isolation guard: a render-wait timeout must leave the engine idle,
-    // otherwise the next test would inherit in-flight state.
-    QVERIFY2(!g_renderCleanupFailed.load(),
-             "Render engine could not be cancelled/drained after a wait timeout; test isolation compromised");
-    QVERIFY2(RenderEngine::instance().queuedTasksCount() == 0 && !RenderEngine::instance().isRendering(),
-             "Render engine not idle at end of test");
+    // Per-test isolation guard: performs full cleanup/drain before evaluating test outcome
+    // (Section 5.3 & Section 6: never skip cleanup to record failure; evaluate both timeout
+    // and cleanup failure flags independently).
+    const CleanupEvaluation eval = performTestCleanupCycle(RenderEngine::instance(), 10000, true);
+    QVERIFY2(eval.passed, qPrintable(eval.failureMessage));
 }
 
 void TestPhase4ExportRender::cleanupTestCase()
@@ -1485,46 +1709,367 @@ void TestPhase4ExportRender::testOutputAndStagingFilesystemContainment()
     QCOMPARE(QDir::cleanPath(outGenInfo.dir().canonicalPath()), QDir::cleanPath(canonicalSource));
 }
 
-QTEST_GUILESS_MAIN(TestPhase4ExportRender)
 void TestPhase4ExportRender::testRenderTimeoutCancelAndDrainCleanup()
 {
-    // Exercises the timeout cleanup path directly: queue several jobs, then cancel and
-    // drain with a bounded deadline. Verifies the engine is idle afterwards (so a later
-    // test cannot inherit in-flight state) and that no completed-state leaks remain.
+    // RCT-01, RCT-02, RCT-03, RCT-05, RCT-06 (Section 4.2 & 4.3):
+    // Deterministic verification of active render cancellation, queued task draining,
+    // per-taskId outcome verification (distinguishing in-flight vs pre-start cancellation),
+    // and subsequent normal render recovery without timing/sleep guessing.
     RenderEngine& engine = RenderEngine::instance();
+    QVERIFY(engine.isIdle());
 
-    QString sourceDir = m_tempDir->filePath("cleanup_source");
+    QString sourceDir = m_tempDir->filePath("cleanup_deterministic_source");
     QDir().mkpath(sourceDir);
     RenderSettings settings;
     settings.bitDepth = RenderBitDepth::Int24;
     settings.rateMode = RenderSampleRateMode::Original;
 
-    QStringList taskIds;
-    for (int i = 0; i < 3; ++i) {
-        QString trackPath = sourceDir + QString("/cleanup_%1.wav").arg(i);
-        QVERIFY(createTestWav(trackPath, 48000.0, 480000, 440.0)); // 10 s each
-        QString id = engine.enqueueTrackRender(trackPath, settings);
-        QVERIFY(!id.isEmpty());
-        taskIds << id;
-    }
+    QString track1Path = sourceDir + "/cleanup_0.wav";
+    QString track2Path = sourceDir + "/cleanup_1.wav";
+    QString track3Path = sourceDir + "/cleanup_2.wav";
+    QVERIFY(createTestWav(track1Path, 48000.0, 24000, 440.0));
+    QVERIFY(createTestWav(track2Path, 48000.0, 24000, 440.0));
+    QVERIFY(createTestWav(track3Path, 48000.0, 24000, 440.0));
 
+    QSignalSpy spyStarted(&engine, &RenderEngine::renderTaskStarted);
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    // Install deterministic gate that pauses Task 1 once it enters RenderWorkerState::Rendering
+    ScopedRenderTestGate renderGate(engine, RenderWorkerState::Rendering, /*releaseOnCancel=*/false, 5000);
+
+    // Step 1: Enqueue 1st Render task
+    const QString taskId1 = engine.enqueueTrackRender(track1Path, settings);
+    QVERIFY(!taskId1.isEmpty());
+
+    // Step 2 & 3 (RCT-01): Synchronously confirm 1st task started rendering and is paused at the gate
+    QVERIFY2(renderGate.waitForArrival(5000), "Timed out waiting for Task 1 to arrive at Rendering gate");
+    QCOMPARE(renderGate.arrivedTaskId(), taskId1);
+    QCOMPARE(renderGate.arrivedState(), RenderWorkerState::Rendering);
+    QCOMPARE(engine.workerState(), RenderWorkerState::Rendering);
+    QVERIFY(engine.isRendering());
+    QVERIFY(!engine.isIdle());
+
+    // Wait for queued renderTaskStarted signal for Task 1
+    {
+        QElapsedTimer sigTimer;
+        sigTimer.start();
+        while (spyStarted.count() < 1 && sigTimer.elapsed() < 2000) {
+            QTest::qWait(10);
+        }
+    }
+    QCOMPARE(spyStarted.count(), 1);
+    QCOMPARE(spyStarted.at(0).at(0).toString(), taskId1);
+
+    // Confirm Task 1 created its staging folder before pausing at the gate
+    QDir sourceQDir(sourceDir);
+    QStringList activeStagings = sourceQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(activeStagings.count(), 1);
+
+    // Step 4: Enqueue 2nd and 3rd tasks while Task 1 is deterministically paused
+    const QString taskId2 = engine.enqueueTrackRender(track2Path, settings);
+    const QString taskId3 = engine.enqueueTrackRender(track3Path, settings);
+    QVERIFY(!taskId2.isEmpty());
+    QVERIFY(!taskId3.isEmpty());
+    QVERIFY(taskId1 != taskId2);
+    QVERIFY(taskId2 != taskId3);
+    QVERIFY(taskId1 != taskId3);
+
+    // Step 5: Verify 2nd and 3rd tasks are sitting in the wait queue
+    QCOMPARE(engine.queuedTasksCount(), 2);
+    QCOMPARE(spyFinished.count(), 0);
+
+    // Step 6: Enable cancel-release on the gate and execute cancelAndDrainRenderEngine
+    renderGate.enableReleaseOnCancel();
     const bool drained = cancelAndDrainRenderEngine(engine, 10000);
     QVERIFY2(drained, "cancelAndDrainRenderEngine did not reach idle within its deadline");
+    renderGate.releaseAndDetach();
+
+    // Flush queued signals so all renderTaskFinished events are delivered
+    {
+        QElapsedTimer sigTimer;
+        sigTimer.start();
+        while (spyFinished.count() < 3 && sigTimer.elapsed() < 2000) {
+            QTest::qWait(10);
+        }
+    }
+
+    // Step 7 & 8 (RCT-02, RCT-03, Section 4.3): Verify per-taskId terminal status and start vs pre-start distinction
+    QCOMPARE(spyFinished.count(), 3);
+
+    // Only Task 1 ever entered Rendering and emitted renderTaskStarted; Tasks 2 & 3 were cancelled before start
+    QCOMPARE(spyStarted.count(), 1);
+    QCOMPARE(spyStarted.at(0).at(0).toString(), taskId1);
+
+    struct FinishedRecord {
+        RenderStatus status = RenderStatus::Queued;
+        QString outputDir;
+        QString errorMessage;
+    };
+    std::map<QString, FinishedRecord> finishedByTaskId;
+    for (int i = 0; i < spyFinished.count(); ++i) {
+        const QVariantList& args = spyFinished.at(i);
+        FinishedRecord rec;
+        rec.status = static_cast<RenderStatus>(args.at(1).toInt());
+        rec.outputDir = args.at(2).toString();
+        rec.errorMessage = args.at(3).toString();
+        finishedByTaskId[args.at(0).toString()] = rec;
+    }
+
+    // Verify Task 1 (cancelled during processing + staging rolled back)
+    QVERIFY2(finishedByTaskId.count(taskId1) == 1, "Missing renderTaskFinished for Task 1");
+    QCOMPARE(finishedByTaskId[taskId1].status, RenderStatus::Cancelled);
+    QVERIFY2(finishedByTaskId[taskId1].errorMessage.contains("cancelled during processing"),
+             qPrintable(finishedByTaskId[taskId1].errorMessage));
+
+    // Verify Task 2 (cancelled before processing)
+    QVERIFY2(finishedByTaskId.count(taskId2) == 1, "Missing renderTaskFinished for Task 2");
+    QCOMPARE(finishedByTaskId[taskId2].status, RenderStatus::Cancelled);
+    QVERIFY2(finishedByTaskId[taskId2].errorMessage.contains("cancelled before processing"),
+             qPrintable(finishedByTaskId[taskId2].errorMessage));
+
+    // Verify Task 3 (cancelled before processing)
+    QVERIFY2(finishedByTaskId.count(taskId3) == 1, "Missing renderTaskFinished for Task 3");
+    QCOMPARE(finishedByTaskId[taskId3].status, RenderStatus::Cancelled);
+    QVERIFY2(finishedByTaskId[taskId3].errorMessage.contains("cancelled before processing"),
+             qPrintable(finishedByTaskId[taskId3].errorMessage));
+
+    // Staging directory from Task 1 must be rolled back and deleted
+    QStringList remainingStagings = sourceQDir.entryList(QStringList() << ".desk32_staging_*", QDir::Dirs | QDir::Hidden);
+    QCOMPARE(remainingStagings.count(), 0);
+
+    // Step 9 (RCT-05): Verify all tasks are terminated and RenderEngine is completely Idle
+    QVERIFY(engine.isIdle());
+    QCOMPARE(engine.workerState(), RenderWorkerState::Idle);
     QCOMPARE(engine.queuedTasksCount(), 0);
     QVERIFY(!engine.isRendering());
+    QVERIFY(engine.currentTaskInfo().taskId.isEmpty());
 
-    // Engine must remain usable for a subsequent normal render (state not poisoned).
-    QString trackPath = sourceDir + "/after_cleanup.wav";
-    QVERIFY(createTestWav(trackPath, 48000.0, 24000, 440.0));
-    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
-    QString nextId = engine.enqueueTrackRender(trackPath, settings);
-    QVERIFY(!nextId.isEmpty());
+    // Step 10 (RCT-06): Verify a subsequent normal render completes with RenderStatus::Completed
+    QString track4Path = sourceDir + "/after_cleanup.wav";
+    QVERIFY(createTestWav(track4Path, 48000.0, 24000, 440.0));
+    spyStarted.clear();
+    spyFinished.clear();
+
+    const QString taskId4 = engine.enqueueTrackRender(track4Path, settings);
+    QVERIFY(!taskId4.isEmpty());
     QVERIFY(waitForRenderIdle(engine));
     QCoreApplication::processEvents();
-    QVERIFY(spyFinished.count() >= 1);
-    const int lastStatus = spyFinished.last().at(1).toInt();
-    QCOMPARE(lastStatus, static_cast<int>(RenderStatus::Completed));
+
+    QCOMPARE(spyStarted.count(), 1);
+    QCOMPARE(spyStarted.at(0).at(0).toString(), taskId4);
+    QCOMPARE(spyFinished.count(), 1);
+    QCOMPARE(spyFinished.at(0).at(0).toString(), taskId4);
+    QCOMPARE(static_cast<RenderStatus>(spyFinished.at(0).at(1).toInt()), RenderStatus::Completed);
+    const QString outDir4 = spyFinished.at(0).at(2).toString();
+    QVERIFY(!outDir4.isEmpty());
+    QVERIFY(QFile::exists(outDir4 + "/after_cleanup.wav"));
+    engine.resetTaskInfo();
+    QVERIFY(engine.isIdle());
+}
+
+void TestPhase4ExportRender::testRenderWorkerStateIdleRaceWindowEliminated()
+{
+    // RCT-04 (Section 3): Deterministic verification that popping a task from m_taskQueue
+    // atomically transitions RenderEngine to RenderWorkerState::Starting under m_queueMutex,
+    // eliminating the race window where queuedTasksCount() == 0 and isRendering() == false.
+    RenderEngine& engine = RenderEngine::instance();
+    QVERIFY(engine.isIdle());
+    QCOMPARE(engine.workerState(), RenderWorkerState::Idle);
+
+    QString sourceDir = m_tempDir->filePath("race_window_source");
+    QDir().mkpath(sourceDir);
+    QString trackPath = sourceDir + "/starting_state_track.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 12000, 440.0));
+
+    RenderSettings settings;
+    QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+    // Pause the worker thread in RenderWorkerState::Starting (immediately after m_taskQueue.pop()
+    // and unlocking m_queueMutex, before workerSeqMgr.initialize() and before processTask()).
+    ScopedRenderTestGate startingGate(engine, RenderWorkerState::Starting, /*releaseOnCancel=*/false, 5000);
+
+    const QString taskId = engine.enqueueTrackRender(trackPath, settings);
+    QVERIFY(!taskId.isEmpty());
+
+    QVERIFY2(startingGate.waitForArrival(5000), "Timed out waiting for worker to enter Starting state");
+    QCOMPARE(startingGate.arrivedTaskId(), taskId);
+    QCOMPARE(startingGate.arrivedState(), RenderWorkerState::Starting);
+
+    // At this exact point: the task has been popped from m_taskQueue (queuedTasksCount() == 0),
+    // and processTask() has not started yet. The engine MUST NOT appear Idle!
+    QCOMPARE(engine.queuedTasksCount(), 0);
+    QCOMPARE(engine.workerState(), RenderWorkerState::Starting);
+    QVERIFY(engine.isRendering());
+    QVERIFY(!engine.isIdle());
+
+    // Release the Starting gate and allow the render to complete normally
+    startingGate.releaseAndDetach();
+    QVERIFY2(waitForRenderIdle(engine), "Timed out waiting for render to finish after Starting gate release");
+    QCoreApplication::processEvents();
+
+    QCOMPARE(spyFinished.count(), 1);
+    QCOMPARE(spyFinished.at(0).at(0).toString(), taskId);
+    QCOMPARE(static_cast<RenderStatus>(spyFinished.at(0).at(1).toInt()), RenderStatus::Completed);
+    QVERIFY(engine.isIdle());
+    QCOMPARE(engine.workerState(), RenderWorkerState::Idle);
+    QVERIFY(!engine.isRendering());
     engine.resetTaskInfo();
 }
+
+void TestPhase4ExportRender::testRenderCleanupFailureAndTimeoutDetection()
+{
+    // RCT-07, RCT-08, RCT-09, RCT-10 (Sections 5, 6, 7):
+    // Deterministic verification of:
+    // - RCT-10: Synchronization gate bounded timeouts (both arrival wait and worker hold limit)
+    // - RCT-08: Render wait timeout is never treated as test success even if post-timeout cleanup succeeds
+    // - RCT-07: Cleanup failure path sets g_renderCleanupFailed and is detected by cleanup evaluation
+    // - RCT-09: Post-cleanup state isolation (subsequent tests and normal renders succeed cleanly)
+    RenderEngine& engine = RenderEngine::instance();
+    QVERIFY(engine.isIdle());
+
+    QString sourceDir = m_tempDir->filePath("cleanup_failure_test_source");
+    QDir().mkpath(sourceDir);
+    RenderSettings settings;
+
+    // -------------------------------------------------------------------------
+    // Part 1 (RCT-10): Synchronization gate bounded timeout verification
+    // -------------------------------------------------------------------------
+    {
+        // 1a. Arrival wait timeout when no task is enqueued
+        ScopedRenderTestGate idleGate(engine, RenderWorkerState::Rendering, false, 500);
+        QVERIFY(!idleGate.waitForArrival(40));
+        idleGate.releaseAndDetach();
+        QVERIFY(engine.isIdle());
+
+        // 1b. Worker wait limit timeout when test never calls release()
+        QString gateTimeoutTrack = sourceDir + "/gate_timeout_track.wav";
+        QVERIFY(createTestWav(gateTimeoutTrack, 48000.0, 12000, 440.0));
+        ScopedRenderTestGate shortHoldGate(engine, RenderWorkerState::Rendering, /*releaseOnCancel=*/false, /*workerWaitLimitMs=*/60);
+
+        const QString tid = engine.enqueueTrackRender(gateTimeoutTrack, settings);
+        QVERIFY(!tid.isEmpty());
+        QVERIFY2(shortHoldGate.waitForArrival(5000), "Worker did not arrive at shortHoldGate");
+
+        // Do not call release(); verify worker self-unblocks when workerWaitLimitMs (60ms) expires
+        QVERIFY2(shortHoldGate.waitForWorkerExit(2000), "Worker did not self-unblock after gate timeout");
+        QVERIFY(shortHoldGate.workerTimedOut());
+        shortHoldGate.releaseAndDetach();
+
+        QVERIFY2(waitForRenderIdle(engine), "Engine did not become idle after shortHoldGate self-unblock");
+        engine.resetTaskInfo();
+    }
+
+    // -------------------------------------------------------------------------
+    // Part 2 (RCT-08 & RCT-09): Wait timeout with successful post-timeout cleanup
+    // -------------------------------------------------------------------------
+    {
+        QString timeoutTrack = sourceDir + "/wait_timeout_track.wav";
+        QVERIFY(createTestWav(timeoutTrack, 48000.0, 24000, 440.0));
+        QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+
+        // Gate holds worker during initial wait, but releases on cancel so post-timeout cleanup succeeds
+        ScopedRenderTestGate cancelAwareGate(engine, RenderWorkerState::Rendering, /*releaseOnCancel=*/true, 5000);
+        const QString tid = engine.enqueueTrackRender(timeoutTrack, settings);
+        QVERIFY(!tid.isEmpty());
+        QVERIFY2(cancelAwareGate.waitForArrival(5000), "Worker did not arrive at cancelAwareGate");
+
+        // waitForRenderIdle times out after 40ms, then triggers cancelAndDrainRenderEngine(5000) which succeeds
+        const bool waitResult = waitForRenderIdle(engine, /*timeoutMs=*/40, /*cleanupTimeoutMs=*/5000);
+        QVERIFY(!waitResult); // RCT-08: waitForRenderIdle returns false on timeout
+        QVERIFY(g_renderTimeoutOccurred.load());
+        QVERIFY(!g_renderCleanupFailed.load()); // Post-timeout cleanup succeeded
+        QVERIFY(engine.isIdle());               // Engine restored to Idle
+
+        cancelAwareGate.releaseAndDetach();
+
+        // Evaluate via performTestCleanupCycle: even though cleanup succeeded, hadRenderTimeout
+        // MUST cause eval.passed to be false so a timeout is never treated as test success!
+        const CleanupEvaluation eval = performTestCleanupCycle(engine, 5000, true);
+        QVERIFY(!eval.passed);
+        QVERIFY(eval.hadRenderTimeout);
+        QVERIFY(!eval.hadCleanupFailure);
+        QVERIFY(!eval.engineLeftBusy);
+        QVERIFY2(eval.failureMessage.contains("Render wait timed out"), qPrintable(eval.failureMessage));
+        QVERIFY(!g_renderTimeoutOccurred.load());
+        QVERIFY(!g_renderCleanupFailed.load());
+    }
+
+    // -------------------------------------------------------------------------
+    // Part 3 (RCT-07 & RCT-09): Deterministic cleanup failure path & recovery
+    // -------------------------------------------------------------------------
+    {
+        QString failTrack = sourceDir + "/cleanup_fail_track.wav";
+        QVERIFY(createTestWav(failTrack, 48000.0, 24000, 440.0));
+
+        // Gate holds worker and ignores cancel (releaseOnCancel = false) to deterministically
+        // force cancelAndDrainRenderEngine() to fail its deadline.
+        ScopedRenderTestGate blockingGate(engine, RenderWorkerState::Rendering, /*releaseOnCancel=*/false, 5000);
+        const QString tid = engine.enqueueTrackRender(failTrack, settings);
+        QVERIFY(!tid.isEmpty());
+        QVERIFY2(blockingGate.waitForArrival(5000), "Worker did not arrive at blockingGate");
+
+        // Both wait (40ms) and post-timeout drain (40ms) expire while worker is held at blockingGate
+        const bool waitResult = waitForRenderIdle(engine, /*timeoutMs=*/40, /*cleanupTimeoutMs=*/40);
+        QVERIFY(!waitResult);
+        QVERIFY(g_renderTimeoutOccurred.load());
+        QVERIFY(g_renderCleanupFailed.load()); // RCT-07: g_renderCleanupFailed is deterministically set
+        QVERIFY(!engine.isIdle());
+
+        // Verify performTestCleanupCycle when hook is NOT yet cleared and drain fails:
+        // detects both hadRenderTimeout, hadCleanupFailure, and engineLeftBusy.
+        const CleanupEvaluation evalWhileBlocked = performTestCleanupCycle(
+            engine, /*drainTimeoutMs=*/30, /*clearHooksFirst=*/false);
+        QVERIFY(!evalWhileBlocked.passed);
+        QVERIFY(evalWhileBlocked.hadRenderTimeout);
+        QVERIFY(evalWhileBlocked.hadCleanupFailure);
+        QVERIFY(evalWhileBlocked.engineLeftBusy);
+        QVERIFY2(evalWhileBlocked.failureMessage.contains("CRITICAL TEST ENVIRONMENT ABNORMALITY"),
+                 qPrintable(evalWhileBlocked.failureMessage));
+
+        // Now verify standard performTestCleanupCycle (with clearHooksFirst = true, as called by cleanup()):
+        // Re-set g_renderCleanupFailed to simulate cleanup() running after a failed drain,
+        // verify it clears the hook (releasing blockingGate), drains the worker to Idle,
+        // and still reports eval.passed == false due to hadCleanupFailure.
+        g_renderTimeoutOccurred.store(true, std::memory_order_release);
+        g_renderCleanupFailed.store(true, std::memory_order_release);
+
+        const CleanupEvaluation evalWithHookRelease = performTestCleanupCycle(
+            engine, /*drainTimeoutMs=*/5000, /*clearHooksFirst=*/true);
+        QVERIFY(!evalWithHookRelease.passed);
+        QVERIFY(evalWithHookRelease.hadRenderTimeout);
+        QVERIFY(evalWithHookRelease.hadCleanupFailure);
+        QVERIFY(!evalWithHookRelease.engineLeftBusy);
+        QVERIFY2(evalWithHookRelease.failureMessage.contains("CRITICAL TEST ENVIRONMENT ABNORMALITY"),
+                 qPrintable(evalWithHookRelease.failureMessage));
+
+        blockingGate.releaseAndDetach();
+
+        // Engine must now be completely Idle and flags reset
+        QVERIFY(engine.isIdle());
+        QCOMPARE(engine.workerState(), RenderWorkerState::Idle);
+        QCOMPARE(engine.queuedTasksCount(), 0);
+        QVERIFY(!engine.isRendering());
+        QVERIFY(!g_renderTimeoutOccurred.load());
+        QVERIFY(!g_renderCleanupFailed.load());
+
+        // RCT-09: Verify subsequent normal render completes cleanly with zero leftover state pollution
+        QString recoveryTrack = sourceDir + "/post_failure_recovery.wav";
+        QVERIFY(createTestWav(recoveryTrack, 48000.0, 12000, 440.0));
+        QSignalSpy spyRecoveryFinished(&engine, &RenderEngine::renderTaskFinished);
+
+        const QString recId = engine.enqueueTrackRender(recoveryTrack, settings);
+        QVERIFY(!recId.isEmpty());
+        QVERIFY2(waitForRenderIdle(engine), "Subsequent render failed after cleanup recovery");
+        QCoreApplication::processEvents();
+
+        QCOMPARE(spyRecoveryFinished.count(), 1);
+        QCOMPARE(spyRecoveryFinished.at(0).at(0).toString(), recId);
+        QCOMPARE(static_cast<RenderStatus>(spyRecoveryFinished.at(0).at(1).toInt()), RenderStatus::Completed);
+        engine.resetTaskInfo();
+        QVERIFY(engine.isIdle());
+    }
+}
+
+QTEST_GUILESS_MAIN(TestPhase4ExportRender)
 
 #include "test_phase4_export_render.moc"

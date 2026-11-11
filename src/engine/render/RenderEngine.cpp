@@ -31,16 +31,36 @@ RenderEngine::~RenderEngine() {
 }
 
 void RenderEngine::stop() {
-    cancelCurrentRender();
-    m_stopWorker.store(true, std::memory_order_release);
+    clearTestTaskHook();
+    cancelAllRenders();
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopWorker.store(true, std::memory_order_release);
+    }
     m_queueCv.notify_all();
     if (m_workerThread.joinable()) {
         m_workerThread.join();
     }
 }
 
+RenderWorkerState RenderEngine::workerState() const noexcept {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return m_workerState.load(std::memory_order_acquire);
+}
+
+bool RenderEngine::isIdle() const noexcept {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return m_taskQueue.empty() &&
+           m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
+           !m_isRendering.load(std::memory_order_acquire);
+}
+
 bool RenderEngine::isRendering() const noexcept {
-    return m_isRendering.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    const RenderWorkerState state = m_workerState.load(std::memory_order_acquire);
+    return m_isRendering.load(std::memory_order_acquire) ||
+           state == RenderWorkerState::Starting ||
+           state == RenderWorkerState::Rendering;
 }
 
 int RenderEngine::queuedTasksCount() const noexcept {
@@ -58,9 +78,59 @@ RenderTaskInfo RenderEngine::currentTaskInfo() const {
 
 void RenderEngine::cancelCurrentRender() {
     std::lock_guard<std::mutex> lock(m_queueMutex);
-    if (m_isRendering.load(std::memory_order_acquire) || !m_taskQueue.empty()) {
+    const RenderWorkerState state = m_workerState.load(std::memory_order_acquire);
+    if (m_isRendering.load(std::memory_order_acquire) ||
+        state == RenderWorkerState::Starting ||
+        state == RenderWorkerState::Rendering ||
+        !m_taskQueue.empty()) {
         m_cancelRequested.store(true, std::memory_order_release);
     }
+}
+
+void RenderEngine::cancelAllRenders() {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    const RenderWorkerState state = m_workerState.load(std::memory_order_acquire);
+    if (m_isRendering.load(std::memory_order_acquire) ||
+        state == RenderWorkerState::Starting ||
+        state == RenderWorkerState::Rendering ||
+        !m_taskQueue.empty()) {
+        m_cancelRequested.store(true, std::memory_order_release);
+        m_cancelAllRequested.store(true, std::memory_order_release);
+    }
+}
+
+void RenderEngine::setTestTaskHook(TestTaskHook hook, TestHookCleanupCallback cleanupCb) {
+    TestHookCleanupCallback prevCleanup;
+    {
+        std::lock_guard<std::mutex> lock(m_testHookMutex);
+        prevCleanup = std::move(m_testHookCleanupCb);
+        if (hook) {
+            m_testTaskHook = std::make_shared<TestTaskHook>(std::move(hook));
+        } else {
+            m_testTaskHook.reset();
+        }
+        m_testHookCleanupCb = std::move(cleanupCb);
+    }
+    if (prevCleanup) {
+        prevCleanup();
+    }
+}
+
+void RenderEngine::clearTestTaskHook() {
+    TestHookCleanupCallback cleanupCb;
+    {
+        std::lock_guard<std::mutex> lock(m_testHookMutex);
+        m_testTaskHook.reset();
+        cleanupCb = std::move(m_testHookCleanupCb);
+    }
+    if (cleanupCb) {
+        cleanupCb();
+    }
+}
+
+std::shared_ptr<RenderEngine::TestTaskHook> RenderEngine::getTestTaskHook() const {
+    std::lock_guard<std::mutex> lock(m_testHookMutex);
+    return m_testTaskHook;
 }
 
 void RenderEngine::setDatabasePath(const QString& dbPath) {
@@ -224,7 +294,9 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
     }
 
     RenderTaskInfo task;
-    task.taskId = QString("track_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    task.taskId = QString("track_%1_%2")
+                      .arg(QDateTime::currentMSecsSinceEpoch())
+                      .arg(m_nextTaskSeq.fetch_add(1, std::memory_order_relaxed));
     task.type = RenderType::SingleTrack;
     task.sourcePath = trackPath;
     task.sourceFolder = fi.absolutePath();
@@ -236,7 +308,9 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
-        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+        if (m_currentTask.taskId.isEmpty() &&
+            m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
+            !m_isRendering.load(std::memory_order_relaxed)) {
             m_currentTask = task;
         }
         m_taskQueue.push(task);
@@ -253,7 +327,9 @@ QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, con
     }
 
     RenderTaskInfo task;
-    task.taskId = QString("test_track_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    task.taskId = QString("test_track_%1_%2")
+                      .arg(QDateTime::currentMSecsSinceEpoch())
+                      .arg(m_nextTaskSeq.fetch_add(1, std::memory_order_relaxed));
     task.type = RenderType::SingleTrack;
     task.sourcePath = trackPath;
     task.sourceFolder = fi.absolutePath();
@@ -266,7 +342,9 @@ QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, con
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
-        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+        if (m_currentTask.taskId.isEmpty() &&
+            m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
+            !m_isRendering.load(std::memory_order_relaxed)) {
             m_currentTask = task;
         }
         m_taskQueue.push(task);
@@ -309,7 +387,9 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
     }
 
     RenderTaskInfo task;
-    task.taskId = QString("album_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    task.taskId = QString("album_%1_%2")
+                      .arg(QDateTime::currentMSecsSinceEpoch())
+                      .arg(m_nextTaskSeq.fetch_add(1, std::memory_order_relaxed));
     task.type = RenderType::Album;
     task.sourcePath = folderPath;
     task.sourceFolder = dir.absolutePath();
@@ -321,7 +401,9 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
-        if (m_currentTask.taskId.isEmpty() && !m_isRendering.load(std::memory_order_relaxed)) {
+        if (m_currentTask.taskId.isEmpty() &&
+            m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
+            !m_isRendering.load(std::memory_order_relaxed)) {
             m_currentTask = task;
         }
         m_taskQueue.push(task);
@@ -333,7 +415,11 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
 void RenderEngine::resetTaskInfo() {
     std::lock_guard<std::mutex> lock(m_queueMutex);
     m_currentTask = RenderTaskInfo();
-    m_cancelRequested.store(false, std::memory_order_release);
+    if (m_taskQueue.empty() &&
+        m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle) {
+        m_cancelRequested.store(false, std::memory_order_release);
+        m_cancelAllRequested.store(false, std::memory_order_release);
+    }
 }
 
 void RenderEngine::workerLoop() {
@@ -347,57 +433,94 @@ void RenderEngine::workerLoop() {
         QString activeDbPath;
         {
             std::unique_lock<std::mutex> lock(m_queueMutex);
-            if (m_taskQueue.empty() && !m_isRendering.load(std::memory_order_acquire)) {
+            if (m_taskQueue.empty()) {
                 m_cancelRequested.store(false, std::memory_order_release);
+                m_cancelAllRequested.store(false, std::memory_order_release);
+                m_isRendering.store(false, std::memory_order_release);
+                if (!m_stopWorker.load(std::memory_order_acquire)) {
+                    m_workerState.store(RenderWorkerState::Idle, std::memory_order_release);
+                }
             }
             m_queueCv.wait(lock, [this]() {
                 return m_stopWorker.load(std::memory_order_acquire) || !m_taskQueue.empty();
             });
 
             if (m_stopWorker.load(std::memory_order_acquire)) {
+                m_isRendering.store(false, std::memory_order_release);
+                m_workerState.store(RenderWorkerState::Stopping, std::memory_order_release);
                 break;
             }
 
             task = m_taskQueue.front();
             m_taskQueue.pop();
+            task.status = RenderStatus::Processing;
             m_currentTask = task;
             activeDbPath = m_dbPath;
+
+            // P0 (Section 3): Atomically transition out of Idle while still holding m_queueMutex
+            // so there is zero window where m_taskQueue is empty and the engine appears Idle.
+            m_workerState.store(RenderWorkerState::Starting, std::memory_order_release);
+            m_isRendering.store(true, std::memory_order_release);
+        }
+
+        if (auto hook = getTestTaskHook()) {
+            (*hook)(task.taskId, RenderWorkerState::Starting, m_cancelRequested);
         }
 
         if (!workerSeqMgr.isInitialized()) {
             workerSeqMgr.initialize(activeDbPath);
         }
 
-        bool wasCancelRequested = m_cancelRequested.exchange(false, std::memory_order_acq_rel);
-        m_isRendering.store(true, std::memory_order_release);
-
+        bool wasCancelRequested = false;
         {
-            const std::string startedId = task.taskId.toStdString();
-            const std::string startedSource = task.sourcePath.toStdString();
-            const int startedTotal = task.totalTracks;
-            QMetaObject::invokeMethod(this, [this, startedId, startedSource, startedTotal]() {
-                emit renderTaskStarted(QString::fromStdString(startedId),
-                                       QString::fromStdString(startedSource),
-                                       startedTotal);
-            }, Qt::QueuedConnection);
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            wasCancelRequested = m_cancelAllRequested.load(std::memory_order_acquire) ||
+                                 m_cancelRequested.exchange(false, std::memory_order_acq_rel);
+            if (!wasCancelRequested) {
+                m_workerState.store(RenderWorkerState::Rendering, std::memory_order_release);
+            }
         }
 
         if (wasCancelRequested) {
             task.status = RenderStatus::Cancelled;
-            task.errorMessage = "Render cancelled by user";
+            task.errorMessage = "Render cancelled before processing";
         } else {
+            {
+                const std::string startedId = task.taskId.toStdString();
+                const std::string startedSource = task.sourcePath.toStdString();
+                const int startedTotal = task.totalTracks;
+                QMetaObject::invokeMethod(this, [this, startedId, startedSource, startedTotal]() {
+                    emit renderTaskStarted(QString::fromStdString(startedId),
+                                           QString::fromStdString(startedSource),
+                                           startedTotal);
+                }, Qt::QueuedConnection);
+            }
+
             bool success = processTask(task, workerSeqMgr);
             (void)success;
         }
 
-        m_cancelRequested.store(false, std::memory_order_release);
-
         {
             std::lock_guard<std::mutex> lock(m_queueMutex);
+            if (task.status == RenderStatus::Cancelled &&
+                !m_cancelAllRequested.load(std::memory_order_acquire)) {
+                m_cancelRequested.store(false, std::memory_order_release);
+            }
             m_currentTask = task;
+            if (m_stopWorker.load(std::memory_order_acquire)) {
+                m_isRendering.store(false, std::memory_order_release);
+                m_workerState.store(RenderWorkerState::Stopping, std::memory_order_release);
+            } else if (m_taskQueue.empty()) {
+                m_cancelRequested.store(false, std::memory_order_release);
+                m_cancelAllRequested.store(false, std::memory_order_release);
+                m_isRendering.store(false, std::memory_order_release);
+                m_workerState.store(RenderWorkerState::Idle, std::memory_order_release);
+            } else {
+                // Remaining tasks in queue: stay non-idle in Starting state for next task
+                m_workerState.store(RenderWorkerState::Starting, std::memory_order_release);
+                m_isRendering.store(true, std::memory_order_release);
+            }
         }
-
-        m_isRendering.store(false, std::memory_order_release);
 
         {
             const std::string finishedId = task.taskId.toStdString();
@@ -584,13 +707,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     );
 
     // 3. Render tracks sequentially
+    if (auto hook = getTestTaskHook()) {
+        (*hook)(task.taskId, RenderWorkerState::Rendering, m_cancelRequested);
+    }
+
     bool allTracksOk = true;
 
     for (int i = 0; i < task.trackFiles.size(); ++i) {
         const QString trackOpId = QString("%1_TRACK_%2").arg(parentOpId).arg(i + 1);
-        if (m_cancelRequested.load(std::memory_order_acquire)) {
+        if (m_cancelRequested.load(std::memory_order_acquire) ||
+            m_cancelAllRequested.load(std::memory_order_acquire)) {
             task.status = RenderStatus::Cancelled;
-            task.errorMessage = "Render cancelled by user.";
+            task.errorMessage = "Render cancelled during processing.";
             allTracksOk = false;
             break;
         }
@@ -640,7 +768,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
 
         if (!ok) {
             allTracksOk = false;
-            if (m_cancelRequested.load(std::memory_order_acquire)) {
+            if (m_cancelRequested.load(std::memory_order_acquire) ||
+                m_cancelAllRequested.load(std::memory_order_acquire)) {
                 task.status = RenderStatus::Cancelled;
                 task.errorMessage = "Render cancelled during processing: " + trackFile;
             } else {
