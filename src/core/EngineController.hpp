@@ -75,12 +75,29 @@ class EngineController : public QObject {
     Q_PROPERTY(QString externalInsertReturnPortR READ externalInsertReturnPortR NOTIFY externalInsertStatusChanged)
 
     // Phase 4: Export & Render Telemetry (Section 5.11 & 20.1)
+    // All render properties delegate directly to RenderEngine as the single canonical state source.
+    Q_PROPERTY(bool isRenderIdle READ isRenderIdle NOTIFY renderStateChanged)
     Q_PROPERTY(bool isRendering READ isRendering NOTIFY renderStateChanged)
+    Q_PROPERTY(int renderWorkerState READ renderWorkerState NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderWorkerStateText READ renderWorkerStateText NOTIFY renderStateChanged)
+    Q_PROPERTY(int renderQueuedCount READ renderQueuedCount NOTIFY renderStateChanged)
+    Q_PROPERTY(int renderStatus READ renderStatus NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderStatusText READ renderStatusText NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderTaskId READ renderTaskId NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderType READ renderType NOTIFY renderStateChanged)
     Q_PROPERTY(double renderProgress READ renderProgress NOTIFY renderStateChanged)
     Q_PROPERTY(QString renderCurrentTrackName READ renderCurrentTrackName NOTIFY renderStateChanged)
     Q_PROPERTY(int renderTrackIndex READ renderTrackIndex NOTIFY renderStateChanged)
     Q_PROPERTY(int renderTotalTracks READ renderTotalTracks NOTIFY renderStateChanged)
     Q_PROPERTY(QString renderLastOutputDir READ renderLastOutputDir NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderSerial READ renderSerial NOTIFY renderStateChanged)
+    Q_PROPERTY(QString renderErrorMessage READ renderErrorMessage NOTIFY renderStateChanged)
+    Q_PROPERTY(QVariantList renderTrackResults READ renderTrackResults NOTIFY renderStateChanged)
+    Q_PROPERTY(QStringList renderOutputFiles READ renderOutputFiles NOTIFY renderStateChanged)
+    Q_PROPERTY(bool renderRollbackPerformed READ renderRollbackPerformed NOTIFY renderStateChanged)
+    Q_PROPERTY(bool renderRollbackSucceeded READ renderRollbackSucceeded NOTIFY renderStateChanged)
+    Q_PROPERTY(double renderMonitorVolume READ renderMonitorVolume WRITE setRenderMonitorVolume NOTIFY renderMonitorVolumeChanged)
+    Q_PROPERTY(double listeningVolume READ listeningVolume WRITE setListeningVolume NOTIFY listeningVolumeChanged)
 
 public:
     static EngineController& instance();
@@ -135,13 +152,29 @@ public:
     [[nodiscard]] QString externalInsertReturnPortL() const;
     [[nodiscard]] QString externalInsertReturnPortR() const;
 
-    // Phase 4 Getters
+    // Phase 4 Getters (Delegating directly to RenderEngine & AudioPipeline)
+    [[nodiscard]] bool isRenderIdle() const;
     [[nodiscard]] bool isRendering() const;
+    [[nodiscard]] int renderWorkerState() const;
+    [[nodiscard]] QString renderWorkerStateText() const;
+    [[nodiscard]] int renderQueuedCount() const;
+    [[nodiscard]] int renderStatus() const;
+    [[nodiscard]] QString renderStatusText() const;
+    [[nodiscard]] QString renderTaskId() const;
+    [[nodiscard]] QString renderType() const;
     [[nodiscard]] double renderProgress() const;
     [[nodiscard]] QString renderCurrentTrackName() const;
     [[nodiscard]] int renderTrackIndex() const;
     [[nodiscard]] int renderTotalTracks() const;
     [[nodiscard]] QString renderLastOutputDir() const;
+    [[nodiscard]] QString renderSerial() const;
+    [[nodiscard]] QString renderErrorMessage() const;
+    [[nodiscard]] QVariantList renderTrackResults() const;
+    [[nodiscard]] QStringList renderOutputFiles() const;
+    [[nodiscard]] bool renderRollbackPerformed() const;
+    [[nodiscard]] bool renderRollbackSucceeded() const;
+    [[nodiscard]] double renderMonitorVolume() const;
+    [[nodiscard]] double listeningVolume() const;
     [[nodiscard]] std::shared_ptr<engine::pipeline::AudioPipeline> pipeline() const noexcept { return m_pipeline; }
 
     // Property setters & QML invokables
@@ -236,7 +269,11 @@ public:
     Q_INVOKABLE QString startTrackRender(const QString& deckId, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
     Q_INVOKABLE QString startAlbumRender(const QString& folderPath, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
     Q_INVOKABLE void cancelRender();
-    Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath);
+    Q_INVOKABLE void cancelAllRenders();
+    Q_INVOKABLE void resetRenderStatus();
+    Q_INVOKABLE void setRenderMonitorVolume(double volume);
+    Q_INVOKABLE void setListeningVolume(double volume);
+    Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath, bool switchToRenderMonitor = true);
     Q_INVOKABLE QVariantMap getRenderStatus() const;
 
     // Direct access to nodes and engine components for testing
@@ -273,6 +310,9 @@ signals:
     void dspQueueOverflowWarning(int commandType);
     void presetManagementChanged();
     void renderStateChanged();
+    void renderMonitorVolumeChanged(double volume);
+    void listeningVolumeChanged(double volume);
+    void renderTaskStarted(const QString& taskId, const QString& name, int totalTracks);
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
 
 private:

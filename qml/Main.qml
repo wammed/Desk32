@@ -189,6 +189,21 @@ ApplicationWindow {
                 color: "#2a3038"
             }
 
+            // Export / Render Panel Toggle (Phase 4 Step 3)
+            Button {
+                text: renderPanel.visible ? qsTr("⏺ RENDER [ON]") : qsTr("⏺ RENDER")
+                font.bold: true
+                font.pixelSize: 11
+                highlighted: renderPanel.visible || !EngineController.isRenderIdle
+                onClicked: renderPanel.visible = !renderPanel.visible
+            }
+
+            Rectangle {
+                width: 1
+                height: 20
+                color: "#2a3038"
+            }
+
             // Language Switcher (EN / JA)
             RowLayout {
                 spacing: 4
@@ -2594,7 +2609,7 @@ ApplicationWindow {
                     // Status Filter
                     ComboBox {
                         id: statusFilter
-                        model: [qsTr("All Statuses"), "Success", "Failed", "Warning", "Info"]
+                        model: [qsTr("All Statuses"), "Success", "Failed", "Warning", "Info", "Cancelled"]
                         onActivated: logTable.refresh()
                     }
 
@@ -2629,12 +2644,17 @@ ApplicationWindow {
 
                 Label {
                     id: exportNotice
-                    text: qsTr("Retention policy: 180 days or 300,000 events max (auto-purged) // SQLite WAL mode active")
+                    text: qsTr("Retention policy: 180 days or 300,000 operations max (auto-purged) // SQLite WAL mode active")
                     font.pixelSize: 11
                     color: "#6c7885"
                 }
 
-                // Log Events Table
+                // Log Events Table + Detail pane
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 10
+
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -2648,6 +2668,22 @@ ApplicationWindow {
                         anchors.margins: 8
                         clip: true
                         model: []
+                        property var selectedEvent: null
+                        property var relatedEvents: []
+
+                        function statusColor(s) {
+                            if (s === "Success") return "#00E676"
+                            if (s === "Failed") return "#FF5252"
+                            if (s === "Warning") return "#FFD600"
+                            if (s === "Cancelled") return "#FFB300"
+                            return "#00E5FF"
+                        }
+
+                        function select(ev) {
+                            selectedEvent = ev
+                            relatedEvents = LogService.fetchRelatedLogs(
+                                ev.parentOperationId.length > 0 ? ev.parentOperationId : ev.operationId)
+                        }
 
                         function refresh() {
                             var filter = {}
@@ -2663,9 +2699,15 @@ ApplicationWindow {
                         delegate: Rectangle {
                             width: logTable.width
                             height: 38
-                            color: index % 2 === 0 ? "#111417" : "#14171b"
+                            color: (logTable.selectedEvent && logTable.selectedEvent.eventId === modelData.eventId)
+                                   ? "#1d2a33" : (index % 2 === 0 ? "#111417" : "#14171b")
                             border.color: "#1c2128"
                             radius: 2
+
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: logTable.select(modelData)
+                            }
 
                             RowLayout {
                                 anchors.fill: parent
@@ -2675,18 +2717,24 @@ ApplicationWindow {
 
                                 // Status Badge
                                 Rectangle {
-                                    width: 60
+                                    width: 70
                                     height: 20
                                     radius: 3
-                                    color: modelData.status === "Success" ? "#00E67625" : (modelData.status === "Failed" ? "#FF525225" : (modelData.status === "Warning" ? "#FFD60025" : "#00E5FF25"))
-                                    border.color: modelData.status === "Success" ? "#00E676" : (modelData.status === "Failed" ? "#FF5252" : (modelData.status === "Warning" ? "#FFD600" : "#00E5FF"))
+                                    color: Qt.rgba(0, 0, 0, 0)
+                                    border.color: logTable.statusColor(modelData.status)
                                     Label {
                                         anchors.centerIn: parent
                                         text: modelData.status
                                         font.pixelSize: 9
                                         font.bold: true
-                                        color: modelData.status === "Success" ? "#00E676" : (modelData.status === "Failed" ? "#FF5252" : (modelData.status === "Warning" ? "#FFD600" : "#00E5FF"))
+                                        color: logTable.statusColor(modelData.status)
                                     }
+                                }
+
+                                Label {
+                                    text: modelData.parentOperationId.length > 0 ? "↳" : ""
+                                    color: "#758291"
+                                    Layout.preferredWidth: 10
                                 }
 
                                 Label {
@@ -2724,6 +2772,104 @@ ApplicationWindow {
                         }
                     }
                 }
+
+                // Detail + related (parent / child) events
+                Rectangle {
+                    Layout.preferredWidth: 420
+                    Layout.fillHeight: true
+                    color: "#13161a"
+                    border.color: "#242930"
+                    radius: 4
+
+                    ScrollView {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        clip: true
+                        contentWidth: availableWidth
+
+                        ColumnLayout {
+                            width: 400
+                            spacing: 4
+
+                            Label {
+                                text: qsTr("EVENT DETAILS")
+                                font.bold: true; font.pixelSize: 11; color: "#A0AAB2"
+                            }
+                            Label {
+                                visible: !logTable.selectedEvent
+                                text: qsTr("Select an event to view details and related events.")
+                                font.pixelSize: 10; color: "#6c7885"
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+
+                            Repeater {
+                                model: logTable.selectedEvent ? [
+                                    ["operationId", logTable.selectedEvent.operationId],
+                                    ["parentOperationId", logTable.selectedEvent.parentOperationId],
+                                    ["timestampUtc", logTable.selectedEvent.timestampUtc],
+                                    ["localUtcOffset", logTable.selectedEvent.localUtcOffset],
+                                    ["targetType", logTable.selectedEvent.targetType],
+                                    ["target", logTable.selectedEvent.target],
+                                    ["errorCode", String(logTable.selectedEvent.errorCode)],
+                                    ["message", logTable.selectedEvent.message],
+                                    ["detailsJson", logTable.selectedEvent.detailsJson]
+                                ] : []
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Label { text: modelData[0]; font.pixelSize: 9; color: "#78909C" }
+                                    Label {
+                                        text: modelData[1]
+                                        Layout.fillWidth: true
+                                        wrapMode: Text.WrapAnywhere
+                                        font.pixelSize: 10; font.family: "Monospace"; color: "#E0E6ED"
+                                    }
+                                }
+                            }
+
+                            Rectangle { Layout.fillWidth: true; height: 1; color: "#222730"; visible: logTable.relatedEvents.length > 0 }
+                            Label {
+                                visible: logTable.relatedEvents.length > 0
+                                text: qsTr("RELATED EVENTS (%1)").arg(logTable.relatedEvents.length)
+                                font.bold: true; font.pixelSize: 11; color: "#A0AAB2"
+                            }
+                            Repeater {
+                                model: logTable.relatedEvents
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: relRow.implicitHeight + 8
+                                    color: (logTable.selectedEvent && logTable.selectedEvent.eventId === modelData.eventId) ? "#1d2a33" : "#111417"
+                                    radius: 2
+                                    MouseArea { anchors.fill: parent; onClicked: logTable.select(modelData) }
+                                    RowLayout {
+                                        id: relRow
+                                        anchors.fill: parent
+                                        anchors.margins: 4
+                                        spacing: 6
+                                        Label {
+                                            text: modelData.parentOperationId.length > 0 ? "  ↳" : "▸"
+                                            color: "#758291"
+                                        }
+                                        Label {
+                                            text: modelData.status
+                                            font.pixelSize: 9; font.bold: true
+                                            color: logTable.statusColor(modelData.status)
+                                            Layout.preferredWidth: 60
+                                        }
+                                        Label {
+                                            text: modelData.operation + ": " + modelData.message
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                            font.pixelSize: 10; color: "#E0E6ED"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                }
             }
         }
     }
@@ -2740,5 +2886,28 @@ ApplicationWindow {
         z: 999
         visible: false
         onCloseRequested: dspPreviewPanel.visible = false
+    }
+
+    // Phase 4 Step 3: Export / Render panel
+    RenderPanel {
+        id: renderPanel
+        anchors.right: parent.right
+        anchors.rightMargin: 16
+        anchors.top: parent.top
+        anchors.topMargin: 56
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 16
+        width: 460
+        z: 1000
+        visible: false
+        onCloseRequested: renderPanel.visible = false
+        onOpenLogRequested: {
+            renderPanel.visible = false
+            root.currentView = "log"
+            catFilter.currentIndex = catFilter.model.indexOf("Render")
+            statusFilter.currentIndex = 0
+            searchField.text = ""
+            logTable.refresh()
+        }
     }
 }

@@ -249,11 +249,50 @@ QVariantList LogService::fetchLogs(const QVariantMap& filterMap) {
     LogFilter filter;
     if (filterMap.contains("category")) filter.category = filterMap.value("category").toString().toStdString();
     if (filterMap.contains("status")) filter.status = filterMap.value("status").toString().toStdString();
+    if (filterMap.contains("operationId")) filter.operationId = filterMap.value("operationId").toString().toStdString();
+    if (filterMap.contains("parentOperationId")) filter.parentOperationId = filterMap.value("parentOperationId").toString().toStdString();
+    if (filterMap.contains("target")) filter.target = filterMap.value("target").toString().toStdString();
     if (filterMap.contains("searchText")) filter.searchText = filterMap.value("searchText").toString().toStdString();
     if (filterMap.contains("limit")) filter.limit = filterMap.value("limit").toInt();
     if (filterMap.contains("offset")) filter.offset = filterMap.value("offset").toInt();
 
     auto events = queryLogs(filter);
+    QVariantList list;
+    for (const auto& ev : events) {
+        QVariantMap m;
+        m["eventId"] = QVariant::fromValue(ev.eventId);
+        m["operationId"] = QString::fromStdString(ev.operationId);
+        m["parentOperationId"] = QString::fromStdString(ev.parentOperationId);
+        m["timestampUtc"] = QString::fromStdString(ev.timestampUtc);
+        m["localUtcOffset"] = QString::fromStdString(ev.localUtcOffset);
+        m["category"] = QString::fromStdString(ev.category);
+        m["operation"] = QString::fromStdString(ev.operation);
+        m["status"] = QString::fromStdString(ev.status);
+        m["targetType"] = QString::fromStdString(ev.targetType);
+        m["target"] = QString::fromStdString(ev.target);
+        m["message"] = QString::fromStdString(ev.message);
+        m["errorCode"] = ev.errorCode;
+        m["detailsJson"] = QString::fromStdString(ev.detailsJson);
+        m["durationMs"] = ev.durationMs;
+        list.append(m);
+    }
+    return list;
+}
+
+QVariantList LogService::fetchRelatedLogs(const QString& operationId) {
+    if (operationId.isEmpty()) return {};
+    auto events = queryRelatedLogs(operationId.toStdString());
+    // If operationId is a child operation (e.g. RENDER_xxx_TRACK_1), resolve its parentOperationId
+    // so the entire parent + sibling child hierarchy is returned.
+    std::string rootOpId = operationId.toStdString();
+    for (const auto& ev : events) {
+        if (ev.operationId == rootOpId && !ev.parentOperationId.empty()) {
+            rootOpId = ev.parentOperationId;
+            events = queryRelatedLogs(rootOpId);
+            break;
+        }
+    }
+
     QVariantList list;
     for (const auto& ev : events) {
         QVariantMap m;

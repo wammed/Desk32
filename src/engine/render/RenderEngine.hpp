@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include <QVariantMap>
 #include <memory>
 #include <queue>
@@ -78,6 +79,10 @@ struct RenderTaskInfo {
     QString stagingDir;
     QString serial;
     QString errorMessage;
+    QVariantList trackResults;
+    QStringList renderedFiles;
+    bool rollbackPerformed = false;
+    bool rollbackSucceeded = true;
 };
 
 /// Offline Export & Render Engine (Specification Section 5.11.3, 16.0 Phase 4 & 20.1).
@@ -182,7 +187,8 @@ private:
                           const RenderDspSnapshot& dspSnapshot,
                           std::atomic<bool>& cancelFlag,
                           double& outProgressFraction,
-                          QString& outError);
+                          QString& outError,
+                          const std::function<void(double)>& onProgress = nullptr);
 
     mutable std::mutex m_templateMutex;
     RenderChain m_templateChain;

@@ -305,6 +305,15 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
     task.settings = settings;
     task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
+    {
+        QVariantMap tr;
+        tr["trackIndex"] = 1;
+        tr["fileName"] = fi.fileName();
+        tr["status"] = QStringLiteral("Queued");
+        tr["outputFilePath"] = QString();
+        tr["errorMessage"] = QString();
+        task.trackResults.append(tr);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -339,6 +348,15 @@ QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, con
     task.dspSnapshot = captureTemplateSnapshot();
     task.status = RenderStatus::Queued;
     task.finalOutputDir = testOutputDir;
+    {
+        QVariantMap tr;
+        tr["trackIndex"] = 1;
+        tr["fileName"] = fi.fileName();
+        tr["status"] = QStringLiteral("Queued");
+        tr["outputFilePath"] = QString();
+        tr["errorMessage"] = QString();
+        task.trackResults.append(tr);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -398,6 +416,15 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
     task.settings = settings;
     task.dspSnapshot = captureTemplateSnapshot(); // P0-03: Freeze immutable DSP snapshot at enqueue time
     task.status = RenderStatus::Queued;
+    for (int idx = 0; idx < sortedList.size(); ++idx) {
+        QVariantMap tr;
+        tr["trackIndex"] = idx + 1;
+        tr["fileName"] = sortedList[idx];
+        tr["status"] = QStringLiteral("Queued");
+        tr["outputFilePath"] = QString();
+        tr["errorMessage"] = QString();
+        task.trackResults.append(tr);
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -484,6 +511,23 @@ void RenderEngine::workerLoop() {
         if (wasCancelRequested) {
             task.status = RenderStatus::Cancelled;
             task.errorMessage = "Render cancelled before processing";
+            for (int i = 0; i < task.trackResults.size(); ++i) {
+                QVariantMap tr = task.trackResults[i].toMap();
+                tr["status"] = QStringLiteral("Cancelled");
+                tr["errorMessage"] = task.errorMessage;
+                task.trackResults[i] = tr;
+            }
+            const QString parentOpId = QString("RENDER_%1").arg(task.taskId);
+            core::log::LogService::instance().log(
+                "Render",
+                task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
+                "Cancelled",
+                task.errorMessage,
+                "RenderEngine",
+                task.sourcePath,
+                "{}",
+                parentOpId, ""
+            );
         } else {
             {
                 const std::string startedId = task.taskId.toStdString();
@@ -644,6 +688,12 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     if (task.finalOutputDir.isEmpty()) {
         task.finalOutputDir = task.sourceFolder + "/" + folderSuffix;
     }
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        if (m_currentTask.taskId == task.taskId) {
+            m_currentTask = task;
+        }
+    }
 
     // A-3 / SYS-08: Validate output and staging containment inside source folder on same filesystem
     QString containmentErr;
@@ -719,6 +769,12 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             m_cancelAllRequested.load(std::memory_order_acquire)) {
             task.status = RenderStatus::Cancelled;
             task.errorMessage = "Render cancelled during processing.";
+            if (i < task.trackResults.size()) {
+                QVariantMap tr = task.trackResults[i].toMap();
+                tr["status"] = QStringLiteral("Cancelled");
+                tr["errorMessage"] = task.errorMessage;
+                task.trackResults[i] = tr;
+            }
             allTracksOk = false;
             break;
         }
@@ -726,6 +782,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         const QString& trackFile = task.trackFiles[i];
         task.currentTrackIndex = i;
         task.currentTrackName = trackFile;
+        task.progress = (task.totalTracks > 0) ? (static_cast<double>(i) / task.totalTracks) : 0.0;
+        if (i < task.trackResults.size()) {
+            QVariantMap tr = task.trackResults[i].toMap();
+            tr["status"] = QStringLiteral("Processing");
+            task.trackResults[i] = tr;
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            if (m_currentTask.taskId == task.taskId) {
+                m_currentTask = task;
+            }
+        }
 
         QString inputFilePath = task.sourceFolder + "/" + trackFile;
         QString baseName = QFileInfo(trackFile).completeBaseName();
@@ -738,6 +806,12 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             task.errorMessage = QString("Output file already exists in staging directory: %1. "
                                         "Render aborted to prevent data overwrite.")
                                     .arg(outputFilePath);
+            if (i < task.trackResults.size()) {
+                QVariantMap tr = task.trackResults[i].toMap();
+                tr["status"] = QStringLiteral("Failed");
+                tr["errorMessage"] = task.errorMessage;
+                task.trackResults[i] = tr;
+            }
             core::log::LogService::instance().log(
                 "Render", "RenderTrack", "Failed",
                 QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
@@ -763,8 +837,33 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             }, Qt::QueuedConnection);
         }
 
+        double lastReportedFraction = 0.0;
+        auto onBlockProgress = [&](double frac) {
+            if (frac - lastReportedFraction >= 0.05 || frac >= 0.999) {
+                lastReportedFraction = frac;
+                const double overallProg = (static_cast<double>(i) + std::clamp(frac, 0.0, 1.0)) /
+                                           std::max(1, task.totalTracks);
+                task.progress = overallProg;
+                {
+                    std::lock_guard<std::mutex> lock(m_queueMutex);
+                    if (m_currentTask.taskId == task.taskId) {
+                        m_currentTask.progress = overallProg;
+                    }
+                }
+                const std::string progId = task.taskId.toStdString();
+                const int progIdx = i + 1;
+                const int progTotal = task.totalTracks;
+                const std::string progFile = trackFile.toStdString();
+                QMetaObject::invokeMethod(this, [this, progId, overallProg, progIdx, progTotal, progFile]() {
+                    emit renderProgressUpdated(QString::fromStdString(progId),
+                                               overallProg, progIdx, progTotal,
+                                               QString::fromStdString(progFile));
+                }, Qt::QueuedConnection);
+            }
+        };
+
         bool ok = renderSingleFile(inputFilePath, outputFilePath, task.settings,
-                                   task.dspSnapshot, m_cancelRequested, trackFraction, trackError);
+                                   task.dspSnapshot, m_cancelRequested, trackFraction, trackError, onBlockProgress);
 
         if (!ok) {
             allTracksOk = false;
@@ -772,18 +871,57 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                 m_cancelAllRequested.load(std::memory_order_acquire)) {
                 task.status = RenderStatus::Cancelled;
                 task.errorMessage = "Render cancelled during processing: " + trackFile;
+                if (i < task.trackResults.size()) {
+                    QVariantMap tr = task.trackResults[i].toMap();
+                    tr["status"] = QStringLiteral("Cancelled");
+                    tr["errorMessage"] = task.errorMessage;
+                    task.trackResults[i] = tr;
+                }
+                core::log::LogService::instance().log(
+                    "Render", "RenderTrack", "Cancelled",
+                    QString("Track cancelled: %1").arg(trackFile),
+                    "AudioFile", inputFilePath, "{}",
+                    trackOpId, parentOpId
+                );
             } else {
                 task.status = RenderStatus::Failed;
                 task.errorMessage = QString("Render failed on track %1: %2").arg(trackFile, trackError);
+                if (i < task.trackResults.size()) {
+                    QVariantMap tr = task.trackResults[i].toMap();
+                    tr["status"] = QStringLiteral("Failed");
+                    tr["errorMessage"] = trackError;
+                    task.trackResults[i] = tr;
+                }
+                core::log::LogService::instance().log(
+                    "Render", "RenderTrack", "Failed",
+                    QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
+                    "AudioFile", inputFilePath, "{}",
+                    trackOpId, parentOpId
+                );
             }
-            core::log::LogService::instance().log(
-                "Render", "RenderTrack", "Failed",
-                QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
-                "AudioFile", inputFilePath, "{}",
-                trackOpId, parentOpId
-            );
             break;
         }
+
+        if (i < task.trackResults.size()) {
+            QVariantMap tr = task.trackResults[i].toMap();
+            tr["status"] = QStringLiteral("Completed");
+            tr["outputFilePath"] = task.finalOutputDir + "/" + baseName + ".wav";
+            task.trackResults[i] = tr;
+        }
+        task.progress = static_cast<double>(i + 1) / task.totalTracks;
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            if (m_currentTask.taskId == task.taskId) {
+                m_currentTask = task;
+            }
+        }
+
+        core::log::LogService::instance().log(
+            "Render", "RenderTrack", "Success",
+            QString("Rendered track %1/%2: %3").arg(i + 1).arg(task.totalTracks).arg(trackFile),
+            "AudioFile", inputFilePath, "{}",
+            trackOpId, parentOpId
+        );
 
         {
             const std::string progId = task.taskId.toStdString();
@@ -806,8 +944,11 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
 
     if (!allTracksOk || task.status == RenderStatus::Cancelled || task.status == RenderStatus::Failed) {
         // Rollback: delete all staged files and staging directory strictly within job scope
+        task.rollbackPerformed = true;
+        task.renderedFiles.clear();
         if (isValidStaging && stagingFi.exists()) {
             bool removed = QDir(task.stagingDir).removeRecursively();
+            task.rollbackSucceeded = removed;
             if (!removed) {
                 QString rollbackErr = QString("Rollback failed: unable to delete temporary staging directory: %1")
                                           .arg(task.stagingDir);
@@ -825,6 +966,16 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                 );
             }
         }
+        core::log::LogService::instance().log(
+            "Render",
+            task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
+            task.status == RenderStatus::Cancelled ? "Cancelled" : "Failed",
+            task.errorMessage,
+            "RenderEngine",
+            task.finalOutputDir,
+            "{}",
+            parentOpId, ""
+        );
         return false;
     }
 
@@ -837,8 +988,11 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     if (!committed) {
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to commit staging directory to final output directory: " + task.finalOutputDir;
+        task.rollbackPerformed = true;
+        task.renderedFiles.clear();
         if (isValidStaging && stagingFi.exists()) {
             bool removed = QDir(task.stagingDir).removeRecursively();
+            task.rollbackSucceeded = removed;
             if (!removed) {
                 QString rollbackErr = QString("Rollback failed after commit failure: unable to delete %1").arg(task.stagingDir);
                 task.errorMessage += " | " + rollbackErr;
@@ -854,6 +1008,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
 
     task.status = RenderStatus::Completed;
     task.progress = 1.0;
+    task.renderedFiles.clear();
+    for (int i = 0; i < task.trackFiles.size(); ++i) {
+        QString baseName = QFileInfo(task.trackFiles[i]).completeBaseName();
+        QString finalPath = task.finalOutputDir + "/" + baseName + ".wav";
+        task.renderedFiles.append(finalPath);
+        if (i < task.trackResults.size()) {
+            QVariantMap tr = task.trackResults[i].toMap();
+            tr["status"] = QStringLiteral("Completed");
+            tr["outputFilePath"] = finalPath;
+            task.trackResults[i] = tr;
+        }
+    }
 
     core::log::LogService::instance().log(
         "Render",
@@ -876,7 +1042,8 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
                                     const RenderDspSnapshot& dspSnapshot,
                                     std::atomic<bool>& cancelFlag,
                                     double& outProgressFraction,
-                                    QString& outError)
+                                    QString& outError,
+                                    const std::function<void(double)>& onProgress)
 {
     decoder::FFmpegAudioDecoder decoder;
     if (!decoder.open(inputFilePath.toStdString())) {
@@ -1008,6 +1175,9 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
         framesProcessed += framesRead;
         if (totalFrames > 0) {
             outProgressFraction = static_cast<double>(framesProcessed) / static_cast<double>(totalFrames);
+            if (onProgress) {
+                onProgress(outProgressFraction);
+            }
         }
     }
 

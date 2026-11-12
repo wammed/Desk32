@@ -79,6 +79,7 @@ public:
         const QString& parentOperationId = "");
 
     Q_INVOKABLE QVariantList fetchLogs(const QVariantMap& filter);
+    Q_INVOKABLE QVariantList fetchRelatedLogs(const QString& operationId);
     Q_INVOKABLE bool exportToJsonl(const QString& filePath);
 
 signals:

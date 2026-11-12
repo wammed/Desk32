@@ -243,6 +243,15 @@ private slots:
     // 23. RCT-07, RCT-08, RCT-09, RCT-10: Verify gate timeout, wait timeout, cleanup failure detection, and state isolation
     void testRenderCleanupFailureAndTimeoutDetection();
 
+    // 24. Phase 4 Step 3: EngineController delegates render state to RenderEngine; progress & per-track results
+    void testStep3ControllerCanonicalStateAndTrackResults();
+
+    // 25. Phase 4 Step 3: cancelAllRenders via controller, Cancelled per-track status, log hierarchy
+    void testStep3CancelAllAndLogHierarchy();
+
+    // 26. Phase 4 Step 3: Render Monitor volume + rendered file audition rules
+    void testStep3MonitorVolumeAndAudition();
+
 private:
     struct CleanupEvaluation {
         bool passed = true;
@@ -2068,6 +2077,143 @@ void TestPhase4ExportRender::testRenderCleanupFailureAndTimeoutDetection()
         engine.resetTaskInfo();
         QVERIFY(engine.isIdle());
     }
+}
+
+void TestPhase4ExportRender::testStep3ControllerCanonicalStateAndTrackResults()
+{
+    EngineController& controller = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+    engine.resetTaskInfo();
+    QVERIFY(controller.isRenderIdle());
+    QCOMPARE(controller.isRenderIdle(), engine.isIdle());
+    QCOMPARE(controller.renderWorkerState(), static_cast<int>(RenderWorkerState::Idle));
+    QCOMPARE(controller.renderQueuedCount(), 0);
+    QCOMPARE(controller.renderStatusText(), QString("Idle"));
+
+    QString albumDir = m_tempDir->filePath("step3_album");
+    QDir().mkpath(albumDir);
+    QVERIFY(createTestWav(albumDir + "/t1.wav", 48000.0, 24000, 220.0));
+    QVERIFY(createTestWav(albumDir + "/t2.wav", 48000.0, 24000, 330.0));
+
+    QSignalSpy spyStarted(&controller, &EngineController::renderTaskStarted);
+    QSignalSpy spyFinished(&controller, &EngineController::renderTaskFinished);
+    const QString taskId = controller.startAlbumRender(albumDir, 1, 0, 48000.0, true, true);
+    QVERIFY(!taskId.isEmpty());
+    QVERIFY(!controller.isRenderIdle());
+
+    QVERIFY(spyFinished.wait(10000));
+    QCOMPARE(spyStarted.count(), 1);
+    QCOMPARE(spyFinished.at(0).at(1).toInt(), static_cast<int>(RenderStatus::Completed));
+    QVERIFY(waitForRenderIdle(engine));
+    QCoreApplication::processEvents();
+
+    QCOMPARE(controller.renderStatusText(), QString("Completed"));
+    QCOMPARE(controller.renderProgress(), 1.0);
+    QCOMPARE(controller.renderTotalTracks(), 2);
+    QCOMPARE(controller.renderType(), QString("Album"));
+    QVERIFY(!controller.renderSerial().isEmpty());
+
+    const QVariantList results = controller.renderTrackResults();
+    QCOMPARE(results.size(), 2);
+    for (const auto& r : results) {
+        QCOMPARE(r.toMap().value("status").toString(), QString("Completed"));
+    }
+    const QStringList files = controller.renderOutputFiles();
+    QCOMPARE(files.size(), 2);
+    for (const auto& f : files) QVERIFY2(QFile::exists(f), qPrintable(f));
+
+    controller.resetRenderStatus();
+    QCOMPARE(controller.renderStatusText(), QString("Idle"));
+}
+
+void TestPhase4ExportRender::testStep3CancelAllAndLogHierarchy()
+{
+    EngineController& controller = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+    engine.resetTaskInfo();
+
+    QString dirA = m_tempDir->filePath("step3_cancel_a");
+    QString dirB = m_tempDir->filePath("step3_cancel_b");
+    QDir().mkpath(dirA);
+    QDir().mkpath(dirB);
+    QVERIFY(createTestWav(dirA + "/a1.wav", 48000.0, 24000, 220.0));
+    QVERIFY(createTestWav(dirA + "/a2.wav", 48000.0, 24000, 220.0));
+    QVERIFY(createTestWav(dirB + "/b1.wav", 48000.0, 24000, 220.0));
+
+    QSignalSpy spyFinished(&controller, &EngineController::renderTaskFinished);
+    ScopedRenderTestGate gate(engine, RenderWorkerState::Rendering, /*releaseOnCancel=*/true, 5000);
+
+    const QString id1 = controller.startAlbumRender(dirA, 1, 0, 48000.0, true, true);
+    QVERIFY(!id1.isEmpty());
+    QVERIFY(gate.waitForArrival(5000));
+    const QString id2 = controller.startAlbumRender(dirB, 1, 0, 48000.0, true, true);
+    QVERIFY(!id2.isEmpty());
+
+    QCOMPARE(controller.renderWorkerState(), static_cast<int>(RenderWorkerState::Rendering));
+    QCOMPARE(controller.renderQueuedCount(), 1);
+    QVERIFY(controller.isRendering());
+    QVERIFY(!controller.isRenderIdle());
+
+    controller.cancelAllRenders();
+    QVERIFY(waitForRenderIdle(engine, 10000));
+    gate.releaseAndDetach();
+    QTRY_COMPARE_WITH_TIMEOUT(spyFinished.count(), 2, 5000);
+    for (int i = 0; i < spyFinished.count(); ++i) {
+        QCOMPARE(spyFinished.at(i).at(1).toInt(), static_cast<int>(RenderStatus::Cancelled));
+    }
+    QVERIFY(controller.isRenderIdle());
+
+    // Log hierarchy: parent op events are retrievable by related query
+    LogService::instance().flush();
+    const QVariantList related = LogService::instance().fetchRelatedLogs(QString("RENDER_%1").arg(id1));
+    QVERIFY(!related.isEmpty());
+    bool sawCancelled = false;
+    for (const auto& v : related) {
+        if (v.toMap().value("status").toString() == "Cancelled") sawCancelled = true;
+    }
+    QVERIFY(sawCancelled);
+
+    QVariantMap filter;
+    filter["status"] = "Cancelled";
+    filter["category"] = "Render";
+    QVERIFY(!LogService::instance().fetchLogs(filter).isEmpty());
+    engine.resetTaskInfo();
+}
+
+void TestPhase4ExportRender::testStep3MonitorVolumeAndAudition()
+{
+    EngineController& controller = EngineController::instance();
+    if (!controller.pipeline()) {
+        QVERIFY(controller.initialize());
+    }
+    QVERIFY(controller.pipeline());
+
+    // Render Monitor volume is independent of Listening volume and of Render Engine
+    controller.setListeningVolume(1.0);
+    controller.setRenderMonitorVolume(0.5);
+    QCOMPARE(controller.renderMonitorVolume(), 0.5);
+    QCOMPARE(controller.listeningVolume(), 1.0);
+    controller.setRenderMonitorVolume(1.0);
+
+    QString trackPath = m_tempDir->filePath("step3_audition.wav");
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+
+    // Auditioning with explicit Listening Path keeps Listening Path (UI shows warning)
+    controller.setOutputRoutingMode(0);
+    QVERIFY(controller.auditionRenderedFile("C", trackPath, false));
+    QCOMPARE(controller.outputRoutingMode(), 0);
+
+    // Default engages Render Monitor Path
+    QVERIFY(controller.auditionRenderedFile("C", trackPath));
+    QCOMPARE(controller.outputRoutingMode(), 1);
+
+    // Locked deck refuses the audition load
+    controller.setDeckLocked("D", true);
+    QVERIFY(!controller.auditionRenderedFile("D", trackPath));
+    controller.setDeckLocked("D", false);
+
+    // Missing file fails
+    QVERIFY(!controller.auditionRenderedFile("C", m_tempDir->filePath("does_not_exist.wav")));
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

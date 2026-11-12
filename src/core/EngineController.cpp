@@ -14,6 +14,11 @@ EngineController::EngineController(QObject* parent)
     , m_presetManager(engine::preset::PresetManager::instance())
     , m_renderEngine(engine::render::RenderEngine::instance())
 {
+    connect(&m_renderEngine, &engine::render::RenderEngine::renderTaskStarted, this,
+            [this](const QString& id, const QString& name, int totalTracks) {
+        emit renderStateChanged();
+        emit renderTaskStarted(id, name, totalTracks);
+    });
     connect(&m_renderEngine, &engine::render::RenderEngine::renderProgressUpdated, this, [this]() {
         emit renderStateChanged();
     });
@@ -451,8 +456,63 @@ QString EngineController::externalInsertReturnPortR() const {
     return p.isEmpty() ? QStringLiteral("carla:audio_out_2") : p;
 }
 
+bool EngineController::isRenderIdle() const {
+    return m_renderEngine.isIdle();
+}
+
 bool EngineController::isRendering() const {
     return m_renderEngine.isRendering();
+}
+
+int EngineController::renderWorkerState() const {
+    return static_cast<int>(m_renderEngine.workerState());
+}
+
+QString EngineController::renderWorkerStateText() const {
+    switch (m_renderEngine.workerState()) {
+        case engine::render::RenderWorkerState::Idle:      return QStringLiteral("Idle");
+        case engine::render::RenderWorkerState::Starting:  return QStringLiteral("Starting");
+        case engine::render::RenderWorkerState::Rendering: return QStringLiteral("Rendering");
+        case engine::render::RenderWorkerState::Stopping:  return QStringLiteral("Stopping");
+    }
+    return QStringLiteral("Idle");
+}
+
+int EngineController::renderQueuedCount() const {
+    return m_renderEngine.queuedTasksCount();
+}
+
+int EngineController::renderStatus() const {
+    auto info = m_renderEngine.currentTaskInfo();
+    if (info.taskId.isEmpty() && m_renderEngine.isIdle()) {
+        return -1; // Idle / No active or completed task
+    }
+    return static_cast<int>(info.status);
+}
+
+QString EngineController::renderStatusText() const {
+    auto info = m_renderEngine.currentTaskInfo();
+    if (info.taskId.isEmpty() && m_renderEngine.isIdle()) {
+        return QStringLiteral("Idle");
+    }
+    switch (info.status) {
+        case engine::render::RenderStatus::Queued:     return QStringLiteral("Queued");
+        case engine::render::RenderStatus::Processing: return QStringLiteral("Processing");
+        case engine::render::RenderStatus::Completed:  return QStringLiteral("Completed");
+        case engine::render::RenderStatus::Failed:     return QStringLiteral("Failed");
+        case engine::render::RenderStatus::Cancelled:  return QStringLiteral("Cancelled");
+    }
+    return QStringLiteral("Idle");
+}
+
+QString EngineController::renderTaskId() const {
+    return m_renderEngine.currentTaskInfo().taskId;
+}
+
+QString EngineController::renderType() const {
+    auto info = m_renderEngine.currentTaskInfo();
+    if (info.taskId.isEmpty()) return QStringLiteral("None");
+    return (info.type == engine::render::RenderType::Album) ? QStringLiteral("Album") : QStringLiteral("Track");
 }
 
 double EngineController::renderProgress() const {
@@ -474,6 +534,38 @@ int EngineController::renderTotalTracks() const {
 
 QString EngineController::renderLastOutputDir() const {
     return m_renderEngine.currentTaskInfo().finalOutputDir;
+}
+
+QString EngineController::renderSerial() const {
+    return m_renderEngine.currentTaskInfo().serial;
+}
+
+QString EngineController::renderErrorMessage() const {
+    return m_renderEngine.currentTaskInfo().errorMessage;
+}
+
+QVariantList EngineController::renderTrackResults() const {
+    return m_renderEngine.currentTaskInfo().trackResults;
+}
+
+QStringList EngineController::renderOutputFiles() const {
+    return m_renderEngine.currentTaskInfo().renderedFiles;
+}
+
+bool EngineController::renderRollbackPerformed() const {
+    return m_renderEngine.currentTaskInfo().rollbackPerformed;
+}
+
+bool EngineController::renderRollbackSucceeded() const {
+    return m_renderEngine.currentTaskInfo().rollbackSucceeded;
+}
+
+double EngineController::renderMonitorVolume() const {
+    return m_pipeline ? m_pipeline->renderMonitorVolume() : 1.0;
+}
+
+double EngineController::listeningVolume() const {
+    return m_pipeline ? m_pipeline->listeningVolume() : 1.0;
 }
 
 void EngineController::setSwitchingMode(int mode) {
@@ -1840,27 +1932,80 @@ void EngineController::cancelRender() {
     emit renderStateChanged();
 }
 
-bool EngineController::auditionRenderedFile(const QString& targetDeckId, const QString& filePath) {
+void EngineController::cancelAllRenders() {
+    m_renderEngine.cancelAllRenders();
+    log::LogService::instance().log(
+        "Render", "CancelAllRenders", "Info",
+        "Cancellation requested for active render task and all queued tasks.",
+        "RenderEngine", "Queue"
+    );
+    emit renderStateChanged();
+}
+
+void EngineController::resetRenderStatus() {
+    if (m_renderEngine.isIdle()) {
+        m_renderEngine.resetTaskInfo();
+        emit renderStateChanged();
+    }
+}
+
+void EngineController::setRenderMonitorVolume(double volume) {
+    if (!m_pipeline) return;
+    double clamped = std::clamp(volume, 0.0, 2.0);
+    double prev = m_pipeline->renderMonitorVolume();
+    if (std::abs(prev - clamped) > 1e-6) {
+        m_pipeline->setRenderMonitorVolume(clamped);
+        emit renderMonitorVolumeChanged(clamped);
+    }
+}
+
+void EngineController::setListeningVolume(double volume) {
+    if (!m_pipeline) return;
+    double clamped = std::clamp(volume, 0.0, 2.0);
+    double prev = m_pipeline->listeningVolume();
+    if (std::abs(prev - clamped) > 1e-6) {
+        m_pipeline->setListeningVolume(clamped);
+        emit listeningVolumeChanged(clamped);
+    }
+}
+
+bool EngineController::auditionRenderedFile(const QString& targetDeckId, const QString& filePath, bool switchToRenderMonitor) {
     if (!QFile::exists(filePath)) {
         qWarning() << "auditionRenderedFile: File does not exist:" << filePath;
+        log::LogService::instance().log(
+            "Render", "Audition", "Failed",
+            QString("Failed to audition rendered file '%1': file does not exist.").arg(filePath),
+            "RenderAudition", filePath
+        );
         return false;
     }
 
     // 1. Load track into target deck
     bool loaded = loadTrack(targetDeckId, filePath);
     if (!loaded) {
+        log::LogService::instance().log(
+            "Render", "Audition", "Failed",
+            QString("Failed to audition rendered file '%1' on Deck %2 (deck may be locked or format unsupported).")
+                .arg(filePath, targetDeckId),
+            "RenderAudition", filePath
+        );
         return false;
     }
 
-    // 2. Select deck and switch to Render Monitor Path (Section 5.11.5)
-    // Auditioning rendered file must use the uncorrected monitoring path!
+    // 2. Select deck and optionally switch to Render Monitor Path (Section 5.11.5)
     switchDeck(targetDeckId, 0);
-    setOutputRoutingMode(1); // 1 = RenderMonitorPath
+    if (switchToRenderMonitor) {
+        setOutputRoutingMode(1); // 1 = RenderMonitorPath
+    }
 
+    const bool isPureMonitor = (m_outputRoutingMode.load(std::memory_order_relaxed) == 1);
     log::LogService::instance().log(
-        "Render", "Audition", "Success",
-        QString("Auditioning rendered file '%1' on Deck %2 (Render Monitor Path engaged).")
-            .arg(filePath, targetDeckId),
+        "Render", "Audition", isPureMonitor ? "Success" : "Warning",
+        isPureMonitor
+            ? QString("Auditioning rendered file '%1' on Deck %2 (Render Monitor Path engaged).")
+                  .arg(filePath, targetDeckId)
+            : QString("Auditioning rendered file '%1' on Deck %2 via Listening Path (WARNING: Listening Correction is applied).")
+                  .arg(filePath, targetDeckId),
         "RenderAudition", filePath
     );
 
@@ -1871,18 +2016,26 @@ QVariantMap EngineController::getRenderStatus() const {
     QVariantMap map;
     auto task = m_renderEngine.currentTaskInfo();
 
+    map["isIdle"] = m_renderEngine.isIdle();
     map["isRendering"] = m_renderEngine.isRendering();
+    map["workerState"] = static_cast<int>(m_renderEngine.workerState());
+    map["workerStateText"] = renderWorkerStateText();
     map["taskId"] = task.taskId;
     map["type"] = (task.type == engine::render::RenderType::Album) ? "Album" : "Track";
     map["status"] = static_cast<int>(task.status);
+    map["statusText"] = renderStatusText();
     map["progress"] = task.progress;
-    map["currentTrackIndex"] = task.currentTrackIndex + 1;
+    map["currentTrackIndex"] = (task.totalTracks > 0) ? (task.currentTrackIndex + 1) : 0;
     map["totalTracks"] = task.totalTracks;
     map["currentTrackName"] = task.currentTrackName;
     map["serial"] = task.serial;
     map["finalOutputDir"] = task.finalOutputDir;
     map["errorMessage"] = task.errorMessage;
     map["queuedTasksCount"] = m_renderEngine.queuedTasksCount();
+    map["trackResults"] = task.trackResults;
+    map["renderedFiles"] = task.renderedFiles;
+    map["rollbackPerformed"] = task.rollbackPerformed;
+    map["rollbackSucceeded"] = task.rollbackSucceeded;
 
     return map;
 }
