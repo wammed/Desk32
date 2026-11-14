@@ -52,6 +52,7 @@ public:
     }
 
     [[nodiscard]] virtual int64_t currentFrame() const noexcept = 0;
+    [[nodiscard]] virtual int64_t lastSeekActualFrame() const noexcept { return currentFrame(); }
 };
 
 } // namespace desk32::engine::decoder

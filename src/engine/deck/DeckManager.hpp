@@ -26,6 +26,10 @@ struct SwitchResult {
     SwitchingMode mode;
     double muteTimeMs;
     bool success;
+    bool hadSeek = false;
+    int64_t seekBeforeFrame = 0;
+    double seekDurationMs = 0.0;
+    decoder::SeekResult seekResult{};
 };
 
 /// 4-Deck Reference System Manager (Decks A, B, C, D)
@@ -82,6 +86,11 @@ public:
             return {sourceId, targetId, mode, 0.0, false};
         }
 
+        bool hadSeek = false;
+        int64_t seekBeforeFrame = 0;
+        double seekDurationMs = 0.0;
+        decoder::SeekResult seekResult{};
+
         if (mode == SwitchingMode::Comparative) {
             // Comparative mode (Section 2.3):
             // Calculate equivalent time position from source deck
@@ -94,7 +103,11 @@ public:
             // Align target playhead with offset
             int64_t targetFrame = static_cast<int64_t>(currentTimeSec * tgt->trackInfo().sampleRate) + tgt->offsetFrames();
             if (targetFrame < 0) targetFrame = 0;
-            tgt->seek(targetFrame);
+            seekBeforeFrame = tgt->playhead();
+            const auto seekStart = std::chrono::steady_clock::now();
+            seekResult = tgt->seekWithResult(targetFrame);
+            seekDurationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - seekStart).count();
+            hadSeek = true;
             tgt->play();
         } else {
             // Normal mode (Section 2.3):
@@ -108,7 +121,7 @@ public:
         auto end = std::chrono::steady_clock::now();
         double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
 
-        return {sourceId, targetId, mode, elapsedMs, true};
+        return {sourceId, targetId, mode, elapsedMs, true, hadSeek, seekBeforeFrame, seekDurationMs, seekResult};
     }
 
     /// Direct Mode renegotiation: re-negotiates graph rate directly with backend (Section 2.6)

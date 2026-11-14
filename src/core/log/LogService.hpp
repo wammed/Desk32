@@ -57,6 +57,8 @@ public:
         return m_queue.overflowCount();
     }
 
+    Q_INVOKABLE [[nodiscard]] QString sessionId() const { return m_sessionId; }
+
     // QML-invokable APIs
     Q_INVOKABLE void log(
         const QString& category,
@@ -76,11 +78,14 @@ public:
         const QString& target,
         const QString& detailsJson,
         const QString& operationId,
-        const QString& parentOperationId = "");
+        const QString& parentOperationId = "",
+        int32_t errorCode = 0,
+        double durationMs = 0.0);
 
     Q_INVOKABLE QVariantList fetchLogs(const QVariantMap& filter);
     Q_INVOKABLE QVariantList fetchRelatedLogs(const QString& operationId);
     Q_INVOKABLE bool exportToJsonl(const QString& filePath);
+    Q_INVOKABLE bool exportFilteredToJsonl(const QString& filePath, const QVariantMap& filter);
 
 signals:
     void logAppended(const QString& category, const QString& operation, const QString& status, const QString& message);
@@ -90,6 +95,7 @@ private:
     void processBatch();
 
     QString m_dbPath;
+    QString m_sessionId;
     BoundedLogQueue<LogEvent, 4096> m_queue;
 
     std::thread m_workerThread;

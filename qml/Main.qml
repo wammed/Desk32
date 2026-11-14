@@ -581,8 +581,26 @@ ApplicationWindow {
                                             Layout.fillWidth: true
                                             from: 0
                                             to: (deckBox.deckState && deckBox.deckState.totalFrames > 0) ? deckBox.deckState.totalFrames : 100
-                                            value: deckBox.deckState ? deckBox.deckState.playhead : 0
-                                            onMoved: EngineController.seek(modelData, Math.floor(value))
+                                            property bool dragMoved: false
+                                            Binding {
+                                                target: deckSlider
+                                                property: "value"
+                                                value: deckBox.deckState ? deckBox.deckState.playhead : 0
+                                                when: !deckSlider.pressed
+                                            }
+                                            onMoved: {
+                                                if (pressed) {
+                                                    dragMoved = true
+                                                } else {
+                                                    EngineController.seek(modelData, Math.floor(value))
+                                                }
+                                            }
+                                            onPressedChanged: {
+                                                if (!pressed && dragMoved) {
+                                                    dragMoved = false
+                                                    EngineController.seek(modelData, Math.floor(value))
+                                                }
+                                            }
                                         }
                                     }
 
@@ -2602,7 +2620,7 @@ ApplicationWindow {
                     // Category Filter
                     ComboBox {
                         id: catFilter
-                        model: [qsTr("All Categories"), "Deck", "FolderSession", "AudioEngine", "DSP", "Routing", "System", "Render"]
+                        model: [qsTr("All Categories"), "Session", "Transport", "Deck", "FolderSession", "AudioEngine", "DSP", "Routing", "ExternalInsert", "PresetManagement", "Render", "MasterControl", "System"]
                         onActivated: logTable.refresh()
                     }
 
@@ -2613,10 +2631,25 @@ ApplicationWindow {
                         onActivated: logTable.refresh()
                     }
 
+                    Button {
+                        id: thisSessionBtn
+                        text: qsTr("This Session")
+                        checkable: true
+                        checked: false
+                        onToggled: logTable.refresh()
+                    }
+
+                    Button {
+                        id: autoRefreshBtn
+                        text: qsTr("Live")
+                        checkable: true
+                        checked: true
+                    }
+
                     TextField {
                         id: searchField
                         placeholderText: qsTr("Search message or details...")
-                        Layout.preferredWidth: 220
+                        Layout.preferredWidth: 200
                         onAccepted: logTable.refresh()
                     }
 
@@ -2630,7 +2663,11 @@ ApplicationWindow {
                         highlighted: true
                         onClicked: {
                             var path = "/tmp/desk32_log_export_" + Date.now() + ".jsonl"
-                            if (LogService.exportToJsonl(path)) {
+                            var f = logTable.buildFilter(100000)
+                            var ok = (Object.keys(f).length > 1)
+                                ? LogService.exportFilteredToJsonl(path, f)
+                                : LogService.exportToJsonl(path)
+                            if (ok) {
                                 exportNotice.text = qsTr("Exported to %1").arg(path)
                             }
                         }
@@ -2642,11 +2679,80 @@ ApplicationWindow {
                     }
                 }
 
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Label { text: qsTr("From (UTC):"); font.pixelSize: 11; color: "#78909C" }
+                    TextField {
+                        id: fromUtcField
+                        placeholderText: "YYYY-MM-DDTHH:MM:SSZ"
+                        Layout.preferredWidth: 190
+                        font.family: "Monospace"
+                        font.pixelSize: 11
+                        onAccepted: logTable.refresh()
+                    }
+                    Label { text: qsTr("To (UTC):"); font.pixelSize: 11; color: "#78909C" }
+                    TextField {
+                        id: toUtcField
+                        placeholderText: "YYYY-MM-DDTHH:MM:SSZ"
+                        Layout.preferredWidth: 190
+                        font.family: "Monospace"
+                        font.pixelSize: 11
+                        onAccepted: logTable.refresh()
+                    }
+                    Button {
+                        text: qsTr("Last 1h")
+                        onClicked: {
+                            var now = new Date()
+                            var prev = new Date(now.getTime() - 3600 * 1000)
+                            fromUtcField.text = prev.toISOString()
+                            toUtcField.text = ""
+                            logTable.refresh()
+                        }
+                    }
+                    Button {
+                        text: qsTr("Last 12h")
+                        onClicked: {
+                            var now = new Date()
+                            var prev = new Date(now.getTime() - 12 * 3600 * 1000)
+                            fromUtcField.text = prev.toISOString()
+                            toUtcField.text = ""
+                            logTable.refresh()
+                        }
+                    }
+                    Button {
+                        text: qsTr("Clear Time")
+                        onClicked: {
+                            fromUtcField.text = ""
+                            toUtcField.text = ""
+                            logTable.refresh()
+                        }
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+
                 Label {
                     id: exportNotice
-                    text: qsTr("Retention policy: 180 days or 300,000 operations max (auto-purged) // SQLite WAL mode active")
+                    text: qsTr("Session: %1 | Retention: 180d / 300k ops (SQLite WAL)").arg(LogService.sessionId())
                     font.pixelSize: 11
                     color: "#6c7885"
+                }
+
+                Timer {
+                    id: logRefreshDebounce
+                    interval: 250
+                    repeat: false
+                    onTriggered: logTable.refresh()
+                }
+
+                Connections {
+                    target: LogService
+                    function onLogAppended(category, operation, status, message) {
+                        if (autoRefreshBtn.checked) {
+                            logRefreshDebounce.restart()
+                        }
+                    }
                 }
 
                 // Log Events Table + Detail pane
@@ -2685,13 +2791,39 @@ ApplicationWindow {
                                 ev.parentOperationId.length > 0 ? ev.parentOperationId : ev.operationId)
                         }
 
-                        function refresh() {
+                        function buildFilter(limitCount) {
                             var filter = {}
                             if (catFilter.currentIndex > 0) filter["category"] = catFilter.currentText
                             if (statusFilter.currentIndex > 0) filter["status"] = statusFilter.currentText
-                            if (searchField.text.length > 0) filter["searchText"] = searchField.text
-                            filter["limit"] = 200
-                            model = LogService.fetchLogs(filter)
+                            if (fromUtcField.text.length > 0) filter["fromUtc"] = fromUtcField.text.trim()
+                            if (toUtcField.text.length > 0) filter["toUtc"] = toUtcField.text.trim()
+                            if (thisSessionBtn.checked && searchField.text.length === 0) {
+                                filter["searchText"] = LogService.sessionId()
+                            } else if (searchField.text.length > 0) {
+                                filter["searchText"] = searchField.text
+                            }
+                            filter["limit"] = limitCount
+                            return filter
+                        }
+
+                        function formatDetailsJson(raw) {
+                            if (!raw || raw.length === 0) return "{}"
+                            try {
+                                return JSON.stringify(JSON.parse(raw), null, 2)
+                            } catch (e) {
+                                return raw
+                            }
+                        }
+
+                        function refresh() {
+                            var rows = LogService.fetchLogs(buildFilter(300))
+                            if (thisSessionBtn.checked && searchField.text.length > 0) {
+                                var sid = LogService.sessionId()
+                                rows = rows.filter(function(r) {
+                                    return r.detailsJson && r.detailsJson.indexOf(sid) !== -1
+                                })
+                            }
+                            model = rows
                         }
 
                         Component.onCompleted: refresh()
@@ -2762,6 +2894,24 @@ ApplicationWindow {
                                     elide: Text.ElideRight
                                 }
 
+                                Rectangle {
+                                    visible: modelData.errorCode !== 0
+                                    width: errCodeLbl.implicitWidth + 10
+                                    height: 18
+                                    radius: 3
+                                    color: "#FF525225"
+                                    border.color: "#FF5252"
+                                    Label {
+                                        id: errCodeLbl
+                                        anchors.centerIn: parent
+                                        text: "E:" + modelData.errorCode
+                                        font.family: "Monospace"
+                                        font.pixelSize: 9
+                                        font.bold: true
+                                        color: "#FF5252"
+                                    }
+                                }
+
                                 Label {
                                     text: modelData.durationMs.toFixed(2) + " ms"
                                     font.family: "Monospace"
@@ -2791,9 +2941,31 @@ ApplicationWindow {
                             width: 400
                             spacing: 4
 
-                            Label {
-                                text: qsTr("EVENT DETAILS")
-                                font.bold: true; font.pixelSize: 11; color: "#A0AAB2"
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Label {
+                                    text: qsTr("EVENT DETAILS")
+                                    font.bold: true; font.pixelSize: 11; color: "#A0AAB2"
+                                }
+                                Item { Layout.fillWidth: true }
+                                Button {
+                                    visible: !!logTable.selectedEvent
+                                    text: qsTr("Copy OpID")
+                                    onClicked: {
+                                        EngineController.copyToClipboard(logTable.selectedEvent.operationId)
+                                        exportNotice.text = qsTr("Copied operationId: %1").arg(logTable.selectedEvent.operationId)
+                                    }
+                                }
+                                Button {
+                                    visible: !!logTable.selectedEvent
+                                    text: qsTr("Copy JSON")
+                                    onClicked: {
+                                        var formatted = logTable.formatDetailsJson(logTable.selectedEvent.detailsJson)
+                                        EngineController.copyToClipboard(formatted)
+                                        exportNotice.text = qsTr("Copied formatted details_json to clipboard")
+                                    }
+                                }
                             }
                             Label {
                                 visible: !logTable.selectedEvent
@@ -2812,8 +2984,9 @@ ApplicationWindow {
                                     ["targetType", logTable.selectedEvent.targetType],
                                     ["target", logTable.selectedEvent.target],
                                     ["errorCode", String(logTable.selectedEvent.errorCode)],
+                                    ["durationMs", logTable.selectedEvent.durationMs.toFixed(2) + " ms"],
                                     ["message", logTable.selectedEvent.message],
-                                    ["detailsJson", logTable.selectedEvent.detailsJson]
+                                    ["detailsJson", logTable.formatDetailsJson(logTable.selectedEvent.detailsJson)]
                                 ] : []
                                 ColumnLayout {
                                     Layout.fillWidth: true

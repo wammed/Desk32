@@ -233,6 +233,21 @@ bool FFmpegAudioDecoder::decodeNextPacket()
             const int inSamples = m_decodedFrame->nb_samples;
             if (inSamples <= 0) continue;
 
+            if (m_seekPending) {
+                if (m_decodedFrame->best_effort_timestamp != AV_NOPTS_VALUE &&
+                    m_audioStreamIndex >= 0 && m_formatInfo.sampleRate > 0.0) {
+                    AVStream* st = m_formatCtx->streams[m_audioStreamIndex];
+                    const int64_t ptsFrame = av_rescale_q(
+                        m_decodedFrame->best_effort_timestamp,
+                        st->time_base,
+                        AVRational{1, static_cast<int>(m_formatInfo.sampleRate)}
+                    );
+                    m_seekActualFrame = std::max<int64_t>(0, ptsFrame);
+                    m_currentFrame = m_seekActualFrame;
+                }
+                m_seekPending = false;
+            }
+
             // Compact FIFO if read pointer has advanced
             if (m_fifoReadPos > 0) {
                 size_t unread = (m_fifoWritePos > m_fifoReadPos) ? (m_fifoWritePos - m_fifoReadPos) : 0;
@@ -347,6 +362,8 @@ bool FFmpegAudioDecoder::seek(int64_t targetFrame)
     m_fifoReadPos = 0;
     m_fifoWritePos = 0;
     m_currentFrame = targetFrame;
+    m_seekActualFrame = targetFrame;
+    m_seekPending = true;
 
     return true;
 }

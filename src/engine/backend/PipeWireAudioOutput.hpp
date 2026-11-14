@@ -5,6 +5,7 @@
 #include <functional>
 #include <atomic>
 #include <memory>
+#include <mutex>
 
 // Forward declarations for PipeWire / SPA structures to keep header clean
 struct pw_thread_loop;
@@ -34,7 +35,9 @@ struct StreamDiagnostics {
     uint32_t sampleRate = 48000;
     uint32_t channels = 2;
     uint32_t bufferFrames = 256;
+    uint32_t negotiatedQuantum = 0;
     std::string formatName = "F32LE";
+    std::string deviceName = "default";
     uint64_t xrunCount = 0;
     uint64_t totalFramesProcessed = 0;
     bool isDirectMode = false;
@@ -105,9 +108,13 @@ private:
     std::atomic<StreamState> m_state{StreamState::Unconnected};
     std::atomic<uint64_t> m_xrunCount{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};
+    std::atomic<uint32_t> m_negotiatedQuantum{0};
     std::atomic<bool> m_isDirectMode{false};
     std::atomic<DirectModeStatus> m_directModeStatus{DirectModeStatus::Unknown};
     bool m_offlineSimulation = false;
+
+    mutable std::mutex m_deviceMutex;
+    std::string m_deviceName{"default"};
 
     AudioCallback m_callback;
 };

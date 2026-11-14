@@ -1,8 +1,11 @@
 #include "RenderEngine.hpp"
+#include "core/log/LogErrorCodes.hpp"
 #include "engine/decoder/FFmpegAudioDecoder.hpp"
 #include "engine/dsp/Resampler.hpp"
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStorageInfo>
 #include <QDateTime>
 #include <QThread>
@@ -11,6 +14,7 @@
 #include <sys/stat.h>
 #include <array>
 #include <algorithm>
+#include <chrono>
 
 namespace desk32::engine::render {
 
@@ -744,17 +748,31 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         return false;
     }
 
-    core::log::LogService::instance().log(
-        "Render",
-        task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
-        "Info",
-        QString("Starting render: %1 files into folder %2 [Serial: %3, Staging: %4]")
-            .arg(task.totalTracks).arg(folderSuffix, task.serial, task.stagingDir),
-        "RenderEngine",
-        task.finalOutputDir,
-        "{}",
-        parentOpId, ""
-    );
+    const auto renderJobStart = std::chrono::steady_clock::now();
+    {
+        QJsonObject jobDet;
+        jobDet.insert(QStringLiteral("input_path"), task.sourceFolder);
+        jobDet.insert(QStringLiteral("output_dir"), task.finalOutputDir);
+        jobDet.insert(QStringLiteral("staging_dir"), task.stagingDir);
+        jobDet.insert(QStringLiteral("serial"), task.serial);
+        jobDet.insert(QStringLiteral("total_tracks"), task.totalTracks);
+        jobDet.insert(QStringLiteral("enable_master_dsp"), task.settings.enableMasterDsp);
+        jobDet.insert(QStringLiteral("apply_dither"), task.settings.applyDither);
+        jobDet.insert(QStringLiteral("bit_depth"), static_cast<int>(task.settings.bitDepth));
+        jobDet.insert(QStringLiteral("rate_mode"), static_cast<int>(task.settings.rateMode));
+        jobDet.insert(QStringLiteral("available_bytes"), QStorageInfo(task.sourceFolder).bytesAvailable());
+        core::log::LogService::instance().log(
+            "Render",
+            task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
+            "Info",
+            QString("Starting render: %1 files into folder %2 [Serial: %3, Staging: %4]")
+                .arg(task.totalTracks).arg(folderSuffix, task.serial, task.stagingDir),
+            "RenderEngine",
+            task.finalOutputDir,
+            QString::fromUtf8(QJsonDocument(jobDet).toJson(QJsonDocument::Compact)),
+            parentOpId, ""
+        );
+    }
 
     // 3. Render tracks sequentially
     if (auto hook = getTestTaskHook()) {
@@ -862,8 +880,10 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             }
         };
 
+        const auto trackStart = std::chrono::steady_clock::now();
         bool ok = renderSingleFile(inputFilePath, outputFilePath, task.settings,
                                    task.dspSnapshot, m_cancelRequested, trackFraction, trackError, onBlockProgress);
+        const double trackDurMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - trackStart).count();
 
         if (!ok) {
             allTracksOk = false;
@@ -877,11 +897,16 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                     tr["errorMessage"] = task.errorMessage;
                     task.trackResults[i] = tr;
                 }
+                QJsonObject trDet;
+                trDet.insert(QStringLiteral("input_path"), inputFilePath);
+                trDet.insert(QStringLiteral("output_path"), outputFilePath);
                 core::log::LogService::instance().log(
                     "Render", "RenderTrack", "Cancelled",
                     QString("Track cancelled: %1").arg(trackFile),
-                    "AudioFile", inputFilePath, "{}",
-                    trackOpId, parentOpId
+                    "AudioFile", inputFilePath,
+                    QString::fromUtf8(QJsonDocument(trDet).toJson(QJsonDocument::Compact)),
+                    trackOpId, parentOpId,
+                    core::log::ErrorCode::RenderCancelled, trackDurMs
                 );
             } else {
                 task.status = RenderStatus::Failed;
@@ -892,11 +917,18 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
                     tr["errorMessage"] = trackError;
                     task.trackResults[i] = tr;
                 }
+                QJsonObject trDet;
+                trDet.insert(QStringLiteral("input_path"), inputFilePath);
+                trDet.insert(QStringLiteral("output_path"), outputFilePath);
+                trDet.insert(QStringLiteral("stage"), QStringLiteral("render_track"));
+                trDet.insert(QStringLiteral("error_detail"), trackError);
                 core::log::LogService::instance().log(
                     "Render", "RenderTrack", "Failed",
                     QString("Track failed: %1 - %2").arg(trackFile, task.errorMessage),
-                    "AudioFile", inputFilePath, "{}",
-                    trackOpId, parentOpId
+                    "AudioFile", inputFilePath,
+                    QString::fromUtf8(QJsonDocument(trDet).toJson(QJsonDocument::Compact)),
+                    trackOpId, parentOpId,
+                    core::log::ErrorCode::RenderWriteFailed, trackDurMs
                 );
             }
             break;
@@ -916,12 +948,20 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             }
         }
 
-        core::log::LogService::instance().log(
-            "Render", "RenderTrack", "Success",
-            QString("Rendered track %1/%2: %3").arg(i + 1).arg(task.totalTracks).arg(trackFile),
-            "AudioFile", inputFilePath, "{}",
-            trackOpId, parentOpId
-        );
+        {
+            QJsonObject trDet;
+            trDet.insert(QStringLiteral("input_path"), inputFilePath);
+            trDet.insert(QStringLiteral("output_path"), outputFilePath);
+            trDet.insert(QStringLiteral("output_bytes"), QFileInfo(outputFilePath).size());
+            core::log::LogService::instance().log(
+                "Render", "RenderTrack", "Success",
+                QString("Rendered track %1/%2: %3").arg(i + 1).arg(task.totalTracks).arg(trackFile),
+                "AudioFile", inputFilePath,
+                QString::fromUtf8(QJsonDocument(trDet).toJson(QJsonDocument::Compact)),
+                trackOpId, parentOpId,
+                0, trackDurMs
+            );
+        }
 
         {
             const std::string progId = task.taskId.toStdString();
@@ -1021,17 +1061,26 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         }
     }
 
-    core::log::LogService::instance().log(
-        "Render",
-        task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
-        "Success",
-        QString("Render completed successfully: %1 tracks written to %2")
-            .arg(task.totalTracks).arg(task.finalOutputDir),
-        "RenderEngine",
-        task.finalOutputDir,
-        "{}",
-        parentOpId, ""
-    );
+    const double jobDurMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - renderJobStart).count();
+    {
+        QJsonObject jobDet;
+        jobDet.insert(QStringLiteral("output_dir"), task.finalOutputDir);
+        jobDet.insert(QStringLiteral("serial"), task.serial);
+        jobDet.insert(QStringLiteral("total_tracks"), task.totalTracks);
+        jobDet.insert(QStringLiteral("rendered_count"), static_cast<int>(task.renderedFiles.size()));
+        core::log::LogService::instance().log(
+            "Render",
+            task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
+            "Success",
+            QString("Render completed successfully: %1 tracks written to %2")
+                .arg(task.totalTracks).arg(task.finalOutputDir),
+            "RenderEngine",
+            task.finalOutputDir,
+            QString::fromUtf8(QJsonDocument(jobDet).toJson(QJsonDocument::Compact)),
+            parentOpId, "",
+            0, jobDurMs
+        );
+    }
 
     return true;
 }

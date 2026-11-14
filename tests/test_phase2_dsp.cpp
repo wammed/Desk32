@@ -229,6 +229,8 @@ private slots:
     void testAudioThreadAllocationTrackerOverloadsAndIntentionalDetection();
     void testDspParameterMailboxConsumedAppliedAndSupersededConsistency();
     void testDspNodeBypassParameterPreservation();
+    void testSeekObservabilityLogging();
+    void testSessionAndFolderObservabilityLogging();
     void cleanupTestCase();
 
 private:
@@ -2929,6 +2931,302 @@ void TestPhase2Dsp::testDspNodeBypassParameterPreservation() {
     QCOMPARE(revNode.wetLevel(), 0.35);
     QCOMPARE(revNode.predelayMs(), 25.0);
     QCOMPARE(revNode.isTailPreserving(), true);
+}
+
+void TestPhase2Dsp::testSeekObservabilityLogging()
+{
+    auto writeTestWav = [](const QString& path, uint32_t sampleRate, uint32_t numFrames) -> bool {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        const uint16_t channels = 2;
+        const uint16_t bitsPerSample = 16;
+        const uint32_t dataSize = numFrames * channels * (bitsPerSample / 8);
+        const uint32_t riffSize = 36 + dataSize;
+        const uint32_t byteRate = sampleRate * channels * (bitsPerSample / 8);
+        const uint16_t blockAlign = channels * (bitsPerSample / 8);
+
+        QByteArray hdr;
+        hdr.append("RIFF", 4);
+        hdr.append(reinterpret_cast<const char*>(&riffSize), 4);
+        hdr.append("WAVE", 4);
+        hdr.append("fmt ", 4);
+        const uint32_t fmtSize = 16;
+        const uint16_t audioFmt = 1;
+        hdr.append(reinterpret_cast<const char*>(&fmtSize), 4);
+        hdr.append(reinterpret_cast<const char*>(&audioFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&channels), 2);
+        hdr.append(reinterpret_cast<const char*>(&sampleRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&byteRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&blockAlign), 2);
+        hdr.append(reinterpret_cast<const char*>(&bitsPerSample), 2);
+        hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSize), 4);
+        f.write(hdr);
+
+        QByteArray pcm(static_cast<int>(dataSize), '\0');
+        f.write(pcm);
+        f.close();
+        return true;
+    };
+
+    const QString wavA = m_tempDir->path() + "/seek_test_a.wav";
+    const QString wavB = m_tempDir->path() + "/seek_test_b.wav";
+    QVERIFY(writeTestWav(wavA, 48000, 48000 * 3));
+    QVERIFY(writeTestWav(wavB, 48000, 48000 * 3));
+
+    auto& ctrl = desk32::core::EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+
+    auto& logSvc = desk32::core::log::LogService::instance();
+
+    // 1. Seek on unopened Deck D -> Failed with error_code 1010 and stage "not_open"
+    ctrl.seek("D", 4800);
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Transport";
+        auto events = logSvc.queryLogs(f);
+        bool foundNotOpen = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "Seek" && ev.target == "D") {
+                foundNotOpen = true;
+                QCOMPARE(ev.status, std::string("Failed"));
+                QCOMPARE(ev.errorCode, 1010);
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["v"].toInt(), 1);
+                QVERIFY(!d["session_id"].toString().isEmpty());
+                QCOMPARE(d["trigger"].toString(), QString("user"));
+                QCOMPARE(d["stage"].toString(), QString("not_open"));
+                break;
+            }
+        }
+        QVERIFY(foundNotOpen);
+    }
+
+    // 2. Load tracks on A & B, seek within buffer on Deck A
+    QVERIFY(ctrl.loadTrack("A", wavA));
+    QVERIFY(ctrl.loadTrack("B", wavB));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30)); // Allow decoder worker to prime ring buffer
+
+    ctrl.seek("A", 1024);
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Transport";
+        auto events = logSvc.queryLogs(f);
+        bool foundUserSeek = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "Seek" && ev.target == "A" && ev.status == "Success") {
+                foundUserSeek = true;
+                QCOMPARE(ev.errorCode, 0);
+                QVERIFY(ev.durationMs >= 0.0);
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["deck"].toString(), QString("A"));
+                QCOMPARE(d["trigger"].toString(), QString("user"));
+                QCOMPARE(d["path"].toString(), wavA);
+                QCOMPARE(d["sample_rate_hz"].toDouble(), 48000.0);
+                QVERIFY(d.contains("position_ms_before"));
+                QVERIFY(d.contains("requested_position_ms"));
+                QVERIFY(d.contains("position_ms_after"));
+                QCOMPARE(d["position_ms_after"].toDouble(), d["actual_position_ms"].toDouble());
+                QCOMPARE(d["within_buffer"].toBool(), true);
+                break;
+            }
+        }
+        QVERIFY(foundUserSeek);
+    }
+
+    // 3. Out-of-range seek on Deck A -> Failed with error_code 1011
+    ctrl.seek("A", 48000 * 10);
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Transport";
+        auto events = logSvc.queryLogs(f);
+        bool foundOor = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "Seek" && ev.target == "A" && ev.status == "Failed") {
+                foundOor = true;
+                QCOMPARE(ev.errorCode, 1011);
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["stage"].toString(), QString("out_of_range"));
+                break;
+            }
+        }
+        QVERIFY(foundOor);
+    }
+
+    // 4. Comparative switch A -> B -> emits Seek with trigger == "compare_switch"
+    ctrl.switchDeck("B", 1);
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Transport";
+        auto events = logSvc.queryLogs(f);
+        int compareSeekCount = 0;
+        for (const auto& ev : events) {
+            if (ev.operation == "Seek" && ev.target == "B") {
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                if (d["trigger"].toString() == "compare_switch") {
+                    ++compareSeekCount;
+                    QCOMPARE(d["path"].toString(), wavB);
+                    QCOMPARE(d["sample_rate_hz"].toDouble(), 48000.0);
+                }
+            }
+        }
+        QCOMPARE(compareSeekCount, 1);
+    }
+}
+
+void TestPhase2Dsp::testSessionAndFolderObservabilityLogging()
+{
+    auto& ctrl = desk32::core::EngineController::instance();
+    auto& logSvc = desk32::core::log::LogService::instance();
+
+    // 1. SessionStart
+    ctrl.recordSessionStart(QStringLiteral("Vulkan"), QStringLiteral("TestGPU"));
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Session";
+        auto events = logSvc.queryLogs(f);
+        bool foundStart = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "SessionStart") {
+                foundStart = true;
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["v"].toInt(), 1);
+                QVERIFY(!d["session_id"].toString().isEmpty());
+                QCOMPARE(d["graphics_backend"].toString(), QString("Vulkan"));
+                QCOMPARE(d["gpu_name"].toString(), QString("TestGPU"));
+                QVERIFY(d.contains("git_commit"));
+                QVERIFY(d.contains("qt_version"));
+                QVERIFY(d.contains("pipewire_device"));
+                QVERIFY(d.contains("pipewire_quantum"));
+                QVERIFY(d.contains("pipewire_requested_quantum"));
+                break;
+            }
+        }
+        QVERIFY(foundStart);
+
+        // Verify fromUtc / toUtc filtering via QML-facing fetchLogs API
+        QVariantMap utcFilter;
+        utcFilter["category"] = QStringLiteral("Session");
+        utcFilter["fromUtc"] = QStringLiteral("2020-01-01T00:00:00Z");
+        utcFilter["toUtc"] = QStringLiteral("2099-12-31T23:59:59Z");
+        QVERIFY(!logSvc.fetchLogs(utcFilter).isEmpty());
+
+        QVariantMap emptyRangeFilter;
+        emptyRangeFilter["category"] = QStringLiteral("Session");
+        emptyRangeFilter["fromUtc"] = QStringLiteral("2099-01-01T00:00:00Z");
+        QVERIFY(logSvc.fetchLogs(emptyRangeFilter).isEmpty());
+    }
+
+    // 2. FolderSession Start + Manual AdvanceNext
+    QDir folderDir(m_tempDir->path() + "/folder_obs");
+    QVERIFY(QDir().mkpath(folderDir.path()));
+    auto writeTinyWav = [](const QString& path) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        const uint32_t sampleRate = 48000;
+        const uint16_t channels = 2;
+        const uint16_t bits = 16;
+        const uint32_t numFrames = 4800;
+        const uint32_t dataSize = numFrames * channels * (bits / 8);
+        const uint32_t riffSize = 36 + dataSize;
+        const uint32_t byteRate = sampleRate * channels * (bits / 8);
+        const uint16_t blockAlign = channels * (bits / 8);
+        const uint32_t fmtSize = 16;
+        const uint16_t audioFmt = 1;
+        QByteArray hdr;
+        hdr.append("RIFF", 4);
+        hdr.append(reinterpret_cast<const char*>(&riffSize), 4);
+        hdr.append("WAVE", 4);
+        hdr.append("fmt ", 4);
+        hdr.append(reinterpret_cast<const char*>(&fmtSize), 4);
+        hdr.append(reinterpret_cast<const char*>(&audioFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&channels), 2);
+        hdr.append(reinterpret_cast<const char*>(&sampleRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&byteRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&blockAlign), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2);
+        hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSize), 4);
+        f.write(hdr);
+        f.write(QByteArray(static_cast<int>(dataSize), '\0'));
+        f.close();
+        return true;
+    };
+    QVERIFY(writeTinyWav(folderDir.filePath("01_first.wav")));
+    QVERIFY(writeTinyWav(folderDir.filePath("02_second.wav")));
+
+    QVERIFY(ctrl.startFolderSession("C", folderDir.path(), {"01_first.wav", "02_second.wav"}));
+    QVERIFY(ctrl.advanceFolderNext("C"));
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "FolderSession";
+        auto events = logSvc.queryLogs(f);
+        bool foundStart = false;
+        bool foundAdv = false;
+        for (const auto& ev : events) {
+            QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+            if (ev.operation == "StartSession" && d["deck"].toString() == "C") {
+                foundStart = true;
+                QCOMPARE(d["track_count"].toInt(), 2);
+            }
+            if (ev.operation == "AdvanceNext" && d["deck"].toString() == "C") {
+                foundAdv = true;
+                QCOMPARE(d["track_index_from"].toInt(), 0);
+                QCOMPARE(d["track_index_to"].toInt(), 1);
+                QCOMPARE(d["trigger"].toString(), QString("user"));
+            }
+        }
+        QVERIFY(foundStart);
+        QVERIFY(foundAdv);
+    }
+
+    // 3. DSP ParameterChange commit
+    QVariantMap beforeMap{{"gain_db", 0.0}};
+    QVariantMap afterMap{{"gain_db", 3.5}};
+    ctrl.commitDspParameterChange("PEQ", beforeMap, afterMap, "user");
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "DSP";
+        auto events = logSvc.queryLogs(f);
+        bool foundParam = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "ParameterChange") {
+                foundParam = true;
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["dsp_node"].toString(), QString("PEQ"));
+                QCOMPARE(d["after"].toObject()["gain_db"].toDouble(), 3.5);
+                break;
+            }
+        }
+        QVERIFY(foundParam);
+    }
+
+    // 4. SessionEnd
+    ctrl.recordSessionEnd(QStringLiteral("test_complete"));
+    logSvc.flush();
+    {
+        desk32::core::log::LogFilter f;
+        f.category = "Session";
+        auto events = logSvc.queryLogs(f);
+        bool foundEnd = false;
+        for (const auto& ev : events) {
+            if (ev.operation == "SessionEnd") {
+                foundEnd = true;
+                QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+                QCOMPARE(d["reason"].toString(), QString("test_complete"));
+                QVERIFY(d["uptime_ms"].toDouble() >= 0.0);
+                break;
+            }
+        }
+        QVERIFY(foundEnd);
+    }
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

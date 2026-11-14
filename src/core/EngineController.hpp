@@ -107,6 +107,16 @@ public:
 
     bool initialize(bool offlineMode = false);
 
+    // Session Lifecycle & Observability (§2, §5)
+    void recordSessionStart(const QString& graphicsBackend = QStringLiteral("headless"),
+                            const QString& gpuName = QStringLiteral("none"));
+    void recordSessionEnd(const QString& reason = QStringLiteral("normal_quit"));
+    Q_INVOKABLE void commitDspParameterChange(const QString& dspNode,
+                                              const QVariantMap& beforeMap,
+                                              const QVariantMap& afterMap,
+                                              const QString& trigger = QStringLiteral("user"));
+    Q_INVOKABLE void copyToClipboard(const QString& text);
+
     // Property getters
     [[nodiscard]] QString activeDeckId() const;
     [[nodiscard]] double graphSampleRate() const;
@@ -193,6 +203,7 @@ public:
     Q_INVOKABLE void pause(const QString& deckId);
     Q_INVOKABLE void stop(const QString& deckId);
     Q_INVOKABLE void seek(const QString& deckId, qint64 targetFrame);
+    void seekWithTrigger(const QString& deckId, qint64 targetFrame, const QString& trigger);
     Q_INVOKABLE void switchDeck(const QString& targetDeckId, int mode);
     Q_INVOKABLE void quickSwitchAB();
     Q_INVOKABLE void setDeckLocked(const QString& deckId, bool locked);
@@ -317,6 +328,14 @@ signals:
 
 private:
     void syncMasterDspToRenderEngine();
+    void recordSeekEvent(
+        char deckChar,
+        int64_t beforeFrame,
+        const engine::decoder::SeekResult& res,
+        const QString& trigger,
+        double durationMs,
+        const std::string& trackPath);
+    void checkAudioHealthAndGraph();
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
@@ -372,6 +391,21 @@ private:
     // Pre-allocated Audio Thread scratch buffers (strictly ZERO dynamic allocation in RT audio callback)
     alignas(64) std::array<double, 4096> m_audioInL{};
     alignas(64) std::array<double, 4096> m_audioInR{};
+
+    // Observability session & health tracking
+    bool m_sessionStartRecorded{false};
+    bool m_sessionEndRecorded{false};
+    std::chrono::steady_clock::time_point m_sessionStartTime{};
+    uint64_t m_advanceSeq{0};
+    uint64_t m_lastReportedXruns{0};
+    uint64_t m_pendingXrunDelta{0};
+    std::chrono::steady_clock::time_point m_lastXrunLogTime{};
+    uint32_t m_lastGraphSampleRate{0};
+    uint32_t m_lastGraphBufferFrames{0};
+    int m_lastDirectModeStatus{-1};
+    int m_healthCheckTick{0};
+    std::array<uint64_t, 4> m_lastDeckUnderruns{0, 0, 0, 0};
+    size_t m_lastDroppedLogCount{0};
 };
 
 } // namespace desk32::core

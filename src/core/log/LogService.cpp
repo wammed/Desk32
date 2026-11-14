@@ -3,9 +3,39 @@
 #include <QDir>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QUuid>
 #include <chrono>
 
 namespace desk32::core::log {
+
+namespace {
+QString generateSessionId() {
+    return QStringLiteral("sess-") +
+           QString::number(QDateTime::currentMSecsSinceEpoch()) +
+           QStringLiteral("-") +
+           QUuid::createUuid().toString(QUuid::Id128).left(8);
+}
+
+std::string enrichDetailsJson(const QString& detailsJson, const QString& sessionId) {
+    QJsonObject obj;
+    if (!detailsJson.isEmpty()) {
+        QJsonParseError err{};
+        const QJsonDocument doc = QJsonDocument::fromJson(detailsJson.toUtf8(), &err);
+        if (err.error == QJsonParseError::NoError && doc.isObject()) {
+            obj = doc.object();
+        }
+    }
+    if (!obj.contains(QStringLiteral("v"))) {
+        obj.insert(QStringLiteral("v"), 1);
+    }
+    if (!sessionId.isEmpty() && !obj.contains(QStringLiteral("session_id"))) {
+        obj.insert(QStringLiteral("session_id"), sessionId);
+    }
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact).toStdString();
+}
+} // namespace
 
 LogService& LogService::instance() {
     static LogService s_instance;
@@ -14,6 +44,7 @@ LogService& LogService::instance() {
 
 LogService::LogService(QObject* parent)
     : QObject(parent)
+    , m_sessionId(generateSessionId())
 {}
 
 LogService::~LogService() {
@@ -24,6 +55,8 @@ bool LogService::start(const QString& dbPath) {
     if (m_running.load()) {
         return true;
     }
+
+    m_sessionId = generateSessionId();
 
     if (dbPath.isEmpty()) {
         // Section 11.1: XDG Base Directory specification ($XDG_STATE_HOME/desk32/)
@@ -221,7 +254,9 @@ void LogService::log(
     const QString& target,
     const QString& detailsJson,
     const QString& operationId,
-    const QString& parentOperationId)
+    const QString& parentOperationId,
+    int32_t errorCode,
+    double durationMs)
 {
     LogLevel lvl = LogLevel::Info;
     if (status == "Failed" || status == "Error") lvl = LogLevel::Error;
@@ -229,24 +264,29 @@ void LogService::log(
     else if (status == "Success") lvl = LogLevel::Success;
     else if (status == "Cancelled") lvl = LogLevel::Cancelled;
 
+    const std::string enrichedJson = enrichDetailsJson(detailsJson, m_sessionId);
+
     LogEvent ev = LogEvent::create(
         lvl,
         category.toStdString(),
         message.toStdString(),
-        detailsJson.toStdString(),
+        enrichedJson,
         operation.toStdString(),
         targetType.toStdString(),
         target.toStdString(),
-        0,
-        0.0,
+        errorCode,
+        durationMs,
         operationId.toStdString(),
         parentOperationId.toStdString()
     );
     postLog(ev);
 }
 
-QVariantList LogService::fetchLogs(const QVariantMap& filterMap) {
+namespace {
+LogFilter toLogFilter(const QVariantMap& filterMap) {
     LogFilter filter;
+    if (filterMap.contains("fromUtc")) filter.fromUtc = filterMap.value("fromUtc").toString().toStdString();
+    if (filterMap.contains("toUtc")) filter.toUtc = filterMap.value("toUtc").toString().toStdString();
     if (filterMap.contains("category")) filter.category = filterMap.value("category").toString().toStdString();
     if (filterMap.contains("status")) filter.status = filterMap.value("status").toString().toStdString();
     if (filterMap.contains("operationId")) filter.operationId = filterMap.value("operationId").toString().toStdString();
@@ -255,6 +295,12 @@ QVariantList LogService::fetchLogs(const QVariantMap& filterMap) {
     if (filterMap.contains("searchText")) filter.searchText = filterMap.value("searchText").toString().toStdString();
     if (filterMap.contains("limit")) filter.limit = filterMap.value("limit").toInt();
     if (filterMap.contains("offset")) filter.offset = filterMap.value("offset").toInt();
+    return filter;
+}
+} // namespace
+
+QVariantList LogService::fetchLogs(const QVariantMap& filterMap) {
+    const LogFilter filter = toLogFilter(filterMap);
 
     auto events = queryLogs(filter);
     QVariantList list;
@@ -317,6 +363,10 @@ QVariantList LogService::fetchRelatedLogs(const QString& operationId) {
 
 bool LogService::exportToJsonl(const QString& filePath) {
     return exportJsonl(filePath);
+}
+
+bool LogService::exportFilteredToJsonl(const QString& filePath, const QVariantMap& filterMap) {
+    return exportJsonl(filePath, toLogFilter(filterMap));
 }
 
 } // namespace desk32::core::log

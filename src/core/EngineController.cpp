@@ -1,6 +1,16 @@
 #include "EngineController.hpp"
+#include "core/log/LogErrorCodes.hpp"
+#include <QClipboard>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSysInfo>
 #include <QTimer>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
 
 namespace desk32::core {
 
@@ -125,6 +135,8 @@ bool EngineController::initialize(bool offlineMode) {
     bool initOk = m_audioOutput->initialize(48000, 256);
     if (!initOk) {
         log::LogService::instance().start();
+        QJsonObject det;
+        det.insert(QStringLiteral("stage"), QStringLiteral("pipewire_context_init"));
         log::LogService::instance().log(
             "AudioEngine",
             "Initialize",
@@ -132,7 +144,11 @@ bool EngineController::initialize(bool offlineMode) {
             "Failed to initialize PipeWire audio output context.",
             "System",
             "PipeWire",
-            "{\"error_code\":2001}"
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::PipeWireInitFailed,
+            0.0
         );
         emit diagnosticsChanged();
         return false;
@@ -183,6 +199,8 @@ bool EngineController::initialize(bool offlineMode) {
     }
     if (!startOk) {
         log::LogService::instance().start();
+        QJsonObject det;
+        det.insert(QStringLiteral("stage"), QStringLiteral("pipewire_stream_start"));
         log::LogService::instance().log(
             "AudioEngine",
             "StartStream",
@@ -190,7 +208,11 @@ bool EngineController::initialize(bool offlineMode) {
             "Failed to start PipeWire audio output stream.",
             "System",
             "PipeWire",
-            "{\"error_code\":2002}"
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::PipeWireStartFailed,
+            0.0
         );
         emit diagnosticsChanged();
         return false;
@@ -207,24 +229,50 @@ bool EngineController::initialize(bool offlineMode) {
             if (d->needsFolderAdvance()) {
                 d->clearNeedsFolderAdvance();
                 if (!d->isLocked()) {
+                    const auto& fsBefore = d->folderSession();
+                    const int idxFrom = static_cast<int>(fsBefore.currentIndex());
+                    const std::string pathFrom = fsBefore.currentTrack() ? fsBefore.currentTrack()->path : std::string();
+
                     bool advanced = d->advanceFolderNext();
+                    const auto& fsAfter = d->folderSession();
+                    const int idxTo = static_cast<int>(fsAfter.currentIndex());
+                    const std::string pathTo = fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
+
                     if (advanced) {
+                        ++m_advanceSeq;
+                        QJsonObject det;
+                        det.insert(QStringLiteral("deck"), QString(c));
+                        det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
+                        det.insert(QStringLiteral("track_index_from"), idxFrom);
+                        det.insert(QStringLiteral("track_index_to"), idxTo);
+                        det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
+                        det.insert(QStringLiteral("path_to"), QString::fromStdString(pathTo));
+                        det.insert(QStringLiteral("advance_seq"), static_cast<qint64>(m_advanceSeq));
                         log::LogService::instance().log(
-                            "FolderSession",
-                            "AutoAdvance",
-                            "Success",
-                            QString("Auto-advanced to next track in Deck %1").arg(c),
-                            "Deck",
-                            QString(c)
+                            QStringLiteral("FolderSession"),
+                            QStringLiteral("AutoAdvance"),
+                            QStringLiteral("Success"),
+                            QString("Auto-advanced Deck %1 [%2 -> %3] (seq=%4)").arg(c).arg(idxFrom).arg(idxTo).arg(m_advanceSeq),
+                            QStringLiteral("Deck"),
+                            QString(c),
+                            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
                         );
                     } else {
+                        QJsonObject det;
+                        det.insert(QStringLiteral("deck"), QString(c));
+                        det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
+                        det.insert(QStringLiteral("reason"), QStringLiteral("completed"));
+                        det.insert(QStringLiteral("track_index_from"), idxFrom);
+                        det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
+                        det.insert(QStringLiteral("tracks_played"), idxFrom + 1);
                         log::LogService::instance().log(
-                            "FolderSession",
-                            "AutoAdvance",
-                            "Finished",
+                            QStringLiteral("FolderSession"),
+                            QStringLiteral("AutoAdvance"),
+                            QStringLiteral("Info"),
                             QString("Folder session completed in Deck %1").arg(c),
-                            "Deck",
-                            QString(c)
+                            QStringLiteral("Deck"),
+                            QString(c),
+                            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
                         );
                     }
                     emit deckStateChanged(QString(c));
@@ -238,16 +286,34 @@ bool EngineController::initialize(bool offlineMode) {
     });
     trackTimer->start(50);
 
-    // Periodic check for dynamic DSP telemetry (Compressor / Limiter GR, VU levels)
+    // Periodic check for dynamic DSP telemetry (Compressor / Limiter GR, VU levels) & audio health
     auto* dspTimer = new QTimer(this);
     connect(dspTimer, &QTimer::timeout, this, [this]() {
         emit dspTelemetryChanged();
         emit diagnosticsChanged();
+        if (++m_healthCheckTick >= 30) { // ~1 second interval
+            m_healthCheckTick = 0;
+            checkAudioHealthAndGraph();
+        }
     });
     dspTimer->start(33); // ~30 fps telemetry updates
 
-    // 6. Initialize Logging Service
+    // 6. Initialize Logging Service & baseline session metrics
     log::LogService::instance().start();
+    m_sessionStartTime = std::chrono::steady_clock::now();
+    m_lastXrunLogTime = m_sessionStartTime;
+    m_advanceSeq = 0;
+    m_pendingXrunDelta = 0;
+    if (m_audioOutput) {
+        const auto diag = m_audioOutput->diagnostics();
+        m_lastReportedXruns = diag.xrunCount;
+        m_lastGraphSampleRate = diag.sampleRate;
+        m_lastGraphBufferFrames = (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum : diag.bufferFrames;
+        m_lastDirectModeStatus = static_cast<int>(diag.directModeStatus);
+    }
+    m_lastDroppedLogCount = log::LogService::instance().droppedLogCount();
+    m_lastDeckUnderruns = {0, 0, 0, 0};
+
     log::LogService::instance().log(
         "AudioEngine",
         "Initialize",
@@ -258,6 +324,258 @@ bool EngineController::initialize(bool offlineMode) {
     );
 
     return true;
+}
+
+void EngineController::recordSessionStart(const QString& graphicsBackend, const QString& gpuName) {
+    if (m_sessionStartRecorded) return;
+    m_sessionStartRecorded = true;
+
+    QJsonObject det;
+#ifdef DESK32_APP_VERSION
+    det.insert(QStringLiteral("app_version"), QStringLiteral(DESK32_APP_VERSION));
+#else
+    det.insert(QStringLiteral("app_version"), QStringLiteral("0.1.0"));
+#endif
+#ifdef DESK32_GIT_COMMIT
+    det.insert(QStringLiteral("git_commit"), QStringLiteral(DESK32_GIT_COMMIT));
+#else
+    det.insert(QStringLiteral("git_commit"), QStringLiteral("unknown"));
+#endif
+#ifdef DESK32_GIT_DIRTY
+    det.insert(QStringLiteral("git_dirty"), DESK32_GIT_DIRTY != 0);
+#endif
+    det.insert(QStringLiteral("qt_version"), QString::fromLatin1(qVersion()));
+    det.insert(QStringLiteral("os"), QSysInfo::prettyProductName());
+    det.insert(QStringLiteral("platform"), QGuiApplication::platformName());
+    det.insert(QStringLiteral("desktop_env"), QString::fromUtf8(qgetenv("XDG_CURRENT_DESKTOP")));
+    det.insert(QStringLiteral("graphics_backend"), graphicsBackend);
+    det.insert(QStringLiteral("gpu_name"), gpuName);
+
+    if (m_audioOutput) {
+        const auto diag = m_audioOutput->diagnostics();
+        const uint32_t effectiveQuantum = (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum : diag.bufferFrames;
+        det.insert(QStringLiteral("pipewire_sample_rate_hz"), static_cast<int>(diag.sampleRate));
+        det.insert(QStringLiteral("pipewire_quantum"), static_cast<int>(effectiveQuantum));
+        det.insert(QStringLiteral("pipewire_requested_quantum"), static_cast<int>(diag.bufferFrames));
+        det.insert(QStringLiteral("pipewire_direct_mode"), static_cast<int>(diag.directModeStatus));
+        det.insert(QStringLiteral("pipewire_device"), QString::fromStdString(diag.deviceName));
+    }
+    det.insert(QStringLiteral("initial_output_path"),
+               m_outputRoutingMode.load(std::memory_order_relaxed) == 1
+                   ? QStringLiteral("RenderMonitor")
+                   : QStringLiteral("Listening"));
+    det.insert(QStringLiteral("sample_rate_policy"),
+               m_switchingMode.load(std::memory_order_relaxed) == 1
+                   ? QStringLiteral("Comparative")
+                   : QStringLiteral("Normal"));
+
+    log::LogService::instance().log(
+        QStringLiteral("Session"),
+        QStringLiteral("SessionStart"),
+        QStringLiteral("Info"),
+        QString("Session started (commit=%1, backend=%2, platform=%3)")
+            .arg(det["git_commit"].toString(), graphicsBackend, det["platform"].toString()),
+        QStringLiteral("System"),
+        QStringLiteral("Desk32"),
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+    );
+}
+
+void EngineController::recordSessionEnd(const QString& reason) {
+    if (m_sessionEndRecorded) return;
+    m_sessionEndRecorded = true;
+
+    const auto now = std::chrono::steady_clock::now();
+    const double uptimeMs = (m_sessionStartTime.time_since_epoch().count() > 0)
+        ? std::chrono::duration<double, std::milli>(now - m_sessionStartTime).count()
+        : 0.0;
+    const uint64_t totalXruns = m_audioOutput ? m_audioOutput->diagnostics().xrunCount : 0;
+
+    QJsonObject det;
+    det.insert(QStringLiteral("reason"), reason);
+    det.insert(QStringLiteral("uptime_ms"), uptimeMs);
+    det.insert(QStringLiteral("auto_advance_count"), static_cast<qint64>(m_advanceSeq));
+    det.insert(QStringLiteral("total_xruns"), static_cast<qint64>(totalXruns));
+
+    log::LogService::instance().log(
+        QStringLiteral("Session"),
+        QStringLiteral("SessionEnd"),
+        QStringLiteral("Info"),
+        QString("Session ended (%1, uptime=%2 ms, auto_advance=%3, xruns=%4)")
+            .arg(reason)
+            .arg(uptimeMs, 0, 'f', 0)
+            .arg(m_advanceSeq)
+            .arg(totalXruns),
+        QStringLiteral("System"),
+        QStringLiteral("Desk32"),
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(),
+        QString(),
+        0,
+        uptimeMs
+    );
+}
+
+void EngineController::checkAudioHealthAndGraph() {
+    if (m_audioOutput) {
+        const auto diag = m_audioOutput->diagnostics();
+        const uint32_t effectiveQuantum = (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum : diag.bufferFrames;
+
+        // 1. Detect graph parameter changes (§6)
+        const int curDirect = static_cast<int>(diag.directModeStatus);
+        if (diag.sampleRate != m_lastGraphSampleRate ||
+            effectiveQuantum != m_lastGraphBufferFrames ||
+            curDirect != m_lastDirectModeStatus) {
+            QJsonObject det;
+            det.insert(QStringLiteral("sample_rate_hz_before"), static_cast<int>(m_lastGraphSampleRate));
+            det.insert(QStringLiteral("sample_rate_hz_after"), static_cast<int>(diag.sampleRate));
+            det.insert(QStringLiteral("quantum_before"), static_cast<int>(m_lastGraphBufferFrames));
+            det.insert(QStringLiteral("quantum_after"), static_cast<int>(effectiveQuantum));
+            det.insert(QStringLiteral("direct_mode_before"), m_lastDirectModeStatus);
+            det.insert(QStringLiteral("direct_mode_after"), curDirect);
+            det.insert(QStringLiteral("device"), QString::fromStdString(diag.deviceName));
+
+            log::LogService::instance().log(
+                QStringLiteral("AudioEngine"),
+                QStringLiteral("GraphChanged"),
+                QStringLiteral("Info"),
+                QString("Audio graph changed: %1Hz/%2f -> %3Hz/%4f")
+                    .arg(m_lastGraphSampleRate).arg(m_lastGraphBufferFrames)
+                    .arg(diag.sampleRate).arg(effectiveQuantum),
+                QStringLiteral("Device"),
+                QString::fromStdString(diag.deviceName),
+                QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+            );
+
+            m_lastGraphSampleRate = diag.sampleRate;
+            m_lastGraphBufferFrames = effectiveQuantum;
+            m_lastDirectModeStatus = curDirect;
+        }
+
+        // 2. Aggregated PipeWire XRUN reporting (§6)
+        if (diag.xrunCount > m_lastReportedXruns) {
+            m_pendingXrunDelta += (diag.xrunCount - m_lastReportedXruns);
+            m_lastReportedXruns = diag.xrunCount;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (m_pendingXrunDelta > 0 &&
+            std::chrono::duration<double, std::milli>(now - m_lastXrunLogTime).count() >= 1000.0) {
+            const uint64_t delta = m_pendingXrunDelta;
+            m_pendingXrunDelta = 0;
+            m_lastXrunLogTime = now;
+
+            QJsonObject det;
+            det.insert(QStringLiteral("source"), QStringLiteral("pipewire_report"));
+            det.insert(QStringLiteral("xrun_delta"), static_cast<qint64>(delta));
+            det.insert(QStringLiteral("xrun_total"), static_cast<qint64>(diag.xrunCount));
+            det.insert(QStringLiteral("sample_rate_hz"), static_cast<int>(diag.sampleRate));
+            det.insert(QStringLiteral("quantum"), static_cast<int>(effectiveQuantum));
+            det.insert(QStringLiteral("device"), QString::fromStdString(diag.deviceName));
+            if (m_deckManager) {
+                det.insert(QStringLiteral("deck"), QString(m_deckManager->activeDeckId()));
+            }
+
+            log::LogService::instance().log(
+                QStringLiteral("AudioEngine"),
+                QStringLiteral("XRUN"),
+                QStringLiteral("Warning"),
+                QString("Detected %1 PipeWire XRUN(s) (total: %2)").arg(delta).arg(diag.xrunCount),
+                QStringLiteral("Device"),
+                QString::fromStdString(diag.deviceName),
+                QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+                QString(),
+                QString(),
+                log::ErrorCode::AudioXrunDetected,
+                0.0
+            );
+        }
+    }
+
+    // 3. DecoderWorker buffer underrun separation (§6)
+    if (m_deckManager) {
+        const std::array<char, 4> deckIds{'A', 'B', 'C', 'D'};
+        for (size_t i = 0; i < deckIds.size(); ++i) {
+            const auto* d = m_deckManager->deck(deckIds[i]);
+            if (!d) continue;
+            const uint64_t curUnderruns = d->worker().underrunCount();
+            if (curUnderruns > m_lastDeckUnderruns[i]) {
+                const uint64_t delta = curUnderruns - m_lastDeckUnderruns[i];
+                m_lastDeckUnderruns[i] = curUnderruns;
+                QJsonObject det;
+                det.insert(QStringLiteral("source"), QStringLiteral("decoder_underrun"));
+                det.insert(QStringLiteral("deck"), QString(deckIds[i]));
+                det.insert(QStringLiteral("underrun_delta"), static_cast<qint64>(delta));
+                det.insert(QStringLiteral("underrun_total"), static_cast<qint64>(curUnderruns));
+                det.insert(QStringLiteral("path"), QString::fromStdString(d->trackInfo().path));
+                log::LogService::instance().log(
+                    QStringLiteral("AudioEngine"),
+                    QStringLiteral("Underrun"),
+                    QStringLiteral("Warning"),
+                    QString("Deck %1 decoder ring-buffer underrun (+%2, total: %3)")
+                        .arg(deckIds[i]).arg(delta).arg(curUnderruns),
+                    QStringLiteral("Deck"),
+                    QString(deckIds[i]),
+                    QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+                    QString(),
+                    QString(),
+                    log::ErrorCode::DecoderUnderrunDetected,
+                    0.0
+                );
+            }
+        }
+    }
+
+    // 4. Self-monitoring LogService queue overflow (§0 Principle 5)
+    const size_t curDropped = log::LogService::instance().droppedLogCount();
+    if (curDropped > m_lastDroppedLogCount) {
+        const size_t delta = curDropped - m_lastDroppedLogCount;
+        m_lastDroppedLogCount = curDropped;
+        QJsonObject det;
+        det.insert(QStringLiteral("dropped_delta"), static_cast<qint64>(delta));
+        det.insert(QStringLiteral("dropped_total"), static_cast<qint64>(curDropped));
+        log::LogService::instance().log(
+            QStringLiteral("System"),
+            QStringLiteral("LogDropped"),
+            QStringLiteral("Warning"),
+            QString("LogService bounded queue dropped %1 event(s) (total: %2)").arg(delta).arg(curDropped),
+            QStringLiteral("System"),
+            QStringLiteral("LogService"),
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::LogQueueOverflow,
+            0.0
+        );
+    }
+}
+
+void EngineController::copyToClipboard(const QString& text) {
+    if (auto* cb = QGuiApplication::clipboard()) {
+        cb->setText(text);
+    }
+}
+
+void EngineController::commitDspParameterChange(
+    const QString& dspNode,
+    const QVariantMap& beforeMap,
+    const QVariantMap& afterMap,
+    const QString& trigger)
+{
+    QJsonObject det;
+    det.insert(QStringLiteral("dsp_node"), dspNode);
+    det.insert(QStringLiteral("trigger"), trigger);
+    det.insert(QStringLiteral("before"), QJsonObject::fromVariantMap(beforeMap));
+    det.insert(QStringLiteral("after"), QJsonObject::fromVariantMap(afterMap));
+
+    log::LogService::instance().log(
+        QStringLiteral("DSP"),
+        QStringLiteral("ParameterChange"),
+        QStringLiteral("Success"),
+        QString("Updated %1 parameters (trigger: %2)").arg(dspNode, trigger),
+        QStringLiteral("DSPNode"),
+        dspNode,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+    );
 }
 
 QString EngineController::activeDeckId() const {
@@ -575,15 +893,21 @@ void EngineController::setSwitchingMode(int mode) {
 }
 
 void EngineController::setOutputRoutingMode(int path) {
-    if (m_outputRoutingMode.exchange(path) != path) {
+    const int prev = m_outputRoutingMode.exchange(path);
+    if (prev != path) {
         emit outputRoutingModeChanged(path);
+        QJsonObject det;
+        det.insert(QStringLiteral("from"), prev == 1 ? QStringLiteral("RenderMonitor") : QStringLiteral("Listening"));
+        det.insert(QStringLiteral("to"), path == 1 ? QStringLiteral("RenderMonitor") : QStringLiteral("Listening"));
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
         log::LogService::instance().log(
             "Routing",
             "SetOutputPath",
             "Success",
             path == 0 ? "Switched to Listening Path" : "Switched to Render Monitor Path",
             "OutputPath",
-            path == 0 ? "Listening" : "RenderMonitor"
+            path == 0 ? "Listening" : "RenderMonitor",
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
         );
     }
 }
@@ -615,13 +939,23 @@ void EngineController::setGlobalDspBypass(bool bypass) {
     // pushTwo() guarantees that either BOTH commands are enqueued or NEITHER is enqueued.
     // Partial bypass state between Master and Listening chains is structurally impossible.
     if (!m_pipeline->paramQueue().pushTwo(cmdMaster, cmdListen)) {
+        QJsonObject det;
+        det.insert(QStringLiteral("scope"), QStringLiteral("global"));
+        det.insert(QStringLiteral("target_chains"), QJsonArray{QStringLiteral("Master"), QStringLiteral("Listening")});
+        det.insert(QStringLiteral("bypassed"), bypass);
+        det.insert(QStringLiteral("stage"), QStringLiteral("dsp_queue_push"));
         log::LogService::instance().log(
             "DSP",
             "GlobalBypass",
             "Failed",
             QString("Failed to queue Global DSP Bypass: queue full (code: 3001)"),
             "DSPQueue",
-            "Pipeline"
+            "Pipeline",
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::DspQueueFull,
+            0.0
         );
         emit dspQueueOverflowWarning(static_cast<int>(cmdMaster.type));
         emit globalDspBypassChanged(prevBypass);
@@ -639,13 +973,19 @@ void EngineController::setGlobalDspBypass(bool bypass) {
     emit compressorParametersChanged();
     emit limiterParametersChanged();
     emit reverbParametersChanged();
+    QJsonObject bypassDet;
+    bypassDet.insert(QStringLiteral("scope"), QStringLiteral("global"));
+    bypassDet.insert(QStringLiteral("target_chains"), QJsonArray{QStringLiteral("Master"), QStringLiteral("Listening")});
+    bypassDet.insert(QStringLiteral("bypassed"), bypass);
+    bypassDet.insert(QStringLiteral("trigger"), QStringLiteral("user"));
     log::LogService::instance().log(
         "DSP",
         "GlobalBypass",
         "Success",
         bypass ? "Global DSP Bypass Engaged" : "Global DSP Bypass Disengaged",
         "DSPChain",
-        "Master"
+        "Master",
+        QString::fromUtf8(QJsonDocument(bypassDet).toJson(QJsonDocument::Compact))
     );
 }
 
@@ -751,7 +1091,22 @@ void EngineController::play(const QString& deckId) {
         }
         d->play();
         emit deckStateChanged(deckId);
-        log::LogService::instance().log("Transport", "Play", "Success", "Deck " + deckId + " started playback", "Deck", deckId);
+        const auto info = d->trackInfo();
+        const double sr = info.sampleRate;
+        const double posMs = (sr > 0.0) ? (static_cast<double>(d->playhead()) * 1000.0 / sr) : 0.0;
+        const double durMs = (sr > 0.0) ? (static_cast<double>(info.totalFrames) * 1000.0 / sr) : 0.0;
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("path"), QString::fromStdString(info.path));
+        det.insert(QStringLiteral("position_ms"), posMs);
+        det.insert(QStringLiteral("duration_ms_track"), durMs);
+        log::LogService::instance().log(
+            "Transport", "Play", "Success",
+            "Deck " + deckId + " started playback",
+            "Deck", deckId,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+        );
     }
 }
 
@@ -762,7 +1117,22 @@ void EngineController::pause(const QString& deckId) {
     if (d) {
         d->pause();
         emit deckStateChanged(deckId);
-        log::LogService::instance().log("Transport", "Pause", "Success", "Deck " + deckId + " paused", "Deck", deckId);
+        const auto info = d->trackInfo();
+        const double sr = info.sampleRate;
+        const double posMs = (sr > 0.0) ? (static_cast<double>(d->playhead()) * 1000.0 / sr) : 0.0;
+        const double durMs = (sr > 0.0) ? (static_cast<double>(info.totalFrames) * 1000.0 / sr) : 0.0;
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("path"), QString::fromStdString(info.path));
+        det.insert(QStringLiteral("position_ms"), posMs);
+        det.insert(QStringLiteral("duration_ms_track"), durMs);
+        log::LogService::instance().log(
+            "Transport", "Pause", "Success",
+            "Deck " + deckId + " paused",
+            "Deck", deckId,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+        );
     }
 }
 
@@ -771,18 +1141,109 @@ void EngineController::stop(const QString& deckId) {
     char id = deckId.toUpper().at(0).toLatin1();
     auto* d = m_deckManager->deck(id);
     if (d) {
+        const auto info = d->trackInfo();
+        const double sr = info.sampleRate;
+        const double posMs = (sr > 0.0) ? (static_cast<double>(d->playhead()) * 1000.0 / sr) : 0.0;
+        const double durMs = (sr > 0.0) ? (static_cast<double>(info.totalFrames) * 1000.0 / sr) : 0.0;
         d->stop();
         emit deckStateChanged(deckId);
-        log::LogService::instance().log("Transport", "Stop", "Success", "Deck " + deckId + " stopped", "Deck", deckId);
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("path"), QString::fromStdString(info.path));
+        det.insert(QStringLiteral("position_ms"), posMs);
+        det.insert(QStringLiteral("duration_ms_track"), durMs);
+        log::LogService::instance().log(
+            "Transport", "Stop", "Success",
+            "Deck " + deckId + " stopped",
+            "Deck", deckId,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+        );
     }
 }
 
+void EngineController::recordSeekEvent(
+    char deckChar,
+    int64_t beforeFrame,
+    const engine::decoder::SeekResult& res,
+    const QString& trigger,
+    double durationMs,
+    const std::string& trackPath)
+{
+    const QString deckStr(deckChar);
+    const double sr = res.sampleRateHz;
+    auto framesToMs = [sr](int64_t frames) -> double {
+        return (sr > 0.0) ? (static_cast<double>(frames) * 1000.0 / sr) : 0.0;
+    };
+
+    const double posBeforeMs = framesToMs(beforeFrame);
+    const double requestedMs = framesToMs(res.requestedFrame);
+    const double actualMs = framesToMs(res.actualFrame);
+
+    QJsonObject details;
+    details.insert(QStringLiteral("deck"), deckStr);
+    details.insert(QStringLiteral("trigger"), trigger);
+    details.insert(QStringLiteral("path"), QString::fromStdString(trackPath));
+    details.insert(QStringLiteral("sample_rate_hz"), sr);
+    details.insert(QStringLiteral("position_ms_before"), posBeforeMs);
+    details.insert(QStringLiteral("requested_position_ms"), requestedMs);
+    details.insert(QStringLiteral("position_ms_after"), actualMs);
+    details.insert(QStringLiteral("actual_position_ms"), actualMs);
+    details.insert(QStringLiteral("requested_frame"), static_cast<qint64>(res.requestedFrame));
+    details.insert(QStringLiteral("actual_frame"), static_cast<qint64>(res.actualFrame));
+    details.insert(QStringLiteral("within_buffer"), res.withinBuffer);
+
+    if (!res.success) {
+        details.insert(QStringLiteral("stage"), QString::fromStdString(res.stage));
+        if (!res.errorMessage.empty()) {
+            details.insert(QStringLiteral("error_detail"), QString::fromStdString(res.errorMessage));
+        }
+    }
+
+    const QString detailsJson = QString::fromUtf8(QJsonDocument(details).toJson(QJsonDocument::Compact));
+    const QString status = res.success ? QStringLiteral("Success") : QStringLiteral("Failed");
+    const QString msg = res.success
+        ? QString("Deck %1 seek to %2 ms (trigger: %3, within_buffer: %4)")
+              .arg(deckStr)
+              .arg(actualMs, 0, 'f', 1)
+              .arg(trigger)
+              .arg(res.withinBuffer ? "true" : "false")
+        : QString("Deck %1 seek failed at stage '%2' (trigger: %3)")
+              .arg(deckStr)
+              .arg(QString::fromStdString(res.stage))
+              .arg(trigger);
+
+    log::LogService::instance().log(
+        QStringLiteral("Transport"),
+        QStringLiteral("Seek"),
+        status,
+        msg,
+        QStringLiteral("Deck"),
+        deckStr,
+        detailsJson,
+        QString(),
+        QString(),
+        res.success ? 0 : res.errorCode,
+        durationMs
+    );
+}
+
 void EngineController::seek(const QString& deckId, qint64 targetFrame) {
+    seekWithTrigger(deckId, targetFrame, QStringLiteral("user"));
+}
+
+void EngineController::seekWithTrigger(const QString& deckId, qint64 targetFrame, const QString& trigger) {
     if (!m_deckManager || deckId.isEmpty()) return;
     char id = deckId.toUpper().at(0).toLatin1();
     auto* d = m_deckManager->deck(id);
     if (d) {
-        d->seek(targetFrame);
+        const int64_t beforeFrame = d->playhead();
+        const std::string trackPath = d->trackInfo().path;
+        const auto start = std::chrono::steady_clock::now();
+        const auto res = d->seekWithResult(targetFrame);
+        const double durationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+        recordSeekEvent(id, beforeFrame, res, trigger, durationMs, trackPath);
         emit deckStateChanged(deckId);
     }
 }
@@ -809,6 +1270,12 @@ void EngineController::switchDeck(const QString& targetDeckId, int mode) {
             "Deck",
             targetDeckId
         );
+        if (res.hadSeek) {
+            const auto* tgtDeck = m_deckManager->deck(res.targetDeck);
+            const std::string tgtPath = tgtDeck ? tgtDeck->trackInfo().path : std::string();
+            recordSeekEvent(res.targetDeck, res.seekBeforeFrame, res.seekResult,
+                            QStringLiteral("compare_switch"), res.seekDurationMs, tgtPath);
+        }
     }
 }
 
@@ -821,6 +1288,12 @@ void EngineController::quickSwitchAB() {
         emit activeDeckChanged(act);
         emit deckStateChanged("A");
         emit deckStateChanged("B");
+        if (res.hadSeek) {
+            const auto* tgtDeck = m_deckManager->deck(res.targetDeck);
+            const std::string tgtPath = tgtDeck ? tgtDeck->trackInfo().path : std::string();
+            recordSeekEvent(res.targetDeck, res.seekBeforeFrame, res.seekResult,
+                            QStringLiteral("compare_switch"), res.seekDurationMs, tgtPath);
+        }
     }
 }
 
@@ -848,26 +1321,60 @@ bool EngineController::loadTrack(const QString& deckId, const QString& filePath)
     auto* d = m_deckManager->deck(id);
     if (!d) return false;
 
+    const auto start = std::chrono::steady_clock::now();
     bool ok = d->loadTrack(filePath.toStdString(), m_deckManager->graphRate());
+    const double loadMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
     if (ok) {
         emit deckStateChanged(deckId);
+        const auto info = d->trackInfo();
+        const double sr = info.sampleRate;
+        const double durMs = (sr > 0.0) ? (static_cast<double>(info.totalFrames) * 1000.0 / sr) : 0.0;
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("path"), filePath);
+        det.insert(QStringLiteral("codec"), QFileInfo(filePath).suffix().toLower());
+        det.insert(QStringLiteral("sample_rate_hz"), sr);
+        det.insert(QStringLiteral("channels"), static_cast<int>(info.channels));
+        det.insert(QStringLiteral("duration_ms_track"), durMs);
         log::LogService::instance().log(
             "Deck",
             "LoadTrack",
             "Success",
-            QString("Loaded %1 into Deck %2").arg(QFileInfo(filePath).fileName()).arg(deckId),
+            QString("Loaded %1 into Deck %2").arg(QFileInfo(filePath).fileName(), deckId),
             "File",
-            filePath
+            filePath,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            0,
+            loadMs
         );
     } else {
+        const bool locked = d->isLocked();
+        const int32_t errCode = locked ? log::ErrorCode::TrackLockedOrCorrupt : log::ErrorCode::TrackOpenFailed;
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("path"), filePath);
+        det.insert(QStringLiteral("stage"), locked ? QStringLiteral("deck_lock_check") : QStringLiteral("open"));
+        det.insert(QStringLiteral("deck_locked"), locked);
+        det.insert(QStringLiteral("file_exists"), QFileInfo::exists(filePath));
+        det.insert(QStringLiteral("retried"), false);
         log::LogService::instance().log(
             "Deck",
             "LoadTrack",
             "Failed",
-            QString("Failed to load %1 into Deck %2 (locked or corrupt)").arg(QFileInfo(filePath).fileName()).arg(deckId),
+            QString("Failed to load %1 into Deck %2 (%3)")
+                .arg(QFileInfo(filePath).fileName(), deckId, locked ? QStringLiteral("deck locked") : QStringLiteral("open failed")),
             "File",
             filePath,
-            "{\"error_code\":1002}"
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            errCode,
+            loadMs
         );
     }
     return ok;
@@ -898,13 +1405,42 @@ bool EngineController::startFolderSession(const QString& deckId, const QString& 
     bool ok = d->startFolderSession(folderPath.toStdString(), files, m_deckManager->graphRate());
     if (ok) {
         emit deckStateChanged(deckId);
+        const auto& fs = d->folderSession();
+        const QString firstPath = fs.currentTrack() ? QString::fromStdString(fs.currentTrack()->path) : QString();
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("folder_path"), folderPath);
+        det.insert(QStringLiteral("track_count"), static_cast<int>(fs.tracks().size()));
+        det.insert(QStringLiteral("first_track_path"), firstPath);
         log::LogService::instance().log(
             "FolderSession",
             "StartSession",
             "Success",
-            QString("Started folder session in Deck %1 with %2 tracks").arg(deckId).arg(files.size()),
+            QString("Started folder session in Deck %1 with %2 tracks").arg(deckId).arg(fs.tracks().size()),
             "Folder",
-            folderPath
+            folderPath,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+        );
+    } else {
+        QJsonObject det;
+        det.insert(QStringLiteral("deck"), deckId);
+        det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+        det.insert(QStringLiteral("folder_path"), folderPath);
+        det.insert(QStringLiteral("stage"), QStringLiteral("open"));
+        det.insert(QStringLiteral("candidate_count"), static_cast<int>(files.size()));
+        log::LogService::instance().log(
+            "FolderSession",
+            "StartSession",
+            "Failed",
+            QString("Failed to start folder session in Deck %1 for %2").arg(deckId, folderPath),
+            "Folder",
+            folderPath,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::TrackOpenFailed,
+            0.0
         );
     }
     return ok;
@@ -916,7 +1452,33 @@ bool EngineController::advanceFolderNext(const QString& deckId) {
     auto* d = m_deckManager->deck(id);
     if (!d) return false;
 
+    const auto& fsBefore = d->folderSession();
+    const int idxFrom = static_cast<int>(fsBefore.currentIndex());
+    const std::string pathFrom = fsBefore.currentTrack() ? fsBefore.currentTrack()->path : std::string();
+
     bool ok = d->advanceFolderNext();
+    const auto& fsAfter = d->folderSession();
+    const int idxTo = static_cast<int>(fsAfter.currentIndex());
+    const std::string pathTo = fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
+
+    QJsonObject det;
+    det.insert(QStringLiteral("deck"), deckId);
+    det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+    det.insert(QStringLiteral("track_index_from"), idxFrom);
+    det.insert(QStringLiteral("track_index_to"), idxTo);
+    det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
+    det.insert(QStringLiteral("path_to"), QString::fromStdString(pathTo));
+    log::LogService::instance().log(
+        "FolderSession",
+        "AdvanceNext",
+        ok ? "Success" : "Info",
+        ok ? QString("Manual folder next in Deck %1 [%2 -> %3]").arg(deckId).arg(idxFrom).arg(idxTo)
+           : QString("Folder next reached end in Deck %1").arg(deckId),
+        "Deck",
+        deckId,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+    );
+
     emit deckStateChanged(deckId);
     return ok;
 }
@@ -927,7 +1489,33 @@ bool EngineController::retreatFolderPrevious(const QString& deckId) {
     auto* d = m_deckManager->deck(id);
     if (!d) return false;
 
+    const auto& fsBefore = d->folderSession();
+    const int idxFrom = static_cast<int>(fsBefore.currentIndex());
+    const std::string pathFrom = fsBefore.currentTrack() ? fsBefore.currentTrack()->path : std::string();
+
     bool ok = d->retreatFolderPrevious();
+    const auto& fsAfter = d->folderSession();
+    const int idxTo = static_cast<int>(fsAfter.currentIndex());
+    const std::string pathTo = fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
+
+    QJsonObject det;
+    det.insert(QStringLiteral("deck"), deckId);
+    det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+    det.insert(QStringLiteral("track_index_from"), idxFrom);
+    det.insert(QStringLiteral("track_index_to"), idxTo);
+    det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
+    det.insert(QStringLiteral("path_to"), QString::fromStdString(pathTo));
+    log::LogService::instance().log(
+        "FolderSession",
+        "RetreatPrevious",
+        ok ? "Success" : "Info",
+        ok ? QString("Manual folder previous in Deck %1 [%2 -> %3]").arg(deckId).arg(idxFrom).arg(idxTo)
+           : QString("Folder previous at start in Deck %1").arg(deckId),
+        "Deck",
+        deckId,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+    );
+
     emit deckStateChanged(deckId);
     return ok;
 }
@@ -1492,6 +2080,14 @@ bool EngineController::configureExternalInsert(const QString& clientName,
     bool ok = m_insertNode->bridge().configure(info, sRate, bSize);
     if (ok) {
         m_insertNode->setBypassed(false);
+        QJsonObject det;
+        det.insert(QStringLiteral("host_name"), clientName);
+        det.insert(QStringLiteral("plugin_id"), QStringLiteral("external_jack_bridge"));
+        det.insert(QStringLiteral("sample_rate_hz"), sRate);
+        det.insert(QStringLiteral("buffer_size"), static_cast<int>(bSize));
+        det.insert(QStringLiteral("reported_latency_frames"), reportedLatencyFrames);
+        det.insert(QStringLiteral("reported_latency_ms"), (sRate > 0.0) ? (reportedLatencyFrames * 1000.0 / sRate) : 0.0);
+        det.insert(QStringLiteral("latency_source"), QStringLiteral("host_reported"));
         log::LogService::instance().log(
             "ExternalInsert",
             "Configure",
@@ -1499,9 +2095,14 @@ bool EngineController::configureExternalInsert(const QString& clientName,
             QString("Connected external insert host '%1' [Send: %2/%3, Return: %4/%5, Latency: %6 frames]")
                 .arg(clientName, sendL, sendR, returnL, returnR).arg(reportedLatencyFrames),
             "InsertBridge",
-            clientName
+            clientName,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
         );
     } else {
+        QJsonObject det;
+        det.insert(QStringLiteral("host_name"), clientName);
+        det.insert(QStringLiteral("stage"), QStringLiteral("bridge_configure"));
+        det.insert(QStringLiteral("error_detail"), QString::fromStdString(m_insertNode->bridge().lastError()));
         log::LogService::instance().log(
             "ExternalInsert",
             "Configure",
@@ -1510,7 +2111,11 @@ bool EngineController::configureExternalInsert(const QString& clientName,
                 .arg(clientName, QString::fromStdString(m_insertNode->bridge().lastError())),
             "InsertBridge",
             clientName,
-            QString("{\"error\":\"%1\"}").arg(QString::fromStdString(m_insertNode->bridge().lastError()))
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::ExternalHostFailed,
+            0.0
         );
     }
 
@@ -1568,15 +2173,26 @@ void EngineController::calibrateInsertLatency() {
 void EngineController::recordInsertImpulseReturn(qint64 returnFrame) {
     if (!m_insertNode) return;
     m_insertNode->bridge().recordImpulseReturn(static_cast<uint64_t>(returnFrame), engine::insert::LatencySource::HardwareMeasured);
+    const auto& b = m_insertNode->bridge();
+    const double sr = b.config().sampleRate;
+    const double reportedMs = (sr > 0.0) ? (static_cast<double>(b.reportedLatencyFrames()) * 1000.0 / sr) : 0.0;
+    QJsonObject det;
+    det.insert(QStringLiteral("host_name"), QString::fromStdString(b.config().clientName));
+    det.insert(QStringLiteral("reported_latency_frames"), static_cast<int>(b.reportedLatencyFrames()));
+    det.insert(QStringLiteral("reported_latency_ms"), reportedMs);
+    det.insert(QStringLiteral("measured_latency_frames"), static_cast<int>(b.measuredLatencyFrames()));
+    det.insert(QStringLiteral("measured_latency_ms"), b.measuredLatencyMs());
+    det.insert(QStringLiteral("latency_source"), QString::fromUtf8(engine::insert::ExternalInsertBridge::latencySourceToString(b.latencySource())));
     log::LogService::instance().log(
         "ExternalInsert",
         "RecordImpulseReturn",
         "Success",
         QString("Measured physical hardware round-trip latency: %1 frames (%2 ms).")
-            .arg(m_insertNode->bridge().measuredLatencyFrames())
-            .arg(m_insertNode->bridge().measuredLatencyMs(), 0, 'f', 2),
+            .arg(b.measuredLatencyFrames())
+            .arg(b.measuredLatencyMs(), 0, 'f', 2),
         "InsertBridge",
-        QString::fromStdString(m_insertNode->bridge().config().clientName)
+        QString::fromStdString(b.config().clientName),
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
     );
     emit externalInsertStatusChanged();
 }
@@ -1721,13 +2337,22 @@ bool EngineController::deletePreset(const QString& category, const QString& pres
 bool EngineController::applyPresetProfile(const QString& category, const QString& presetName) {
     QJsonObject obj = m_presetManager.loadPreset(category, presetName);
     if (obj.isEmpty()) {
+        QJsonObject det;
+        det.insert(QStringLiteral("preset_id"), presetName);
+        det.insert(QStringLiteral("category"), category);
+        det.insert(QStringLiteral("stage"), QStringLiteral("preset_load"));
         log::LogService::instance().log(
             "PresetManagement",
             "ApplyPreset",
             "Failed",
             QString("Preset '%1' not found in category '%2'.").arg(presetName, category),
             category,
-            presetName
+            presetName,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(),
+            QString(),
+            log::ErrorCode::PresetNotFound,
+            0.0
         );
         return false;
     }
@@ -1792,13 +2417,18 @@ bool EngineController::applyPresetProfile(const QString& category, const QString
                 flt["lpf_slope"].toInt(0)
             );
         }
+        QJsonObject snapDet;
+        snapDet.insert(QStringLiteral("preset_id"), presetName);
+        snapDet.insert(QStringLiteral("category"), category);
+        snapDet.insert(QStringLiteral("snapshot"), obj);
         log::LogService::instance().log(
             "PresetManagement",
             "ApplyPreset",
             "Success",
             QString("Applied Master DSP preset '%1'.").arg(presetName),
             category,
-            presetName
+            presetName,
+            QString::fromUtf8(QJsonDocument(snapDet).toJson(QJsonDocument::Compact))
         );
         emit presetManagementChanged();
         return true;
@@ -1972,10 +2602,15 @@ void EngineController::setListeningVolume(double volume) {
 bool EngineController::auditionRenderedFile(const QString& targetDeckId, const QString& filePath, bool switchToRenderMonitor) {
     if (!QFile::exists(filePath)) {
         qWarning() << "auditionRenderedFile: File does not exist:" << filePath;
+        QJsonObject det;
+        det.insert(QStringLiteral("path"), filePath);
+        det.insert(QStringLiteral("stage"), QStringLiteral("file_exists_check"));
         log::LogService::instance().log(
             "Render", "Audition", "Failed",
             QString("Failed to audition rendered file '%1': file does not exist.").arg(filePath),
-            "RenderAudition", filePath
+            "RenderAudition", filePath,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(), QString(), log::ErrorCode::RenderAuditionFailed, 0.0
         );
         return false;
     }
@@ -1983,11 +2618,17 @@ bool EngineController::auditionRenderedFile(const QString& targetDeckId, const Q
     // 1. Load track into target deck
     bool loaded = loadTrack(targetDeckId, filePath);
     if (!loaded) {
+        QJsonObject det;
+        det.insert(QStringLiteral("path"), filePath);
+        det.insert(QStringLiteral("deck"), targetDeckId);
+        det.insert(QStringLiteral("stage"), QStringLiteral("load_track"));
         log::LogService::instance().log(
             "Render", "Audition", "Failed",
             QString("Failed to audition rendered file '%1' on Deck %2 (deck may be locked or format unsupported).")
                 .arg(filePath, targetDeckId),
-            "RenderAudition", filePath
+            "RenderAudition", filePath,
+            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+            QString(), QString(), log::ErrorCode::RenderAuditionFailed, 0.0
         );
         return false;
     }

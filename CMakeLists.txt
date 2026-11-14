@@ -31,6 +31,38 @@ if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=undefined")
     add_compile_definitions(DESK32_SANITIZE_UNDEFINED)
 endif()
 
+# Embed build version and git commit hash for SessionStart observability
+set(DESK32_GIT_COMMIT "unknown")
+set(DESK32_GIT_DIRTY 0)
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _git_rev
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_git_rev)
+        set(DESK32_GIT_COMMIT "${_git_rev}")
+    endif()
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE _git_status
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_git_status)
+        set(DESK32_GIT_DIRTY 1)
+    endif()
+endif()
+add_compile_definitions(
+    DESK32_APP_VERSION="${PROJECT_VERSION}"
+    DESK32_GIT_COMMIT="${DESK32_GIT_COMMIT}"
+    DESK32_GIT_DIRTY=${DESK32_GIT_DIRTY}
+)
+
 # Find Qt 6 Packages (Compatible with Ubuntu 24.04 LTS Qt 6.4.2+ and rolling Linux)
 find_package(Qt6 6.4 REQUIRED COMPONENTS
     Core

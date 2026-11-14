@@ -54,6 +54,10 @@ bool PipeWireAudioOutput::initialize(uint32_t sampleRate, uint32_t bufferFrames)
 {
     m_requestedSampleRate = sampleRate;
     m_requestedBufferFrames = bufferFrames;
+    {
+        std::lock_guard<std::mutex> lock(m_deviceMutex);
+        m_deviceName = m_offlineSimulation ? "offline_simulation" : "pipewire_default";
+    }
 
     m_threadLoop = pw_thread_loop_new("desk32-pw-output", nullptr);
     if (!m_threadLoop) {
@@ -221,7 +225,12 @@ StreamDiagnostics PipeWireAudioOutput::diagnostics() const noexcept
     diag.sampleRate = m_requestedSampleRate;
     diag.channels = 2;
     diag.bufferFrames = m_requestedBufferFrames;
+    diag.negotiatedQuantum = m_negotiatedQuantum.load(std::memory_order_relaxed);
     diag.formatName = "F32LE (Stereo)";
+    {
+        std::lock_guard<std::mutex> lock(m_deviceMutex);
+        diag.deviceName = m_offlineSimulation ? "offline_simulation" : m_deviceName;
+    }
     diag.xrunCount = m_xrunCount.load(std::memory_order_relaxed);
     diag.totalFramesProcessed = m_totalFramesProcessed.load(std::memory_order_relaxed);
     diag.isDirectMode = m_isDirectMode.load(std::memory_order_relaxed);
@@ -264,6 +273,18 @@ void PipeWireAudioOutput::onStreamStateChanged(void* data, int /*oldState*/, int
             break;
         case PW_STREAM_STATE_STREAMING:
             self->m_state.store(StreamState::Streaming, std::memory_order_relaxed);
+            if (self->m_stream) {
+                if (const struct pw_properties* sprops = pw_stream_get_properties(self->m_stream)) {
+                    const char* target = pw_properties_get(sprops, PW_KEY_TARGET_OBJECT);
+                    if (!target) target = pw_properties_get(sprops, "node.target");
+                    if (!target) target = pw_properties_get(sprops, PW_KEY_NODE_DESCRIPTION);
+                    if (!target) target = pw_properties_get(sprops, PW_KEY_NODE_NAME);
+                    if (target && target[0] != '\0') {
+                        std::lock_guard<std::mutex> lock(self->m_deviceMutex);
+                        self->m_deviceName = target;
+                    }
+                }
+            }
             break;
     }
 }
@@ -312,6 +333,9 @@ void PipeWireAudioOutput::onStreamProcess(void* data)
 
     const uint32_t maxFrames = spaBuf->datas[0].maxsize / static_cast<uint32_t>(sizeof(float) * 2);
     const uint32_t reqFrames = (pwBuf->requested > 0) ? static_cast<uint32_t>(pwBuf->requested) : self->m_requestedBufferFrames;
+    if (pwBuf->requested > 0) {
+        self->m_negotiatedQuantum.store(static_cast<uint32_t>(pwBuf->requested), std::memory_order_relaxed);
+    }
     const uint32_t nFrames = std::min(maxFrames, reqFrames);
 
     if (self->m_callback) {

@@ -212,6 +212,10 @@ public:
         m_worker.seek(targetFrame);
     }
 
+    decoder::SeekResult seekWithResult(int64_t targetFrame) noexcept {
+        return m_worker.seekWithResult(targetFrame);
+    }
+
     [[nodiscard]] bool needsFolderAdvance() const noexcept {
         return m_needsFolderAdvance.load(std::memory_order_acquire);
     }

@@ -33,6 +33,7 @@ public:
     size_t readFrames(double* left, double* right, size_t maxFrames) override;
     bool seek(int64_t targetFrame) override;
     [[nodiscard]] int64_t currentFrame() const noexcept override { return m_currentFrame; }
+    [[nodiscard]] int64_t lastSeekActualFrame() const noexcept override { return m_seekActualFrame; }
 
 private:
     void cleanup();
@@ -51,6 +52,8 @@ private:
 
     int m_audioStreamIndex = -1;
     int64_t m_currentFrame = 0;
+    int64_t m_seekActualFrame = 0;
+    bool m_seekPending = false;
 
     AudioFormatInfo m_formatInfo;
     metadata::TrackMetadata m_metadata;

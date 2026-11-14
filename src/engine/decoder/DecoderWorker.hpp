@@ -60,6 +60,18 @@ struct WorkerCommand {
     std::shared_ptr<std::promise<bool>> openPromise;
 };
 
+struct SeekResult {
+    bool success = false;
+    bool withinBuffer = false;
+    int64_t requestedFrame = 0;
+    int64_t actualFrame = 0;
+    double sampleRateHz = 0.0;
+    uint64_t totalFrames = 0;
+    int32_t errorCode = 0;
+    std::string stage;
+    std::string errorMessage;
+};
+
 /// Dedicated Background Decoder Worker for ReferenceDeck.
 /// Pre-decodes audio from FFmpeg, handles resampling, and feeds a lock-free PcmRingBuffer.
 /// Audio Thread NEVER touches FFmpeg, files, heap allocations, or locks.
@@ -81,6 +93,7 @@ public:
     void pause() noexcept;
     void stop() noexcept;
     void seek(int64_t targetFrame) noexcept;
+    SeekResult seekWithResult(int64_t targetFrame) noexcept;
     void configureGraphRate(double graphSampleRate) noexcept;
 
     // Status Queries (Thread-Safe, P0-05)
@@ -145,6 +158,8 @@ private:
     std::atomic<double> m_graphRate{48000.0};
     std::atomic<uint64_t> m_seekSequence{0};
     std::atomic<uint64_t> m_seekCompleted{0};
+    std::atomic<bool> m_seekSuccess{true};
+    std::atomic<int64_t> m_seekActualFrame{0};
     std::atomic<uint64_t> m_nextRequestId{1};
     std::atomic<uint64_t> m_activeRequestId{0};
     std::atomic<uint64_t> m_committedRequestId{0};
