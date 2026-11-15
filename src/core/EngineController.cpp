@@ -226,57 +226,138 @@ bool EngineController::initialize(bool offlineMode) {
             auto* d = m_deckManager->deck(c);
             if (!d) continue;
 
-            if (d->needsFolderAdvance()) {
-                d->clearNeedsFolderAdvance();
-                if (!d->isLocked()) {
-                    const auto& fsBefore = d->folderSession();
-                    const int idxFrom = static_cast<int>(fsBefore.currentIndex());
-                    const std::string pathFrom = fsBefore.currentTrack() ? fsBefore.currentTrack()->path : std::string();
-
-                    bool advanced = d->advanceFolderNext();
-                    const auto& fsAfter = d->folderSession();
-                    const int idxTo = static_cast<int>(fsAfter.currentIndex());
-                    const std::string pathTo = fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
-
-                    if (advanced) {
-                        ++m_advanceSeq;
-                        QJsonObject det;
-                        det.insert(QStringLiteral("deck"), QString(c));
-                        det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
-                        det.insert(QStringLiteral("track_index_from"), idxFrom);
-                        det.insert(QStringLiteral("track_index_to"), idxTo);
-                        det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
-                        det.insert(QStringLiteral("path_to"), QString::fromStdString(pathTo));
-                        det.insert(QStringLiteral("advance_seq"), static_cast<qint64>(m_advanceSeq));
-                        log::LogService::instance().log(
-                            QStringLiteral("FolderSession"),
-                            QStringLiteral("AutoAdvance"),
-                            QStringLiteral("Success"),
-                            QString("Auto-advanced Deck %1 [%2 -> %3] (seq=%4)").arg(c).arg(idxFrom).arg(idxTo).arg(m_advanceSeq),
-                            QStringLiteral("Deck"),
-                            QString(c),
-                            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
-                        );
-                    } else {
-                        QJsonObject det;
-                        det.insert(QStringLiteral("deck"), QString(c));
-                        det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
-                        det.insert(QStringLiteral("reason"), QStringLiteral("completed"));
-                        det.insert(QStringLiteral("track_index_from"), idxFrom);
-                        det.insert(QStringLiteral("path_from"), QString::fromStdString(pathFrom));
-                        det.insert(QStringLiteral("tracks_played"), idxFrom + 1);
-                        log::LogService::instance().log(
-                            QStringLiteral("FolderSession"),
-                            QStringLiteral("AutoAdvance"),
-                            QStringLiteral("Info"),
-                            QString("Folder session completed in Deck %1").arg(c),
-                            QStringLiteral("Deck"),
-                            QString(c),
-                            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
-                        );
+            const auto eofResults = d->processPendingEof();
+            for (const auto& res : eofResults) {
+                auto rejectErrorCode = [](engine::deck::AutoAdvanceRejectReason r) -> int32_t {
+                    using R = engine::deck::AutoAdvanceRejectReason;
+                    switch (r) {
+                    case R::DuplicateEof: return log::ErrorCode::AutoAdvanceDuplicateEof;
+                    case R::StalePlaybackGeneration: return log::ErrorCode::AutoAdvanceStaleGeneration;
+                    case R::StaleDecoderRequest: return log::ErrorCode::AutoAdvanceStaleRequest;
+                    case R::TransitionInProgress: return log::ErrorCode::AutoAdvanceTransitionInProgress;
+                    case R::SessionInactive:
+                    case R::DeckLocked: return log::ErrorCode::AutoAdvanceSessionInactive;
+                    case R::TransportNotPlaying: return log::ErrorCode::AutoAdvanceNotPlaying;
+                    case R::TrackIdentityMismatch: return log::ErrorCode::AutoAdvanceTrackMismatch;
+                    case R::OpenTrackFailed: return log::ErrorCode::TrackOpenFailed;
+                    default: return 0;
                     }
-                    emit deckStateChanged(QString(c));
+                };
+
+                const QString eventSourceStr = QString::fromLatin1(engine::deck::toSourceString(res.source));
+                const QString rejectReasonStr = QString::fromLatin1(engine::deck::toReasonString(res.rejectReason));
+
+                // Log EOF notification diagnostics (both valid and rejected)
+                {
+                    QJsonObject eofDet;
+                    eofDet.insert(QStringLiteral("deck"), QString(c));
+                    eofDet.insert(QStringLiteral("session_id"), log::LogService::instance().sessionId());
+                    eofDet.insert(QStringLiteral("folder_session_id"), static_cast<qint64>(res.folderSessionId));
+                    eofDet.insert(QStringLiteral("playback_generation"), static_cast<qint64>(res.playbackGenerationBefore));
+                    eofDet.insert(QStringLiteral("decoder_request_id"), static_cast<qint64>(res.decoderRequestIdBefore));
+                    eofDet.insert(QStringLiteral("track_identity"), QString::fromStdString(res.pathFrom));
+                    eofDet.insert(QStringLiteral("event_source"), eventSourceStr);
+                    eofDet.insert(QStringLiteral("event_timestamp"), static_cast<qint64>(res.eventTimestampMs));
+                    eofDet.insert(QStringLiteral("received_timestamp"), static_cast<qint64>(res.receivedTimestampMs));
+                    eofDet.insert(QStringLiteral("valid"), res.validNotification);
+                    if (!res.validNotification) {
+                        eofDet.insert(QStringLiteral("invalid_reason"), rejectReasonStr);
+                    }
+                    log::LogService::instance().log(
+                        QStringLiteral("FolderSession"),
+                        QStringLiteral("EofNotification"),
+                        res.validNotification ? QStringLiteral("Success") : QStringLiteral("Ignored"),
+                        res.validNotification
+                            ? QString("Valid EOF notification on Deck %1 (gen=%2, req=%3)")
+                                  .arg(c)
+                                  .arg(res.playbackGenerationBefore)
+                                  .arg(res.decoderRequestIdBefore)
+                            : QString("Ignored EOF notification on Deck %1 (%2)")
+                                  .arg(c, rejectReasonStr),
+                        QStringLiteral("Deck"),
+                        QString(c),
+                        QString::fromUtf8(QJsonDocument(eofDet).toJson(QJsonDocument::Compact)),
+                        QString(),
+                        QString(),
+                        res.validNotification ? 0 : rejectErrorCode(res.rejectReason),
+                        0.0
+                    );
                 }
+
+                if (!res.executed) {
+                    continue;
+                }
+
+                if (res.advanced) {
+                    ++m_advanceSeq;
+                    QJsonObject det;
+                    det.insert(QStringLiteral("session_id"), log::LogService::instance().sessionId());
+                    det.insert(QStringLiteral("folder_session_id"), static_cast<qint64>(res.folderSessionId));
+                    det.insert(QStringLiteral("deck"), QString(c));
+                    det.insert(QStringLiteral("advance_seq"), static_cast<qint64>(m_advanceSeq));
+                    det.insert(QStringLiteral("playback_generation"), static_cast<qint64>(res.playbackGenerationAfter));
+                    det.insert(QStringLiteral("playback_generation_before"), static_cast<qint64>(res.playbackGenerationBefore));
+                    det.insert(QStringLiteral("decoder_request_id"), static_cast<qint64>(res.decoderRequestIdAfter));
+                    det.insert(QStringLiteral("decoder_request_id_before"), static_cast<qint64>(res.decoderRequestIdBefore));
+                    det.insert(QStringLiteral("track_index_from"), res.trackIndexFrom);
+                    det.insert(QStringLiteral("track_index_to"), res.trackIndexTo);
+                    det.insert(QStringLiteral("path_from"), QString::fromStdString(res.pathFrom));
+                    det.insert(QStringLiteral("path_to"), QString::fromStdString(res.pathTo));
+                    det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
+                    det.insert(QStringLiteral("event_source"), eventSourceStr);
+                    det.insert(QStringLiteral("event_timestamp"), static_cast<qint64>(res.eventTimestampMs));
+                    det.insert(QStringLiteral("transition_start_timestamp"), static_cast<qint64>(res.transitionStartTimestampMs));
+                    det.insert(QStringLiteral("transition_complete_timestamp"), static_cast<qint64>(res.transitionCompleteTimestampMs));
+                    det.insert(QStringLiteral("result"), QStringLiteral("success"));
+                    det.insert(QStringLiteral("failure_reason"), QString());
+                    log::LogService::instance().log(
+                        QStringLiteral("FolderSession"),
+                        QStringLiteral("AutoAdvance"),
+                        QStringLiteral("Success"),
+                        QString("Auto-advanced Deck %1 [%2 -> %3] (seq=%4)").arg(c).arg(res.trackIndexFrom).arg(res.trackIndexTo).arg(m_advanceSeq),
+                        QStringLiteral("Deck"),
+                        QString(c),
+                        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact))
+                    );
+                } else {
+                    const bool completed = (res.rejectReason == engine::deck::AutoAdvanceRejectReason::EndOfFolder);
+                    QJsonObject det;
+                    det.insert(QStringLiteral("session_id"), log::LogService::instance().sessionId());
+                    det.insert(QStringLiteral("folder_session_id"), static_cast<qint64>(res.folderSessionId));
+                    det.insert(QStringLiteral("deck"), QString(c));
+                    det.insert(QStringLiteral("advance_seq"), static_cast<qint64>(m_advanceSeq));
+                    det.insert(QStringLiteral("playback_generation"), static_cast<qint64>(res.playbackGenerationAfter));
+                    det.insert(QStringLiteral("decoder_request_id"), static_cast<qint64>(res.decoderRequestIdAfter));
+                    det.insert(QStringLiteral("track_index_from"), res.trackIndexFrom);
+                    det.insert(QStringLiteral("track_index_to"), res.trackIndexTo);
+                    det.insert(QStringLiteral("path_from"), QString::fromStdString(res.pathFrom));
+                    det.insert(QStringLiteral("path_to"), QString::fromStdString(res.pathTo));
+                    det.insert(QStringLiteral("trigger"), QStringLiteral("auto_eof"));
+                    det.insert(QStringLiteral("event_source"), eventSourceStr);
+                    det.insert(QStringLiteral("event_timestamp"), static_cast<qint64>(res.eventTimestampMs));
+                    det.insert(QStringLiteral("transition_start_timestamp"), static_cast<qint64>(res.transitionStartTimestampMs));
+                    det.insert(QStringLiteral("transition_complete_timestamp"), static_cast<qint64>(res.transitionCompleteTimestampMs));
+                    det.insert(QStringLiteral("result"), completed ? QStringLiteral("completed") : QStringLiteral("failed"));
+                    det.insert(QStringLiteral("failure_reason"), rejectReasonStr);
+                    det.insert(QStringLiteral("reason"), rejectReasonStr);
+                    det.insert(QStringLiteral("tracks_played"), res.trackIndexFrom + 1);
+                    log::LogService::instance().log(
+                        QStringLiteral("FolderSession"),
+                        QStringLiteral("AutoAdvance"),
+                        completed ? QStringLiteral("Info") : QStringLiteral("Failed"),
+                        completed
+                            ? QString("Folder session completed in Deck %1").arg(c)
+                            : QString("Folder session AutoAdvance failed in Deck %1 (%2)").arg(c, rejectReasonStr),
+                        QStringLiteral("Deck"),
+                        QString(c),
+                        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+                        QString(),
+                        QString(),
+                        completed ? 0 : rejectErrorCode(res.rejectReason),
+                        0.0
+                    );
+                }
+                emit deckStateChanged(QString(c));
             }
 
             if (d->checkAndResetTrackChanged()) {

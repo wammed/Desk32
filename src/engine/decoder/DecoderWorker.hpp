@@ -102,6 +102,9 @@ public:
     [[nodiscard]] bool isEof() const noexcept { return m_isEof.load(std::memory_order_acquire); }
     [[nodiscard]] bool isEofDelivered() const noexcept { return m_eofDelivered.load(std::memory_order_acquire); }
     void clearEofDelivered() noexcept { m_eofDelivered.store(false, std::memory_order_release); }
+    [[nodiscard]] uint64_t eofEpoch() const noexcept { return m_eofEpoch.load(std::memory_order_acquire); }
+    [[nodiscard]] uint64_t eofRequestId() const noexcept { return m_eofRequestId.load(std::memory_order_acquire); }
+    [[nodiscard]] int64_t eofEmittedTimestampMs() const noexcept { return m_eofEmittedTimestampMs.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t playhead() const noexcept { return m_playhead.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t underrunCount() const noexcept { return m_underrunCount.load(std::memory_order_relaxed); }
     [[nodiscard]] OpenStatus lastOpenStatus() const noexcept { return m_lastOpenStatus.load(std::memory_order_acquire); }
@@ -152,6 +155,10 @@ private:
     std::atomic<bool> m_isPlaying{false};
     std::atomic<bool> m_isEof{false};
     std::atomic<bool> m_eofDelivered{false};
+    std::atomic<uint64_t> m_eofEpoch{1};
+    std::atomic<uint64_t> m_eofDeliveredEpoch{0};
+    std::atomic<uint64_t> m_eofRequestId{0};
+    std::atomic<int64_t> m_eofEmittedTimestampMs{0};
     std::atomic<bool> m_isSynthetic{false};
     std::atomic<int64_t> m_playhead{0};
     std::atomic<uint64_t> m_underrunCount{0};

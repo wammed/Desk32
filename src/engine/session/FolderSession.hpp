@@ -124,10 +124,21 @@ public:
     ~FolderSession();
 
     [[nodiscard]] bool isActive() const noexcept { return m_isActive.load(std::memory_order_acquire); }
+    [[nodiscard]] uint64_t sessionId() const noexcept { return m_sessionId.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& folderPath() const noexcept { return m_folderPath; }
     [[nodiscard]] const std::vector<SessionTrack>& tracks() const noexcept { return m_tracks; }
-    [[nodiscard]] size_t currentIndex() const noexcept { return m_currentIndex; }
+    [[nodiscard]] size_t currentIndex() const noexcept { return m_currentIndex.load(std::memory_order_acquire); }
     [[nodiscard]] size_t totalTracks() const noexcept { return m_tracks.size(); }
+
+    /// Deterministic FNV-1a 64-bit hash for RT-safe track identity comparison
+    [[nodiscard]] static uint64_t hashTrackPath(std::string_view path) noexcept {
+        uint64_t h = 14695981039346656037ULL;
+        for (char c : path) {
+            h ^= static_cast<uint64_t>(static_cast<unsigned char>(c));
+            h *= 1099511628211ULL;
+        }
+        return h;
+    }
 
     /// Build deterministic snapshot from folder contents
     bool startSession(const std::string& folderPath, const std::vector<std::string>& fileNames) {
@@ -149,30 +160,38 @@ public:
         }
 
         // Specification 2.7.2: Continuous playback strictly starts from index 0
-        m_currentIndex = 0;
+        m_currentIndex.store(0, std::memory_order_release);
         const bool active = !m_tracks.empty();
+        if (active) {
+            m_sessionId.store(s_nextSessionId.fetch_add(1, std::memory_order_relaxed), std::memory_order_release);
+        } else {
+            m_sessionId.store(0, std::memory_order_release);
+        }
         m_isActive.store(active, std::memory_order_release);
         return active;
     }
 
     [[nodiscard]] const SessionTrack* currentTrack() const noexcept {
-        if (m_currentIndex < m_tracks.size()) {
-            return &m_tracks[m_currentIndex];
+        const size_t idx = m_currentIndex.load(std::memory_order_acquire);
+        if (idx < m_tracks.size()) {
+            return &m_tracks[idx];
         }
         return nullptr;
     }
 
     /// Single-track read-ahead: returns next track candidate if available
     [[nodiscard]] const SessionTrack* readAheadTrack() const noexcept {
-        if (m_currentIndex + 1 < m_tracks.size()) {
-            return &m_tracks[m_currentIndex + 1];
+        const size_t idx = m_currentIndex.load(std::memory_order_acquire);
+        if (idx + 1 < m_tracks.size()) {
+            return &m_tracks[idx + 1];
         }
         return nullptr;
     }
 
     bool advanceNext() {
-        if (m_currentIndex + 1 < m_tracks.size()) {
-            m_currentIndex++;
+        const size_t idx = m_currentIndex.load(std::memory_order_acquire);
+        if (idx + 1 < m_tracks.size()) {
+            m_currentIndex.store(idx + 1, std::memory_order_release);
             return true;
         }
         m_isActive.store(false, std::memory_order_release); // Reached end of folder session
@@ -180,8 +199,9 @@ public:
     }
 
     bool retreatPrevious() {
-        if (m_currentIndex > 0) {
-            m_currentIndex--;
+        const size_t idx = m_currentIndex.load(std::memory_order_acquire);
+        if (idx > 0) {
+            m_currentIndex.store(idx - 1, std::memory_order_release);
             return true;
         }
         return false;
@@ -189,7 +209,7 @@ public:
 
     bool seekTrack(size_t index) {
         if (index < m_tracks.size()) {
-            m_currentIndex = index;
+            m_currentIndex.store(index, std::memory_order_release);
             m_isActive.store(true, std::memory_order_release);
             return true;
         }
@@ -198,15 +218,18 @@ public:
 
     void stopSession() {
         m_isActive.store(false, std::memory_order_release);
+        m_sessionId.store(0, std::memory_order_release);
         m_tracks.clear();
-        m_currentIndex = 0;
+        m_currentIndex.store(0, std::memory_order_release);
     }
 
 private:
+    inline static std::atomic<uint64_t> s_nextSessionId{1};
     std::atomic<bool> m_isActive{false};
+    std::atomic<uint64_t> m_sessionId{0};
     std::string m_folderPath;
     std::vector<SessionTrack> m_tracks;
-    size_t m_currentIndex = 0;
+    std::atomic<size_t> m_currentIndex{0};
 };
 
 } // namespace desk32::engine::session

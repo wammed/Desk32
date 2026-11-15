@@ -231,6 +231,7 @@ private slots:
     void testDspNodeBypassParameterPreservation();
     void testSeekObservabilityLogging();
     void testSessionAndFolderObservabilityLogging();
+    void testAutoAdvanceLoggingAndNoDoubleAdvance();
     void cleanupTestCase();
 
 private:
@@ -3227,6 +3228,119 @@ void TestPhase2Dsp::testSessionAndFolderObservabilityLogging()
         }
         QVERIFY(foundEnd);
     }
+}
+
+void TestPhase2Dsp::testAutoAdvanceLoggingAndNoDoubleAdvance() {
+    auto& ctrl = desk32::core::EngineController::instance();
+    if (!ctrl.deckManager()) {
+        QVERIFY(ctrl.initialize(true));
+    }
+    auto& logSvc = desk32::core::log::LogService::instance();
+
+    QTemporaryDir folderDir;
+    QVERIFY(folderDir.isValid());
+    auto writeTinyWav = [](const QString& path) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        const uint32_t sr = 48000;
+        const uint16_t ch = 2;
+        const uint16_t bits = 16;
+        const uint32_t frames = 2400; // 50ms
+        const uint32_t dataSize = frames * ch * (bits / 8);
+        const uint32_t riffSize = 36 + dataSize;
+        QByteArray hdr;
+        hdr.append("RIFF", 4);
+        hdr.append(reinterpret_cast<const char*>(&riffSize), 4);
+        hdr.append("WAVEfmt ", 8);
+        const uint32_t fmtSize = 16;
+        const uint16_t pcmFmt = 1;
+        const uint32_t byteRate = sr * ch * (bits / 8);
+        const uint16_t blockAlign = ch * (bits / 8);
+        hdr.append(reinterpret_cast<const char*>(&fmtSize), 4);
+        hdr.append(reinterpret_cast<const char*>(&pcmFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&ch), 2);
+        hdr.append(reinterpret_cast<const char*>(&sr), 4);
+        hdr.append(reinterpret_cast<const char*>(&byteRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&blockAlign), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2);
+        hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSize), 4);
+        f.write(hdr);
+        f.write(QByteArray(static_cast<int>(dataSize), '\0'));
+        f.close();
+        return true;
+    };
+    QVERIFY(writeTinyWav(folderDir.filePath("01_a.wav")));
+    QVERIFY(writeTinyWav(folderDir.filePath("02_b.wav")));
+    QVERIFY(writeTinyWav(folderDir.filePath("03_c.wav")));
+
+    ctrl.setDeckLocked("A", false);
+    QVERIFY(ctrl.startFolderSession("A", folderDir.path(), {"01_a.wav", "02_b.wav", "03_c.wav"}));
+    ctrl.play("A");
+
+    auto* deckA = ctrl.deckManager()->deck('A');
+    QVERIFY(deckA != nullptr);
+
+    // Render track 0 to EOF via offline audio callback simulation
+    std::vector<float> out(2048 * 2, 0.0f);
+    for (int i = 0; i < 6; ++i) {
+        ctrl.renderOfflineBlock(out.data(), 2048);
+    }
+
+    // Also inject a duplicate EOF notification for the same generation/track
+    desk32::engine::deck::EofNotification dup;
+    dup.playbackGeneration = deckA->playbackGeneration();
+    dup.decoderRequestId = deckA->worker().committedRequestId();
+    dup.folderSessionId = deckA->folderSession().sessionId();
+    dup.trackIndex = deckA->folderSession().currentIndex();
+    dup.trackPathHash = deckA->currentTrackPathHash();
+    dup.source = desk32::engine::deck::EofSource::SyntheticTest;
+    QVERIFY(deckA->submitEofNotification(dup));
+
+    // Process events so the 50ms trackTimer fires
+    QTest::qWait(120);
+    QCoreApplication::processEvents();
+    QCOMPARE(deckA->folderSession().currentIndex(), size_t(1));
+
+    logSvc.flush();
+    desk32::core::log::LogFilter f;
+    f.category = "FolderSession";
+    const auto events = logSvc.queryLogs(f);
+
+    int autoAdvCount = 0;
+    int validEofCount = 0;
+    int ignoredEofCount = 0;
+    for (const auto& ev : events) {
+        QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+        if (ev.operation == "AutoAdvance" && ev.status == "Success") {
+            ++autoAdvCount;
+            QVERIFY(d.contains("session_id"));
+            QVERIFY(d.contains("folder_session_id"));
+            QVERIFY(d.contains("advance_seq"));
+            QVERIFY(d.contains("playback_generation"));
+            QVERIFY(d.contains("decoder_request_id"));
+            QVERIFY(d.contains("track_index_from"));
+            QVERIFY(d.contains("track_index_to"));
+            QVERIFY(d.contains("path_from"));
+            QVERIFY(d.contains("path_to"));
+            QVERIFY(d.contains("trigger"));
+            QVERIFY(d.contains("event_source"));
+            QVERIFY(d.contains("event_timestamp"));
+            QVERIFY(d.contains("transition_start_timestamp"));
+            QVERIFY(d.contains("transition_complete_timestamp"));
+            QCOMPARE(d["result"].toString(), QString("success"));
+        } else if (ev.operation == "EofNotification") {
+            if (d["valid"].toBool()) {
+                ++validEofCount;
+            } else {
+                ++ignoredEofCount;
+                QVERIFY(!d["invalid_reason"].toString().isEmpty());
+            }
+        }
+    }
+    QCOMPARE(autoAdvCount, 1);
+    QCOMPARE(validEofCount, 1);
+    QCOMPARE(ignoredEofCount, 1);
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

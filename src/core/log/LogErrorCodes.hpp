@@ -17,6 +17,13 @@ constexpr int32_t SeekOutOfRange = 1011;
 constexpr int32_t SeekDecoderFailed = 1012;
 constexpr int32_t SeekTimeout = 1013;
 constexpr int32_t DecoderUnderrunDetected = 1020;
+constexpr int32_t AutoAdvanceDuplicateEof = 1030;
+constexpr int32_t AutoAdvanceStaleGeneration = 1031;
+constexpr int32_t AutoAdvanceStaleRequest = 1032;
+constexpr int32_t AutoAdvanceTransitionInProgress = 1033;
+constexpr int32_t AutoAdvanceSessionInactive = 1034;
+constexpr int32_t AutoAdvanceNotPlaying = 1035;
+constexpr int32_t AutoAdvanceTrackMismatch = 1036;
 
 // 2000-2999: AudioBackend / PipeWire / ALSA / JACK
 constexpr int32_t PipeWireInitFailed = 2001;

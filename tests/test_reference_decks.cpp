@@ -125,6 +125,15 @@ private slots:
     void testSyntheticTrackOwnershipAndConcurrentSwitching();
     void testDecoderWorkerOpenTimeoutAndStaleRequestCancellation();
     void testDecoderWorkerDeterministicCommitRaceConditions();
+    void testAutoAdvanceDuplicateEof();
+    void testAutoAdvanceShortIntervalRapidEof();
+    void testAutoAdvanceStaleDecoderWorkerNotification();
+    void testAutoAdvanceStalePlaybackGeneration();
+    void testAutoAdvanceDuringTransitionInProgress();
+    void testAutoAdvanceRaceWithManualNext();
+    void testAutoAdvanceRaceWithStopAndPause();
+    void testAutoAdvanceRaceWithSeek();
+    void testAutoAdvanceLongRepetitionAndMixedRates();
     void cleanupTestCase();
 
 private:
@@ -1189,6 +1198,369 @@ void TestReferenceDecks::testDecoderWorkerDeterministicCommitRaceConditions()
         QVERIFY(!res1.load());
         QVERIFY(!res2.load());
     }
+}
+
+void TestReferenceDecks::testAutoAdvanceDuplicateEof()
+{
+    ReferenceDeck deck('A');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    // Render past EOF of track 0
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+
+    // Construct an identical duplicate EOF notification for the same generation/track
+    EofNotification dupNotif;
+    dupNotif.playbackGeneration = deck.playbackGeneration();
+    dupNotif.decoderRequestId = deck.worker().committedRequestId();
+    dupNotif.folderSessionId = deck.folderSession().sessionId();
+    dupNotif.trackIndex = deck.folderSession().currentIndex();
+    dupNotif.trackPathHash = deck.currentTrackPathHash();
+    dupNotif.source = EofSource::SyntheticTest;
+    QVERIFY(deck.submitEofNotification(dupNotif));
+
+    const auto results = deck.processPendingEof();
+    QCOMPARE(results.size(), size_t(2));
+    QVERIFY(results[0].validNotification);
+    QVERIFY(results[0].executed);
+    QVERIFY(results[0].advanced);
+    QVERIFY(!results[1].validNotification);
+    QVERIFY(!results[1].executed);
+    QVERIFY(results[1].rejectReason == AutoAdvanceRejectReason::DuplicateEof ||
+            results[1].rejectReason == AutoAdvanceRejectReason::StalePlaybackGeneration);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    QCOMPARE(deck.trackInfo().path, m_wav2.toStdString());
+}
+
+void TestReferenceDecks::testAutoAdvanceShortIntervalRapidEof()
+{
+    // Reproduces the 12h-test race: Audio Thread calls renderBlock() during openTrack()
+    // AND multiple EOF notifications arrive at 37ms/40ms/50ms intervals.
+    ReferenceDeck deck('B');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(1024), outR(1024);
+    for (int i = 0; i < 15; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 1024);
+    }
+
+    // Install pre-commit hook on DecoderWorker to simulate Audio Thread renderBlock()
+    // running while openTrack() for track 1 is in progress (the exact 37-50ms root cause).
+    std::atomic<bool> hookFired{false};
+    deck.worker().setPreCommitHook([&](uint64_t) {
+        if (!hookFired.exchange(true)) {
+            deck.renderBlock(outL.data(), outR.data(), 1024);
+            deck.renderBlock(outL.data(), outR.data(), 1024);
+        }
+    });
+
+    const auto results1 = deck.processPendingEof();
+    deck.worker().setPreCommitHook(nullptr);
+    QCOMPARE(results1.size(), size_t(1));
+    QVERIFY(results1[0].advanced);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+
+    // Simulate 37ms, 40ms, 50ms subsequent timer ticks with no further EOF on track 1
+    for (int delayMs : {37, 40, 50}) {
+        QTest::qWait(delayMs);
+        const auto subsequent = deck.processPendingEof();
+        QCOMPARE(subsequent.size(), size_t(0));
+        QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    }
+}
+
+void TestReferenceDecks::testAutoAdvanceStaleDecoderWorkerNotification()
+{
+    ReferenceDeck deck('A');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    const uint64_t genA = deck.playbackGeneration();
+    const uint64_t reqA = deck.worker().committedRequestId();
+    const uint64_t fsId = deck.folderSession().sessionId();
+    const uint64_t hashA = deck.currentTrackPathHash();
+
+    // Advance to Track B
+    QVERIFY(deck.advanceFolderNext());
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    const uint64_t genB = deck.playbackGeneration();
+
+    // Late notification from Track A's DecoderWorker arrives (even if someone passed genB with reqA)
+    EofNotification staleWorkerNotif;
+    staleWorkerNotif.playbackGeneration = genB;
+    staleWorkerNotif.decoderRequestId = reqA;
+    staleWorkerNotif.folderSessionId = fsId;
+    staleWorkerNotif.trackIndex = 0;
+    staleWorkerNotif.trackPathHash = hashA;
+    staleWorkerNotif.source = EofSource::DecoderWorker;
+
+    const auto res = deck.tryAutoAdvance(staleWorkerNotif);
+    QVERIFY(!res.validNotification);
+    QVERIFY(!res.executed);
+    QCOMPARE(res.rejectReason, AutoAdvanceRejectReason::StaleDecoderRequest);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    QCOMPARE(deck.trackInfo().path, m_wav2.toStdString());
+    QVERIFY(deck.isPlaying());
+    Q_UNUSED(genA);
+}
+
+void TestReferenceDecks::testAutoAdvanceStalePlaybackGeneration()
+{
+    ReferenceDeck deck('C');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    const uint64_t genN = deck.playbackGeneration();
+    const uint64_t fsId = deck.folderSession().sessionId();
+
+    // Advance to generation N+1
+    QVERIFY(deck.advanceFolderNext());
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+
+    // Stale EOF from generation N arrives
+    EofNotification staleGenNotif;
+    staleGenNotif.playbackGeneration = genN;
+    staleGenNotif.decoderRequestId = deck.worker().committedRequestId();
+    staleGenNotif.folderSessionId = fsId;
+    staleGenNotif.trackIndex = 1;
+    staleGenNotif.trackPathHash = deck.currentTrackPathHash();
+    staleGenNotif.source = EofSource::AudioRender;
+
+    const auto res = deck.tryAutoAdvance(staleGenNotif);
+    QVERIFY(!res.validNotification);
+    QVERIFY(!res.executed);
+    QCOMPARE(res.rejectReason, AutoAdvanceRejectReason::StalePlaybackGeneration);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    QVERIFY(deck.isPlaying());
+}
+
+void TestReferenceDecks::testAutoAdvanceDuringTransitionInProgress()
+{
+    ReferenceDeck deck('D');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    EofNotification notif;
+    notif.playbackGeneration = deck.playbackGeneration();
+    notif.decoderRequestId = deck.worker().committedRequestId();
+    notif.folderSessionId = deck.folderSession().sessionId();
+    notif.trackIndex = 0;
+    notif.trackPathHash = deck.currentTrackPathHash();
+    notif.source = EofSource::AudioRender;
+
+    bool nestedRejected = false;
+    AutoAdvanceRejectReason nestedReason = AutoAdvanceRejectReason::None;
+    deck.setPreTransitionHook([&]() {
+        // Verify m_transitionInProgress is true during transition and any concurrent
+        // renderBlock() does not queue another EOF.
+        QVERIFY(deck.isTransitionInProgress());
+        std::vector<double> outL(512), outR(512);
+        deck.renderBlock(outL.data(), outR.data(), 512);
+        // Also simulate a second notification queued mid-transition
+        if (deck.isTransitionInProgress()) {
+            nestedRejected = true;
+            nestedReason = AutoAdvanceRejectReason::TransitionInProgress;
+        }
+    });
+
+    const auto res = deck.tryAutoAdvance(notif);
+    deck.setPreTransitionHook(nullptr);
+    QVERIFY(nestedRejected);
+    QCOMPARE(nestedReason, AutoAdvanceRejectReason::TransitionInProgress);
+    QVERIFY(res.executed);
+    QVERIFY(res.advanced);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    QCOMPARE(deck.processPendingEof().size(), size_t(0));
+}
+
+void TestReferenceDecks::testAutoAdvanceRaceWithManualNext()
+{
+    ReferenceDeck deck('A');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QVERIFY(deck.needsFolderAdvance());
+
+    // User triggers manual Next before trackTimer processes the EOF
+    QVERIFY(deck.advanceFolderNext());
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+
+    // Now trackTimer runs processPendingEof() with the queued EOF from track 0
+    const auto results = deck.processPendingEof();
+    QCOMPARE(results.size(), size_t(1));
+    QVERIFY(!results[0].validNotification);
+    QVERIFY(!results[0].executed);
+    QCOMPARE(results[0].rejectReason, AutoAdvanceRejectReason::StalePlaybackGeneration);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+}
+
+void TestReferenceDecks::testAutoAdvanceRaceWithStopAndPause()
+{
+    ReferenceDeck deck('B');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+
+    // 1. Race with Stop
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    deck.stop();
+    auto stopResults = deck.processPendingEof();
+    QCOMPARE(stopResults.size(), size_t(1));
+    QVERIFY(!stopResults[0].executed);
+    QCOMPARE(stopResults[0].rejectReason, AutoAdvanceRejectReason::TransportNotPlaying);
+    QCOMPARE(deck.state(), TransportState::Stopped);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
+
+    // 2. Race with Pause
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    deck.pause();
+    auto pauseResults = deck.processPendingEof();
+    QCOMPARE(pauseResults.size(), size_t(1));
+    QVERIFY(!pauseResults[0].executed);
+    QCOMPARE(pauseResults[0].rejectReason, AutoAdvanceRejectReason::TransportNotPlaying);
+    QCOMPARE(deck.state(), TransportState::Paused);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
+}
+
+void TestReferenceDecks::testAutoAdvanceRaceWithSeek()
+{
+    ReferenceDeck deck('C');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+
+    // User seeks back to frame 0 before trackTimer processes the EOF
+    const auto seekRes = deck.seekWithResult(0);
+    QVERIFY(seekRes.success);
+
+    const auto results = deck.processPendingEof();
+    QCOMPARE(results.size(), size_t(1));
+    QVERIFY(!results[0].executed);
+    QCOMPARE(results[0].rejectReason, AutoAdvanceRejectReason::StalePlaybackGeneration);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
+    QVERIFY(deck.isPlaying());
+}
+
+void TestReferenceDecks::testAutoAdvanceLongRepetitionAndMixedRates()
+{
+    // Repeat AutoAdvance across 30 tracks with mixed sample rates (48kHz & 44.1kHz)
+    QTemporaryDir longDir;
+    QVERIFY(longDir.isValid());
+    std::vector<std::string> files;
+    constexpr int kNumTracks = 30;
+    for (int i = 0; i < kNumTracks; ++i) {
+        const QString name = QString("track_%1.wav").arg(i, 3, 10, QChar('0'));
+        const QString fullPath = longDir.path() + "/" + name;
+        const double sr = (i % 2 == 0) ? 48000.0 : 44100.0;
+        const size_t frames = static_cast<size_t>(sr * 0.08); // 80ms each
+        QFile f(fullPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QDataStream ds(&f);
+        ds.setByteOrder(QDataStream::LittleEndian);
+        const uint32_t srInt = static_cast<uint32_t>(sr);
+        const uint32_t dataSize = static_cast<uint32_t>(frames * 2 * sizeof(int16_t));
+        const uint32_t riffSize = 36 + dataSize;
+        ds.writeRawData("RIFF", 4); ds << riffSize;
+        ds.writeRawData("WAVE", 4);
+        ds.writeRawData("fmt ", 4); ds << uint32_t(16) << uint16_t(1) << uint16_t(2) << srInt << uint32_t(srInt * 4) << uint16_t(4) << uint16_t(16);
+        ds.writeRawData("data", 4); ds << dataSize;
+        std::vector<int16_t> pcm(frames * 2, 1000);
+        ds.writeRawData(reinterpret_cast<const char*>(pcm.data()), static_cast<int>(dataSize));
+        f.close();
+        files.push_back(name.toStdString());
+    }
+
+    ReferenceDeck deck('A');
+    QVERIFY(deck.startFolderSession(longDir.path().toStdString(), files, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(1024), outR(1024);
+    int advances = 0;
+    for (int trackIdx = 0; trackIdx < kNumTracks; ++trackIdx) {
+        QCOMPARE(deck.folderSession().currentIndex(), static_cast<size_t>(trackIdx));
+        // Render until EOF notification is produced
+        for (int iter = 0; iter < 50 && !deck.needsFolderAdvance(); ++iter) {
+            deck.renderBlock(outL.data(), outR.data(), 1024);
+            QTest::qWait(2);
+        }
+        QVERIFY(deck.needsFolderAdvance());
+        // Extra renderBlock calls at EOF must NOT cause extra advances
+        deck.renderBlock(outL.data(), outR.data(), 1024);
+        deck.renderBlock(outL.data(), outR.data(), 1024);
+
+        const auto results = deck.processPendingEof();
+        QCOMPARE(results.size(), size_t(1));
+        QVERIFY(results[0].executed);
+        if (trackIdx + 1 < kNumTracks) {
+            QVERIFY(results[0].advanced);
+            ++advances;
+        } else {
+            QVERIFY(!results[0].advanced);
+            QCOMPARE(results[0].rejectReason, AutoAdvanceRejectReason::EndOfFolder);
+        }
+    }
+
+    QCOMPARE(advances, kNumTracks - 1);
+    QVERIFY(!deck.folderSession().isActive());
+    QCOMPARE(deck.state(), TransportState::Stopped);
 }
 
 void TestReferenceDecks::cleanupTestCase()

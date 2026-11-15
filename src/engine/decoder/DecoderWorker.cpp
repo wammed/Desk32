@@ -198,6 +198,8 @@ void DecoderWorker::stop() noexcept {
     std::lock_guard<std::mutex> lock(m_cmdMutex);
     m_isPlaying.store(false, std::memory_order_release);
     m_playhead.store(0, std::memory_order_release);
+    m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+    m_eofDelivered.store(false, std::memory_order_release);
     WorkerCommand cmd;
     cmd.type = WorkerCommandType::Stop;
     m_pendingCommands.push_back(cmd);
@@ -254,6 +256,8 @@ SeekResult DecoderWorker::seekWithResult(int64_t targetFrame) noexcept {
   {
     std::lock_guard<std::mutex> lock(m_cmdMutex);
     m_playhead.store(targetFrame, std::memory_order_release);
+    m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+    m_eofDelivered.store(false, std::memory_order_release);
     // Note: Do NOT touch m_ringBuffer directly from Control Thread (P0-04)
     seq = ++m_seekSequence;
     WorkerCommand cmd;
@@ -323,6 +327,8 @@ size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
     return 0;
   }
 
+  const uint64_t epoch = m_eofEpoch.load(std::memory_order_acquire);
+  const uint64_t reqId = m_committedRequestId.load(std::memory_order_acquire);
   size_t read = m_ringBuffer.readPlanar(outLeft, outRight, frames);
   if (read < frames) {
     // Buffer underrun or EOF
@@ -331,7 +337,16 @@ size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
 
     if (m_isEof.load(std::memory_order_acquire) &&
         m_ringBuffer.availableRead() == 0) {
-      m_eofDelivered.store(true, std::memory_order_release);
+      if (m_eofEpoch.load(std::memory_order_acquire) == epoch &&
+          m_eofDeliveredEpoch.load(std::memory_order_relaxed) != epoch) {
+        m_eofDeliveredEpoch.store(epoch, std::memory_order_release);
+        m_eofRequestId.store(reqId, std::memory_order_release);
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        m_eofEmittedTimestampMs.store(nowMs, std::memory_order_release);
+        m_eofDelivered.store(true, std::memory_order_release);
+      }
     } else {
       m_underrunCount.fetch_add(1, std::memory_order_relaxed);
     }
@@ -462,6 +477,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_syntheticPos = 0;
           m_isEof.store(false, std::memory_order_release);
           m_eofDelivered.store(false, std::memory_order_release);
+          m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
 
           const auto &info = dec->formatInfo();
           m_trackInfo.path = cmd.path;
@@ -575,6 +591,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_syntheticPos = 0;
         m_isEof.store(false, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
+        m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
 
         m_decoder.reset(); // Destroy active decoder exclusively on Worker
                            // Thread (P0-15)
@@ -629,6 +646,8 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_isOpen.store(false, std::memory_order_release);
         m_isPlaying.store(false, std::memory_order_release);
         m_isEof.store(true, std::memory_order_release);
+        m_eofDelivered.store(false, std::memory_order_release);
+        m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
         m_committedRequestId.store(0, std::memory_order_release);
         m_trackInfo = WorkerTrackInfo{};
         m_metadata.reset();
@@ -660,6 +679,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_pendingOutCount = 0;
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
+    m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
     bool ok = false;
     int64_t actual = cmd.targetFrame;
     if (m_isSynthetic.load(std::memory_order_relaxed)) {
@@ -692,6 +712,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_pendingOutCount = 0;
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
+    m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
     m_syntheticPos = 0;
     if (m_decoder) {
       m_decoder->seek(0);
