@@ -106,12 +106,14 @@ class EofNotificationQueue {
 public:
     static constexpr size_t CAPACITY = 64;
     static constexpr size_t MASK = CAPACITY - 1;
+    static constexpr size_t MAX_CAS_RETRIES = 8;
 
     bool push(const EofNotification& notif) noexcept {
         uint64_t writeIdx = m_writeSeq.load(std::memory_order_relaxed);
-        for (;;) {
+        for (size_t attempt = 0; attempt < MAX_CAS_RETRIES; ++attempt) {
             const uint64_t readIdx = m_readSeq.load(std::memory_order_acquire);
             if (writeIdx - readIdx >= CAPACITY) {
+                m_overflowCount.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
             if (m_writeSeq.compare_exchange_weak(writeIdx, writeIdx + 1,
@@ -123,6 +125,8 @@ public:
                 return true;
             }
         }
+        m_overflowCount.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
     bool pop(EofNotification& out) noexcept {
@@ -140,6 +144,10 @@ public:
         return true;
     }
 
+    [[nodiscard]] uint64_t overflowCount() const noexcept {
+        return m_overflowCount.load(std::memory_order_relaxed);
+    }
+
 private:
     struct Slot {
         std::atomic<bool> ready{false};
@@ -148,6 +156,7 @@ private:
     std::array<Slot, CAPACITY> m_slots{};
     std::atomic<uint64_t> m_writeSeq{0};
     std::atomic<uint64_t> m_readSeq{0};
+    std::atomic<uint64_t> m_overflowCount{0};
 };
 
 struct TrackInfo {
@@ -200,6 +209,8 @@ public:
         if (locked) {
             m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
             m_needsFolderAdvance.store(false, std::memory_order_release);
+            m_eofOverflowPending.store(false, std::memory_order_release);
+            m_currentTrackPathHash.store(0, std::memory_order_release);
             m_folderSession.stopSession(); // P0-10: Deck lock terminates and discards folder session
         }
     }
@@ -405,6 +416,8 @@ public:
                 }
             }
         } else {
+            m_folderSession.stopSession();
+            m_currentTrackPathHash.store(0, std::memory_order_release);
             m_state.store(TransportState::Stopped, std::memory_order_release);
             m_worker.stop();
             res.rejectReason = AutoAdvanceRejectReason::EndOfFolder;
@@ -427,6 +440,8 @@ public:
             m_needsFolderAdvance.store(true, std::memory_order_release);
             return true;
         }
+        recordEofOverflow(notif);
+        m_needsFolderAdvance.store(true, std::memory_order_release);
         return false;
     }
 
@@ -437,8 +452,23 @@ public:
         while (m_eofQueue.pop(notif)) {
             results.push_back(tryAutoAdvance(notif));
         }
+        if (m_eofOverflowPending.exchange(false, std::memory_order_acq_rel)) {
+            EofNotification recovered;
+            recovered.playbackGeneration = m_eofOverflowGeneration.load(std::memory_order_acquire);
+            recovered.decoderRequestId = m_eofOverflowRequestId.load(std::memory_order_acquire);
+            recovered.folderSessionId = m_eofOverflowSessionId.load(std::memory_order_acquire);
+            recovered.trackIndex = m_eofOverflowTrackIndex.load(std::memory_order_acquire);
+            recovered.trackPathHash = m_eofOverflowTrackPathHash.load(std::memory_order_acquire);
+            recovered.emittedTimestampMs = m_eofOverflowTimestampMs.load(std::memory_order_acquire);
+            recovered.source = static_cast<EofSource>(m_eofOverflowSource.load(std::memory_order_acquire));
+            results.push_back(tryAutoAdvance(recovered));
+        }
         m_needsFolderAdvance.store(false, std::memory_order_release);
         return results;
+    }
+
+    [[nodiscard]] uint64_t eofQueueOverflowCount() const noexcept {
+        return m_eofQueueOverflowCount.load(std::memory_order_relaxed);
     }
 
     void setPreTransitionHook(std::function<void()> hook) {
@@ -489,6 +519,7 @@ public:
         std::lock_guard<std::mutex> lock(m_controlMutex);
         m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         m_needsFolderAdvance.store(false, std::memory_order_release);
+        m_eofOverflowPending.store(false, std::memory_order_release);
         m_state.store(TransportState::Paused, std::memory_order_release);
         m_worker.pause();
     }
@@ -518,6 +549,7 @@ public:
         std::lock_guard<std::mutex> lock(m_controlMutex);
         m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         m_needsFolderAdvance.store(false, std::memory_order_release);
+        m_eofOverflowPending.store(false, std::memory_order_release);
         m_worker.seek(targetFrame);
     }
 
@@ -525,6 +557,7 @@ public:
         std::lock_guard<std::mutex> lock(m_controlMutex);
         m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         m_needsFolderAdvance.store(false, std::memory_order_release);
+        m_eofOverflowPending.store(false, std::memory_order_release);
         return m_worker.seekWithResult(targetFrame);
     }
 
@@ -561,7 +594,9 @@ public:
                     notif.trackPathHash = m_currentTrackPathHash.load(std::memory_order_acquire);
                     notif.emittedTimestampMs = m_worker.eofEmittedTimestampMs();
                     notif.source = EofSource::AudioRender;
-                    (void)m_eofQueue.push(notif);
+                    if (!m_eofQueue.push(notif)) {
+                        recordEofOverflow(notif);
+                    }
                     m_needsFolderAdvance.store(true, std::memory_order_release);
                 } else {
                     m_state.store(TransportState::Stopped, std::memory_order_release);
@@ -591,9 +626,24 @@ private:
             .count();
     }
 
+    void recordEofOverflow(const EofNotification& notif) noexcept {
+        m_eofQueueOverflowCount.fetch_add(1, std::memory_order_relaxed);
+        m_eofOverflowGeneration.store(notif.playbackGeneration, std::memory_order_relaxed);
+        m_eofOverflowRequestId.store(notif.decoderRequestId, std::memory_order_relaxed);
+        m_eofOverflowSessionId.store(notif.folderSessionId, std::memory_order_relaxed);
+        m_eofOverflowTrackIndex.store(notif.trackIndex, std::memory_order_relaxed);
+        m_eofOverflowTrackPathHash.store(notif.trackPathHash, std::memory_order_relaxed);
+        m_eofOverflowTimestampMs.store(notif.emittedTimestampMs, std::memory_order_relaxed);
+        m_eofOverflowSource.store(static_cast<uint8_t>(notif.source), std::memory_order_relaxed);
+        m_eofOverflowPending.store(true, std::memory_order_release);
+    }
+
     void stopLocked() noexcept {
         m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         m_needsFolderAdvance.store(false, std::memory_order_release);
+        m_eofOverflowPending.store(false, std::memory_order_release);
+        m_folderSession.stopSession(); // v3.7 §2.7.3: Stop terminates and discards Folder Session while preserving loaded track context
+        m_currentTrackPathHash.store(0, std::memory_order_release);
         m_state.store(TransportState::Stopped, std::memory_order_release);
         m_worker.stop();
     }
@@ -609,6 +659,16 @@ private:
     std::atomic<uint64_t> m_lastHandledEofGeneration{0};
     std::atomic<bool> m_transitionInProgress{false};
     std::atomic<uint64_t> m_currentTrackPathHash{0};
+
+    std::atomic<uint64_t> m_eofQueueOverflowCount{0};
+    std::atomic<bool> m_eofOverflowPending{false};
+    std::atomic<uint64_t> m_eofOverflowGeneration{0};
+    std::atomic<uint64_t> m_eofOverflowRequestId{0};
+    std::atomic<uint64_t> m_eofOverflowSessionId{0};
+    std::atomic<size_t> m_eofOverflowTrackIndex{0};
+    std::atomic<uint64_t> m_eofOverflowTrackPathHash{0};
+    std::atomic<int64_t> m_eofOverflowTimestampMs{0};
+    std::atomic<uint8_t> m_eofOverflowSource{0};
 
     std::mutex m_controlMutex;
     std::function<void()> m_preTransitionHook;

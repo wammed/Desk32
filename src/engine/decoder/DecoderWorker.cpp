@@ -186,6 +186,8 @@ void DecoderWorker::pause() noexcept {
   {
     std::lock_guard<std::mutex> lock(m_cmdMutex);
     m_isPlaying.store(false, std::memory_order_release);
+    m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+    m_eofDelivered.store(false, std::memory_order_release);
     WorkerCommand cmd;
     cmd.type = WorkerCommandType::Pause;
     m_pendingCommands.push_back(cmd);

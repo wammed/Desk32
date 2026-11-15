@@ -260,6 +260,9 @@ bool EngineController::initialize(bool offlineMode) {
                     eofDet.insert(QStringLiteral("event_timestamp"), static_cast<qint64>(res.eventTimestampMs));
                     eofDet.insert(QStringLiteral("received_timestamp"), static_cast<qint64>(res.receivedTimestampMs));
                     eofDet.insert(QStringLiteral("valid"), res.validNotification);
+                    if (d->eofQueueOverflowCount() > 0) {
+                        eofDet.insert(QStringLiteral("eof_queue_overflow_count"), static_cast<qint64>(d->eofQueueOverflowCount()));
+                    }
                     if (!res.validNotification) {
                         eofDet.insert(QStringLiteral("invalid_reason"), rejectReasonStr);
                     }
