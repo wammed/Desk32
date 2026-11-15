@@ -263,6 +263,15 @@ bool EngineController::initialize(bool offlineMode) {
                     if (d->eofQueueOverflowCount() > 0) {
                         eofDet.insert(QStringLiteral("eof_queue_overflow_count"), static_cast<qint64>(d->eofQueueOverflowCount()));
                     }
+                    if (d->eofQueueFullCount() > 0) {
+                        eofDet.insert(QStringLiteral("eof_queue_full_count"), static_cast<qint64>(d->eofQueueFullCount()));
+                    }
+                    if (d->eofQueueCasContentionCount() > 0) {
+                        eofDet.insert(QStringLiteral("eof_queue_cas_contention_count"), static_cast<qint64>(d->eofQueueCasContentionCount()));
+                    }
+                    if (d->eofOverflowDropCount() > 0) {
+                        eofDet.insert(QStringLiteral("eof_overflow_drop_count"), static_cast<qint64>(d->eofOverflowDropCount()));
+                    }
                     if (!res.validNotification) {
                         eofDet.insert(QStringLiteral("invalid_reason"), rejectReasonStr);
                     }

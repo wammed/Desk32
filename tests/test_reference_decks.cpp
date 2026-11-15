@@ -139,6 +139,9 @@ private slots:
     void testAutoAdvanceStopDiscardsFolderSession();
     void testAutoAdvanceFinalTrackDiscardsSession();
     void testAutoAdvanceDeckLockBoundaryWithNewSession();
+    void testAutoAdvanceOverflowSlotConcurrentConsistency();
+    void testAutoAdvanceRapidEofPauseResumeRace();
+    void testAutoAdvanceOverflowRecoveryRaceWithStopAndLock();
     void cleanupTestCase();
 
 private:
@@ -1781,6 +1784,202 @@ void TestReferenceDecks::testAutoAdvanceDeckLockBoundaryWithNewSession()
             lateRes.rejectReason == AutoAdvanceRejectReason::StalePlaybackGeneration);
     QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
     QCOMPARE(deck.folderSession().sessionId(), newSessionId);
+}
+
+void TestReferenceDecks::testAutoAdvanceOverflowSlotConcurrentConsistency()
+{
+    // AA-16: Verify torn-read-free consistency of sequence-stamped overflow slot under concurrent access
+    ReferenceDeck deck('A');
+
+    // Also verify QueueFull counter is incremented distinctly from CasContention
+    for (size_t i = 0; i < EofNotificationQueue::CAPACITY; ++i) {
+        EofNotification n;
+        n.playbackGeneration = i + 1;
+        QCOMPARE(deck.eofQueueForTest().pushDetailed(n), EofNotificationQueue::PushResult::Success);
+    }
+    EofNotification extra;
+    extra.playbackGeneration = 999;
+    QCOMPARE(deck.eofQueueForTest().pushDetailed(extra), EofNotificationQueue::PushResult::QueueFull);
+    QCOMPARE(deck.eofQueueFullCount(), uint64_t(1));
+    QCOMPARE(deck.eofQueueCasContentionCount(), uint64_t(0));
+
+    // Concurrent stress on recordEofOverflowForTest() and tryPopOverflowForTest()
+    constexpr uint64_t kIterations = 20000;
+    std::atomic<bool> start{false};
+    std::atomic<bool> writerDone{false};
+    std::atomic<uint64_t> tornCount{0};
+    std::atomic<uint64_t> poppedCount{0};
+
+    std::thread writer([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (uint64_t i = 1; i <= kIterations; ++i) {
+            EofNotification n;
+            n.playbackGeneration = i;
+            n.decoderRequestId = i * 10ULL + 1ULL;
+            n.folderSessionId = i * 100ULL + 2ULL;
+            n.trackIndex = static_cast<size_t>(i % 7ULL);
+            n.trackPathHash = i * 1000ULL + 3ULL;
+            n.emittedTimestampMs = static_cast<int64_t>(i * 10000ULL + 4ULL);
+            n.source = (i % 2 == 0) ? EofSource::AudioRender : EofSource::DecoderWorker;
+            (void)deck.recordEofOverflowForTest(n);
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    std::thread reader([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        EofNotification out;
+        while (!writerDone.load(std::memory_order_acquire)) {
+            if (deck.tryPopOverflowForTest(out)) {
+                poppedCount.fetch_add(1, std::memory_order_relaxed);
+                const uint64_t i = out.playbackGeneration;
+                if (out.decoderRequestId != i * 10ULL + 1ULL ||
+                    out.folderSessionId != i * 100ULL + 2ULL ||
+                    out.trackIndex != static_cast<size_t>(i % 7ULL) ||
+                    out.trackPathHash != i * 1000ULL + 3ULL ||
+                    out.emittedTimestampMs != static_cast<int64_t>(i * 10000ULL + 4ULL) ||
+                    out.source != ((i % 2 == 0) ? EofSource::AudioRender : EofSource::DecoderWorker)) {
+                    tornCount.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        // Final drain after writer finishes
+        if (deck.tryPopOverflowForTest(out)) {
+            poppedCount.fetch_add(1, std::memory_order_relaxed);
+            const uint64_t i = out.playbackGeneration;
+            if (out.decoderRequestId != i * 10ULL + 1ULL ||
+                out.folderSessionId != i * 100ULL + 2ULL ||
+                out.trackIndex != static_cast<size_t>(i % 7ULL) ||
+                out.trackPathHash != i * 1000ULL + 3ULL ||
+                out.emittedTimestampMs != static_cast<int64_t>(i * 10000ULL + 4ULL)) {
+                tornCount.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+
+    QCOMPARE(tornCount.load(), uint64_t(0));
+    QVERIFY(poppedCount.load() > uint64_t(0));
+    QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+}
+
+void TestReferenceDecks::testAutoAdvanceRapidEofPauseResumeRace()
+{
+    // AA-17: Repeated EOF + Pause/Resume race across all 3 tracks -> no lost EOF, no double advance
+    ReferenceDeck deck('B');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(512), outR(512);
+
+    // Track 0 -> EOF -> Pause -> processPendingEof (discard) -> Resume -> re-EOF -> AutoAdvance to Track 1
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QVERIFY(deck.needsFolderAdvance());
+    deck.pause();
+    QVERIFY(deck.folderSession().isActive());
+    auto discarded1 = deck.processPendingEof();
+    QCOMPARE(discarded1.size(), size_t(1));
+    QVERIFY(!discarded1[0].executed);
+
+    deck.play();
+    for (int i = 0; i < 5 && !deck.needsFolderAdvance(); ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QVERIFY(deck.needsFolderAdvance());
+    auto adv1 = deck.processPendingEof();
+    QCOMPARE(adv1.size(), size_t(1));
+    QVERIFY(adv1[0].advanced);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+
+    // Track 1 -> EOF -> Pause -> Resume -> processPendingEof (stale gen discarded, re-emitted valid) -> Track 2
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    deck.pause();
+    deck.play();
+    for (int i = 0; i < 5; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    auto adv2 = deck.processPendingEof();
+    int executed2 = 0;
+    for (const auto& r : adv2) {
+        if (r.executed) {
+            ++executed2;
+            QVERIFY(r.advanced);
+        }
+    }
+    QCOMPARE(executed2, 1);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(2));
+}
+
+void TestReferenceDecks::testAutoAdvanceOverflowRecoveryRaceWithStopAndLock()
+{
+    // AA-18: Overflowed EOF recovery racing with Stop and Deck Lock + new Folder Session
+    ReferenceDeck deck('C');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+
+    // Case A: Overflowed EOF + Stop
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+    for (size_t i = 0; i < EofNotificationQueue::CAPACITY; ++i) {
+        EofNotification stale;
+        stale.playbackGeneration = 50000 + i;
+        QVERIFY(deck.submitEofNotification(stale));
+    }
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QCOMPARE(deck.eofQueueFullCount(), uint64_t(1));
+
+    deck.stop();
+    const auto afterStop = deck.processPendingEof();
+    for (const auto& r : afterStop) {
+        QVERIFY(!r.executed);
+    }
+    QVERIFY(!deck.folderSession().isActive());
+    QCOMPARE(deck.state(), TransportState::Stopped);
+
+    // Case B: Overflowed EOF + Deck Lock + Unlock + New Folder Session
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    const uint64_t oldSessionId = deck.folderSession().sessionId();
+    deck.play();
+    for (size_t i = 0; i < EofNotificationQueue::CAPACITY; ++i) {
+        EofNotification stale;
+        stale.playbackGeneration = 60000 + i;
+        QVERIFY(deck.submitEofNotification(stale));
+    }
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+
+    deck.setLocked(true);
+    const auto afterLock = deck.processPendingEof();
+    for (const auto& r : afterLock) {
+        QVERIFY(!r.executed);
+    }
+    deck.setLocked(false);
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    QVERIFY(deck.folderSession().sessionId() != oldSessionId);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
 }
 
 void TestReferenceDecks::cleanupTestCase()
