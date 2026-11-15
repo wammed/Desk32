@@ -699,6 +699,11 @@ private:
                 m_overflowCasContentionCount.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
+            const uint64_t lastConsumed = slot.lastConsumedSeq.load(std::memory_order_acquire);
+            if (seq > lastConsumed) {
+                // Unread notification present in this slot: never overwrite.
+                continue;
+            }
             if (slot.seq.compare_exchange_weak(seq, seq + 1ULL,
                                                  std::memory_order_acq_rel,
                                                  std::memory_order_acquire)) {

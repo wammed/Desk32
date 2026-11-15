@@ -145,6 +145,7 @@ private slots:
     void testAutoAdvanceMultiProducerOverflowConsistency();
     void testAutoAdvanceOverflowRecoveryConcurrentStopAndLock();
     void testAutoAdvanceOverflowContinuousWithControlDelay();
+    void testAutoAdvanceSpscCapacityOverflowNoOverwrite();
     void cleanupTestCase();
 
 private:
@@ -1812,6 +1813,7 @@ void TestReferenceDecks::testAutoAdvanceOverflowSlotConcurrentConsistency()
     std::atomic<bool> writerDone{false};
     std::atomic<uint64_t> tornCount{0};
     std::atomic<uint64_t> poppedCount{0};
+    std::atomic<uint64_t> writeSuccesses{0};
 
     std::thread writer([&]() {
         while (!start.load(std::memory_order_acquire)) {
@@ -1826,7 +1828,9 @@ void TestReferenceDecks::testAutoAdvanceOverflowSlotConcurrentConsistency()
             n.trackPathHash = i * 1000ULL + 3ULL;
             n.emittedTimestampMs = static_cast<int64_t>(i * 10000ULL + 4ULL);
             n.source = (i % 2 == 0) ? EofSource::AudioRender : EofSource::DecoderWorker;
-            (void)deck.recordEofOverflowForTest(n);
+            if (deck.recordEofOverflowForTest(n)) {
+                writeSuccesses.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         writerDone.store(true, std::memory_order_release);
     });
@@ -1851,7 +1855,7 @@ void TestReferenceDecks::testAutoAdvanceOverflowSlotConcurrentConsistency()
             }
         }
         // Final drain after writer finishes
-        if (deck.tryPopOverflowForTest(out)) {
+        while (deck.tryPopOverflowForTest(out)) {
             poppedCount.fetch_add(1, std::memory_order_relaxed);
             const uint64_t i = out.playbackGeneration;
             if (out.decoderRequestId != i * 10ULL + 1ULL ||
@@ -1870,7 +1874,8 @@ void TestReferenceDecks::testAutoAdvanceOverflowSlotConcurrentConsistency()
 
     QCOMPARE(tornCount.load(), uint64_t(0));
     QVERIFY(poppedCount.load() > uint64_t(0));
-    QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+    QCOMPARE(poppedCount.load(), writeSuccesses.load());
+    QCOMPARE(writeSuccesses.load() + deck.eofOverflowDropCount(), kIterations);
 }
 
 void TestReferenceDecks::testAutoAdvanceRapidEofPauseResumeRace()
@@ -1999,24 +2004,29 @@ void TestReferenceDecks::testAutoAdvanceMultiProducerOverflowConsistency()
     std::atomic<int> validReads{0};
     std::atomic<int> writeSuccesses{0};
     std::atomic<int64_t> maxWriteDurationUs{0};
+    std::vector<std::vector<uint64_t>> acceptedByWriter(NUM_WRITERS);
+    std::vector<uint64_t> readKeys;
+    readKeys.reserve(NUM_WRITERS * ITERS_PER_WRITER);
 
     std::vector<std::thread> writers;
     writers.reserve(NUM_WRITERS);
     for (int w = 0; w < NUM_WRITERS; ++w) {
+        acceptedByWriter[static_cast<size_t>(w)].reserve(ITERS_PER_WRITER);
         writers.emplace_back([&, w]() {
             readyCount.fetch_add(1, std::memory_order_acq_rel);
             while (!startFlag.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
             for (int i = 0; i < ITERS_PER_WRITER; ++i) {
-                const uint64_t key = static_cast<uint64_t>(w + 1) * 100000ULL + static_cast<uint64_t>(i + 1);
+                const uint64_t key =
+                    static_cast<uint64_t>(w + 1) * UINT64_C(100000) + static_cast<uint64_t>(i + 1);
                 EofNotification n;
                 n.playbackGeneration = key;
-                n.decoderRequestId = key * 3ULL;
-                n.folderSessionId = key * 5ULL;
-                n.trackIndex = static_cast<size_t>(key % 1000ULL);
-                n.trackPathHash = key * 7ULL;
-                n.emittedTimestampMs = static_cast<int64_t>(key * 11ULL);
+                n.decoderRequestId = key * UINT64_C(3);
+                n.folderSessionId = key * UINT64_C(5);
+                n.trackIndex = static_cast<size_t>(key % UINT64_C(1000));
+                n.trackPathHash = key * UINT64_C(7);
+                n.emittedTimestampMs = static_cast<int64_t>(key * UINT64_C(11));
                 n.source = (i % 2 == 0) ? EofSource::AudioRender : EofSource::DecoderWorker;
 
                 const auto t0 = std::chrono::steady_clock::now();
@@ -2031,6 +2041,7 @@ void TestReferenceDecks::testAutoAdvanceMultiProducerOverflowConsistency()
                 }
                 if (ok) {
                     writeSuccesses.fetch_add(1, std::memory_order_relaxed);
+                    acceptedByWriter[static_cast<size_t>(w)].push_back(key);
                 }
             }
         });
@@ -2044,15 +2055,16 @@ void TestReferenceDecks::testAutoAdvanceMultiProducerOverflowConsistency()
         auto verifyNotif = [&](const EofNotification& out) {
             const uint64_t key = out.playbackGeneration;
             const bool ok =
-                (out.decoderRequestId == key * 3ULL) &&
-                (out.folderSessionId == key * 5ULL) &&
-                (out.trackIndex == static_cast<size_t>(key % 1000ULL)) &&
-                (out.trackPathHash == key * 7ULL) &&
-                (out.emittedTimestampMs == static_cast<int64_t>(key * 11ULL));
+                (out.decoderRequestId == key * UINT64_C(3)) &&
+                (out.folderSessionId == key * UINT64_C(5)) &&
+                (out.trackIndex == static_cast<size_t>(key % UINT64_C(1000))) &&
+                (out.trackPathHash == key * UINT64_C(7)) &&
+                (out.emittedTimestampMs == static_cast<int64_t>(key * UINT64_C(11)));
             if (!ok) {
                 tornReads.fetch_add(1, std::memory_order_relaxed);
             } else {
                 validReads.fetch_add(1, std::memory_order_relaxed);
+                readKeys.push_back(key);
             }
         };
 
@@ -2082,12 +2094,21 @@ void TestReferenceDecks::testAutoAdvanceMultiProducerOverflowConsistency()
     reader.join();
 
     QCOMPARE(tornReads.load(), 0);
-    QVERIFY(validReads.load() > 0);
+    QCOMPARE(validReads.load(), writeSuccesses.load());
     QCOMPARE(deck.eofQueueOverflowCount(), uint64_t(NUM_WRITERS * ITERS_PER_WRITER));
     QCOMPARE(writeSuccesses.load() + static_cast<int>(deck.eofOverflowDropCount()),
              NUM_WRITERS * ITERS_PER_WRITER);
-    // With 4 writers <= 8 overflow slots, no valid notification should be silently dropped
-    QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+
+    std::vector<uint64_t> allAccepted;
+    allAccepted.reserve(static_cast<size_t>(writeSuccesses.load()));
+    for (const auto& vec : acceptedByWriter) {
+        allAccepted.insert(allAccepted.end(), vec.begin(), vec.end());
+    }
+    std::sort(allAccepted.begin(), allAccepted.end());
+    std::sort(readKeys.begin(), readKeys.end());
+    // Every accepted notification must be read exactly once (no unread slot overwrite, no loss)
+    QVERIFY(std::adjacent_find(readKeys.begin(), readKeys.end()) == readKeys.end());
+    QCOMPARE(readKeys, allAccepted);
     // Bounded RT execution check (each call must complete well within 10ms even under sanitizers)
     QVERIFY(maxWriteDurationUs.load() < 10000);
 }
@@ -2223,6 +2244,109 @@ void TestReferenceDecks::testAutoAdvanceOverflowContinuousWithControlDelay()
         QVERIFY(!r.advanced);
     }
     QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+}
+
+void TestReferenceDecks::testAutoAdvanceSpscCapacityOverflowNoOverwrite()
+{
+    // AA-22: Production SPSC path exceeding 64-slot queue + 8-slot overflow bank while Control Thread is paused
+    {
+        ReferenceDeck deck('A');
+        constexpr size_t QUEUE_CAP = EofNotificationQueue::CAPACITY; // 64
+        constexpr size_t OVERFLOW_CAP = 8;
+        constexpr size_t EXCESS = 5;
+        constexpr size_t TOTAL = QUEUE_CAP + OVERFLOW_CAP + EXCESS; // 77
+
+        for (size_t i = 0; i < TOTAL; ++i) {
+            EofNotification n;
+            n.playbackGeneration = static_cast<uint64_t>(i + 1);
+            n.decoderRequestId = static_cast<uint64_t>((i + 1) * 10);
+            n.folderSessionId = UINT64_C(999);
+            n.trackIndex = i;
+            n.trackPathHash = static_cast<uint64_t>((i + 1) * 100);
+            (void)deck.submitEofNotificationForTest(n);
+        }
+
+        QCOMPARE(deck.eofQueueFullCount(), uint64_t(OVERFLOW_CAP + EXCESS));
+        QCOMPARE(deck.eofQueueOverflowCount(), uint64_t(OVERFLOW_CAP + EXCESS));
+        QCOMPARE(deck.eofOverflowDropCount(), uint64_t(EXCESS));
+
+        // Resume Control Thread: drain queue (1..64) and overflow bank (65..72)
+        std::vector<uint64_t> recoveredKeys;
+        EofNotification out;
+        while (deck.eofQueueForTest().pop(out)) {
+            QCOMPARE(out.decoderRequestId, out.playbackGeneration * UINT64_C(10));
+            QCOMPARE(out.trackPathHash, out.playbackGeneration * UINT64_C(100));
+            recoveredKeys.push_back(out.playbackGeneration);
+        }
+        QCOMPARE(recoveredKeys.size(), QUEUE_CAP);
+
+        while (deck.tryPopOverflowForTest(out)) {
+            QCOMPARE(out.decoderRequestId, out.playbackGeneration * UINT64_C(10));
+            QCOMPARE(out.trackPathHash, out.playbackGeneration * UINT64_C(100));
+            recoveredKeys.push_back(out.playbackGeneration);
+        }
+        QCOMPARE(recoveredKeys.size(), QUEUE_CAP + OVERFLOW_CAP);
+
+        // Unread overflow slots 65..72 must NOT have been overwritten by excess 73..77
+        std::sort(recoveredKeys.begin(), recoveredKeys.end());
+        QVERIFY(std::adjacent_find(recoveredKeys.begin(), recoveredKeys.end()) == recoveredKeys.end());
+        for (size_t i = 0; i < QUEUE_CAP + OVERFLOW_CAP; ++i) {
+            QCOMPARE(recoveredKeys[i], static_cast<uint64_t>(i + 1));
+        }
+    }
+
+    // Active FolderSession: valid EOF in 8th overflow slot must survive subsequent excess drops
+    {
+        ReferenceDeck deck('B');
+        std::vector<std::string> files = {
+            "track_01_intro.wav",
+            "track_02_verse.wav",
+            "track_03_chorus.wav"
+        };
+        QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+        deck.play();
+
+        // Fill 64 queue slots + 7 overflow slots with stale notifications (leaving 1 overflow slot free)
+        for (size_t i = 0; i < EofNotificationQueue::CAPACITY + 7; ++i) {
+            EofNotification stale;
+            stale.playbackGeneration = UINT64_C(90000) + static_cast<uint64_t>(i);
+            stale.folderSessionId = deck.folderSession().sessionId();
+            (void)deck.submitEofNotificationForTest(stale);
+        }
+
+        // RT Audio Thread triggers real EOF -> lands in 8th overflow slot
+        std::vector<double> outL(512), outR(512);
+        for (int i = 0; i < 20; ++i) {
+            deck.renderBlock(outL.data(), outR.data(), 512);
+        }
+        QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+
+        // 3 more excess notifications arrive while Control Thread is still stopped -> must drop, not overwrite
+        for (size_t i = 0; i < 3; ++i) {
+            EofNotification excess;
+            excess.playbackGeneration = UINT64_C(95000) + static_cast<uint64_t>(i);
+            (void)deck.submitEofNotificationForTest(excess);
+        }
+        QCOMPARE(deck.eofOverflowDropCount(), uint64_t(3));
+
+        // Control Thread resumes -> recovers valid EOF and advances exactly once
+        const auto results = deck.processPendingEof();
+        int advancedCount = 0;
+        for (const auto& r : results) {
+            if (r.advanced) {
+                ++advancedCount;
+            }
+        }
+        QCOMPARE(advancedCount, 1);
+        QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+
+        // No duplicate processing on subsequent poll
+        const auto followUp = deck.processPendingEof();
+        for (const auto& r : followUp) {
+            QVERIFY(!r.advanced);
+        }
+        QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    }
 }
 
 void TestReferenceDecks::cleanupTestCase()
