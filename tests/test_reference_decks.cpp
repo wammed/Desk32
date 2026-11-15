@@ -142,6 +142,9 @@ private slots:
     void testAutoAdvanceOverflowSlotConcurrentConsistency();
     void testAutoAdvanceRapidEofPauseResumeRace();
     void testAutoAdvanceOverflowRecoveryRaceWithStopAndLock();
+    void testAutoAdvanceMultiProducerOverflowConsistency();
+    void testAutoAdvanceOverflowRecoveryConcurrentStopAndLock();
+    void testAutoAdvanceOverflowContinuousWithControlDelay();
     void cleanupTestCase();
 
 private:
@@ -1980,6 +1983,246 @@ void TestReferenceDecks::testAutoAdvanceOverflowRecoveryRaceWithStopAndLock()
     QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
     QVERIFY(deck.folderSession().sessionId() != oldSessionId);
     QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
+}
+
+void TestReferenceDecks::testAutoAdvanceMultiProducerOverflowConsistency()
+{
+    // AA-19: Multi-producer concurrent writes to recordEofOverflow() + concurrent reader
+    ReferenceDeck deck('A');
+    constexpr int NUM_WRITERS = 4;
+    constexpr int ITERS_PER_WRITER = 200;
+
+    std::atomic<int> readyCount{0};
+    std::atomic<bool> startFlag{false};
+    std::atomic<bool> writersDone{false};
+    std::atomic<int> tornReads{0};
+    std::atomic<int> validReads{0};
+    std::atomic<int> writeSuccesses{0};
+    std::atomic<int64_t> maxWriteDurationUs{0};
+
+    std::vector<std::thread> writers;
+    writers.reserve(NUM_WRITERS);
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        writers.emplace_back([&, w]() {
+            readyCount.fetch_add(1, std::memory_order_acq_rel);
+            while (!startFlag.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < ITERS_PER_WRITER; ++i) {
+                const uint64_t key = static_cast<uint64_t>(w + 1) * 100000ULL + static_cast<uint64_t>(i + 1);
+                EofNotification n;
+                n.playbackGeneration = key;
+                n.decoderRequestId = key * 3ULL;
+                n.folderSessionId = key * 5ULL;
+                n.trackIndex = static_cast<size_t>(key % 1000ULL);
+                n.trackPathHash = key * 7ULL;
+                n.emittedTimestampMs = static_cast<int64_t>(key * 11ULL);
+                n.source = (i % 2 == 0) ? EofSource::AudioRender : EofSource::DecoderWorker;
+
+                const auto t0 = std::chrono::steady_clock::now();
+                const bool ok = deck.recordEofOverflowForTest(n);
+                const auto dtUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                      std::chrono::steady_clock::now() - t0)
+                                      .count();
+                int64_t prevMax = maxWriteDurationUs.load(std::memory_order_relaxed);
+                while (dtUs > prevMax &&
+                       !maxWriteDurationUs.compare_exchange_weak(prevMax, dtUs,
+                                                                 std::memory_order_relaxed)) {
+                }
+                if (ok) {
+                    writeSuccesses.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+
+    std::thread reader([&]() {
+        readyCount.fetch_add(1, std::memory_order_acq_rel);
+        while (!startFlag.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        auto verifyNotif = [&](const EofNotification& out) {
+            const uint64_t key = out.playbackGeneration;
+            const bool ok =
+                (out.decoderRequestId == key * 3ULL) &&
+                (out.folderSessionId == key * 5ULL) &&
+                (out.trackIndex == static_cast<size_t>(key % 1000ULL)) &&
+                (out.trackPathHash == key * 7ULL) &&
+                (out.emittedTimestampMs == static_cast<int64_t>(key * 11ULL));
+            if (!ok) {
+                tornReads.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                validReads.fetch_add(1, std::memory_order_relaxed);
+            }
+        };
+
+        while (!writersDone.load(std::memory_order_acquire)) {
+            EofNotification out;
+            if (deck.tryPopOverflowForTest(out)) {
+                verifyNotif(out);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+        EofNotification out;
+        while (deck.tryPopOverflowForTest(out)) {
+            verifyNotif(out);
+        }
+    });
+
+    while (readyCount.load(std::memory_order_acquire) < NUM_WRITERS + 1) {
+        std::this_thread::yield();
+    }
+    startFlag.store(true, std::memory_order_release);
+
+    for (auto& t : writers) {
+        t.join();
+    }
+    writersDone.store(true, std::memory_order_release);
+    reader.join();
+
+    QCOMPARE(tornReads.load(), 0);
+    QVERIFY(validReads.load() > 0);
+    QCOMPARE(deck.eofQueueOverflowCount(), uint64_t(NUM_WRITERS * ITERS_PER_WRITER));
+    QCOMPARE(writeSuccesses.load() + static_cast<int>(deck.eofOverflowDropCount()),
+             NUM_WRITERS * ITERS_PER_WRITER);
+    // With 4 writers <= 8 overflow slots, no valid notification should be silently dropped
+    QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+    // Bounded RT execution check (each call must complete well within 10ms even under sanitizers)
+    QVERIFY(maxWriteDurationUs.load() < 10000);
+}
+
+void TestReferenceDecks::testAutoAdvanceOverflowRecoveryConcurrentStopAndLock()
+{
+    // AA-20: Concurrent overflow recovery racing with Stop and Deck Lock
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+
+    for (int mode = 0; mode < 2; ++mode) {
+        ReferenceDeck deck('B');
+        QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+        const uint64_t oldSessionId = deck.folderSession().sessionId();
+        deck.play();
+
+        for (size_t i = 0; i < EofNotificationQueue::CAPACITY; ++i) {
+            EofNotification stale;
+            stale.playbackGeneration = 70000 + i;
+            QVERIFY(deck.submitEofNotificationForTest(stale));
+        }
+
+        // Trigger real EOF into overflow bank
+        std::vector<double> outL(512), outR(512);
+        for (int i = 0; i < 20; ++i) {
+            deck.renderBlock(outL.data(), outR.data(), 512);
+        }
+        QVERIFY(deck.eofQueueFullCount() >= 1);
+
+        std::atomic<int> ready{0};
+        std::atomic<bool> go{false};
+        std::vector<AutoAdvanceResult> results;
+
+        std::thread controlRecover([&]() {
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            results = deck.processPendingEof();
+        });
+
+        std::thread stopper([&]() {
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            if (mode == 0) {
+                deck.stop();
+            } else {
+                deck.setLocked(true);
+            }
+        });
+
+        while (ready.load(std::memory_order_acquire) < 2) {
+            std::this_thread::yield();
+        }
+        go.store(true, std::memory_order_release);
+        controlRecover.join();
+        stopper.join();
+
+        int advancedCount = 0;
+        for (const auto& r : results) {
+            if (r.advanced) {
+                ++advancedCount;
+            }
+        }
+        QVERIFY(advancedCount <= 1);
+        QVERIFY(!deck.folderSession().isActive());
+
+        // Start a brand new session and verify old notifications never leak into it
+        if (mode == 1) {
+            deck.setLocked(false);
+        }
+        QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+        QVERIFY(deck.folderSession().sessionId() != oldSessionId);
+        const auto postResults = deck.processPendingEof();
+        for (const auto& r : postResults) {
+            QVERIFY(!r.advanced);
+        }
+        QCOMPARE(deck.folderSession().currentIndex(), size_t(0));
+    }
+}
+
+void TestReferenceDecks::testAutoAdvanceOverflowContinuousWithControlDelay()
+{
+    // AA-21: Continuous overflow while Control Thread is delayed; both queue & overflow bank hold items
+    ReferenceDeck deck('C');
+    std::vector<std::string> files = {
+        "track_01_intro.wav",
+        "track_02_verse.wav",
+        "track_03_chorus.wav"
+    };
+    QVERIFY(deck.startFolderSession(m_testDir.toStdString(), files, 48000.0));
+    deck.play();
+
+    // Control Thread is delayed: saturate all 64 queue slots + 2 stale overflow slots
+    for (size_t i = 0; i < EofNotificationQueue::CAPACITY + 2; ++i) {
+        EofNotification stale;
+        stale.playbackGeneration = 80000 + i;
+        stale.folderSessionId = deck.folderSession().sessionId();
+        stale.trackIndex = 0;
+        (void)deck.submitEofNotificationForTest(stale);
+    }
+
+    // Audio Thread renders through EOF while queue is still full -> lands in overflow bank
+    std::vector<double> outL(512), outR(512);
+    for (int i = 0; i < 20; ++i) {
+        deck.renderBlock(outL.data(), outR.data(), 512);
+    }
+    QVERIFY(deck.eofQueueFullCount() >= 3);
+    QVERIFY(deck.eofQueueOverflowCount() >= 3);
+    QCOMPARE(deck.eofOverflowDropCount(), uint64_t(0));
+
+    // Control Thread wakes up and drains both m_eofQueue and all overflow slots
+    const auto results = deck.processPendingEof();
+    int advancedCount = 0;
+    for (const auto& r : results) {
+        if (r.advanced) {
+            ++advancedCount;
+        }
+    }
+    QCOMPARE(advancedCount, 1);
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
+    QVERIFY(deck.folderSession().currentTrack() != nullptr);
+    QVERIFY(deck.folderSession().currentTrack()->path.find("track_02_verse.wav") != std::string::npos);
+
+    // Subsequent drain must not double-advance
+    const auto followUp = deck.processPendingEof();
+    for (const auto& r : followUp) {
+        QVERIFY(!r.advanced);
+    }
+    QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
 }
 
 void TestReferenceDecks::cleanupTestCase()

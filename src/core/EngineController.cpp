@@ -269,6 +269,9 @@ bool EngineController::initialize(bool offlineMode) {
                     if (d->eofQueueCasContentionCount() > 0) {
                         eofDet.insert(QStringLiteral("eof_queue_cas_contention_count"), static_cast<qint64>(d->eofQueueCasContentionCount()));
                     }
+                    if (d->eofOverflowCasContentionCount() > 0) {
+                        eofDet.insert(QStringLiteral("eof_overflow_cas_contention_count"), static_cast<qint64>(d->eofOverflowCasContentionCount()));
+                    }
                     if (d->eofOverflowDropCount() > 0) {
                         eofDet.insert(QStringLiteral("eof_overflow_drop_count"), static_cast<qint64>(d->eofOverflowDropCount()));
                     }
