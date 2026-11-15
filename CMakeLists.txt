@@ -31,36 +31,25 @@ if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=undefined")
     add_compile_definitions(DESK32_SANITIZE_UNDEFINED)
 endif()
 
-# Embed build version and git commit hash for SessionStart observability
-set(DESK32_GIT_COMMIT "unknown")
-set(DESK32_GIT_DIRTY 0)
-find_package(Git QUIET)
-if(GIT_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE _git_rev
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(_git_rev)
-        set(DESK32_GIT_COMMIT "${_git_rev}")
-    endif()
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} status --porcelain
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE _git_status
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    if(_git_status)
-        set(DESK32_GIT_DIRTY 1)
-    endif()
-endif()
+# Embed build version and auto-updated git commit hash for SessionStart observability
+set(DESK32_GIT_VERSION_HEADER "${CMAKE_BINARY_DIR}/generated/git_version.hpp")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DOUTPUT_FILE=${DESK32_GIT_VERSION_HEADER}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/generate_git_version.cmake"
+)
+add_custom_target(desk32_git_version ALL
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DOUTPUT_FILE=${DESK32_GIT_VERSION_HEADER}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/generate_git_version.cmake"
+    BYPRODUCTS "${DESK32_GIT_VERSION_HEADER}"
+    COMMENT "Checking Git revision for Desk32"
+)
+include_directories("${CMAKE_BINARY_DIR}/generated")
 add_compile_definitions(
     DESK32_APP_VERSION="${PROJECT_VERSION}"
-    DESK32_GIT_COMMIT="${DESK32_GIT_COMMIT}"
-    DESK32_GIT_DIRTY=${DESK32_GIT_DIRTY}
 )
 
 # Find Qt 6 Packages (Compatible with Ubuntu 24.04 LTS Qt 6.4.2+ and rolling Linux)
@@ -167,6 +156,7 @@ target_link_libraries(desk32 PRIVATE
 target_include_directories(desk32 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+add_dependencies(desk32 desk32_git_version)
 
 target_include_directories(desk32 SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}

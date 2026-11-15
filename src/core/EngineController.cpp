@@ -1,4 +1,5 @@
 #include "EngineController.hpp"
+#include "git_version.hpp"
 #include "core/log/LogErrorCodes.hpp"
 #include <QClipboard>
 #include <QFileInfo>

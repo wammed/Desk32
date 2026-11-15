@@ -348,6 +348,7 @@ target_include_directories(test_phase2_dsp SYSTEM PRIVATE
     ${AVUTIL_INCLUDE_DIRS}
 )
 
+add_dependencies(test_phase2_dsp desk32_git_version)
 add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
 
 # Phase 3: External Plugin Host Integration (External Insert & Preset Management)
@@ -394,6 +395,7 @@ target_include_directories(test_phase3_external_insert SYSTEM PRIVATE
     ${AVUTIL_INCLUDE_DIRS}
 )
 
+add_dependencies(test_phase3_external_insert desk32_git_version)
 add_test(NAME test_phase3_external_insert COMMAND test_phase3_external_insert)
 
 # Phase 4: Export and Render Engine (Offline Processing, Bijective Base-26 Serial, Staging & Rollback)
@@ -440,6 +442,7 @@ target_include_directories(test_phase4_export_render SYSTEM PRIVATE
     ${AVUTIL_INCLUDE_DIRS}
 )
 
+add_dependencies(test_phase4_export_render desk32_git_version)
 add_test(NAME test_phase4_export_render COMMAND test_phase4_export_render)
 set_tests_properties(test_phase4_export_render PROPERTIES TIMEOUT 300)
 
