@@ -269,7 +269,7 @@ public:
     Q_INVOKABLE void setInsertDelayCompensation(int frames);
 
     // Phase 3: Common Preset Management (Specification Section 11.1)
-    QStringList listPresets(const QString& category) const;
+    Q_INVOKABLE QStringList listPresets(const QString& category) const;
     Q_INVOKABLE bool savePreset(const QString& category, const QString& presetName, const QVariantMap& data);
     Q_INVOKABLE QVariantMap loadPreset(const QString& category, const QString& presetName);
     Q_INVOKABLE bool deletePreset(const QString& category, const QString& presetName);
