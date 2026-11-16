@@ -72,6 +72,7 @@ class TestUnderrunInvestigation : public QObject {
 private slots:
     void initTestCase();
     void testCandidateADeterministicRace();
+    void testGenuineUnderrunStillDetected();
     void testCandidateBLatencyAndPrefill();
     void testHighFrequencyAutoAdvance600();
     void cleanupTestCase();
@@ -135,35 +136,40 @@ void TestUnderrunInvestigation::testCandidateADeterministicRace() {
     QCOMPARE(results.size(), size_t(1));
     QVERIFY(results[0].advanced);
 
-    // 5. Verify Candidate A reproduced: underrunCount == 1 with exact transition-window snapshot
-    QCOMPARE(deck.worker().underrunCount(), uint64_t(1));
-
+    // 5. Verify Candidate A race is eliminated: underrunCount == 0 and no false snapshot
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
     UnderrunSnapshot snap{};
-    QVERIFY(deck.worker().popUnderrunSnapshot(snap));
-    qInfo() << "[Candidate A Deterministic]"
-            << "openPhase=" << snap.openPhase
-            << "isOpenEntry=" << snap.isOpenAtEntry
-            << "isPlayingEntry=" << snap.isPlayingAtEntry
-            << "isEofCheck=" << snap.isEofAtCheck
-            << "ringAvail=" << snap.ringAvailBeforeRead
-            << "reqFrames=" << snap.requestedFrames
-            << "readFrames=" << snap.readFrames
-            << "reqId=" << snap.requestId
-            << "activeReqId=" << snap.activeRequestId;
+    QVERIFY(!deck.worker().popUnderrunSnapshot(snap));
 
-    QCOMPARE(snap.openPhase, static_cast<uint8_t>(OpenTransitionPhase::AfterEofClearedBeforePlayCleared));
-    QVERIFY(snap.isOpenAtEntry);
-    QVERIFY(snap.isPlayingAtEntry);
-    QVERIFY(!snap.isEofAtCheck);
-    QCOMPARE(snap.ringAvailBeforeRead, uint64_t(0));
-    QCOMPARE(snap.readFrames, uint64_t(0));
-
-    // 6. Verify subsequent normal playback after Open completes produces ZERO additional underruns
+    // 6. Verify subsequent normal playback after Open completes produces ZERO underruns
     for (int i = 0; i < 10; ++i) {
         deck.renderBlock(outL.data(), outR.data(), 1024);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    QCOMPARE(deck.worker().underrunCount(), uint64_t(1));
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    deck.stop();
+}
+
+void TestUnderrunInvestigation::testGenuineUnderrunStillDetected() {
+    // Verify genuine underrun during active playback (post-Open, non-EOF) is still detected
+    ReferenceDeck deck('A');
+    const std::string longWav = (m_tempDir.path() + "/track_long_44k.wav").toStdString();
+    QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+    QVERIFY(deck.loadTrack(longWav, 48000.0));
+    deck.play();
+
+    // Drain ring buffer completely in a single large read while track is active and not EOF
+    std::vector<double> outL(262144, 0.0), outR(262144, 0.0);
+    const size_t read = deck.worker().readAudioBlock(outL.data(), outR.data(), 262144);
+    QVERIFY(read < 262144);
+    QVERIFY(!deck.worker().isEof());
+    QVERIFY(deck.worker().underrunCount() >= 1);
+
+    UnderrunSnapshot snap{};
+    QVERIFY(deck.worker().popUnderrunSnapshot(snap));
+    QVERIFY(snap.isOpenAtEntry);
+    QVERIFY(snap.isPlayingAtEntry);
+    QVERIFY(!snap.isEofAtCheck);
     deck.stop();
 }
 

@@ -472,9 +472,11 @@ void DecoderWorker::configureGraphRate(double graphSampleRate) noexcept {
 
 size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
                                      size_t frames) noexcept {
+  const uint64_t transSeqEntry =
+      m_stateTransitionSeq.load(std::memory_order_acquire);
   const bool openAtEntry = m_isOpen.load(std::memory_order_acquire);
   const bool playingAtEntry = m_isPlaying.load(std::memory_order_acquire);
-  if (!openAtEntry || !playingAtEntry) {
+  if ((transSeqEntry & 1ULL) != 0ULL || !openAtEntry || !playingAtEntry) {
     std::fill_n(outLeft, frames, 0.0);
     std::fill_n(outRight, frames, 0.0);
     return 0;
@@ -487,6 +489,11 @@ size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
     // Buffer underrun or EOF
     std::fill_n(outLeft + read, frames - read, 0.0);
     std::fill_n(outRight + read, frames - read, 0.0);
+
+    if (m_stateTransitionSeq.load(std::memory_order_acquire) != transSeqEntry) {
+      // Open state transition started while readAudioBlock() was in flight (TOCTOU guard).
+      return read;
+    }
 
     const bool eofAtCheck = m_isEof.load(std::memory_order_acquire);
     if (eofAtCheck && m_ringBuffer.availableRead() == 0) {
@@ -689,6 +696,12 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::StateCommitStart),
                             std::memory_order_release);
           m_workerOpenTelem.stateCommitStartNs = steadyNowNs();
+          m_stateTransitionSeq.fetch_add(1, std::memory_order_acq_rel);
+
+          m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
+          m_isPlaying.store(false, std::memory_order_release);
+          m_workerOpenTelem.playingAfter = false;
+          m_workerOpenTelem.playingClearedNs = steadyNowNs();
 
           m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
           m_workerOpenTelem.ringResetNs = steadyNowNs();
@@ -729,17 +742,13 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_graphRate.store(cmd.graphRate, std::memory_order_release);
           m_playhead.store(0, std::memory_order_release);
           m_isOpen.store(true, std::memory_order_release);
-
-          m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
-          m_isPlaying.store(false, std::memory_order_release);
-          m_workerOpenTelem.playingAfter = false;
-          m_workerOpenTelem.playingClearedNs = steadyNowNs();
           m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::AfterPlayCleared),
                             std::memory_order_release);
 
           m_committedRequestId.store(cmd.requestId, std::memory_order_release);
           m_lastOpenStatus.store(OpenStatus::Success,
                                  std::memory_order_release);
+          m_stateTransitionSeq.fetch_add(1, std::memory_order_release);
           m_workerOpenTelem.stateCommitEndNs = steadyNowNs();
           committed = true;
         }
@@ -865,6 +874,12 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::StateCommitStart),
                           std::memory_order_release);
         m_workerOpenTelem.stateCommitStartNs = steadyNowNs();
+        m_stateTransitionSeq.fetch_add(1, std::memory_order_acq_rel);
+
+        m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
+        m_isPlaying.store(false, std::memory_order_release);
+        m_workerOpenTelem.playingAfter = false;
+        m_workerOpenTelem.playingClearedNs = steadyNowNs();
 
         m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
         m_workerOpenTelem.ringResetNs = steadyNowNs();
@@ -900,16 +915,12 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_graphRate.store(cmd.graphRate, std::memory_order_release);
         m_playhead.store(0, std::memory_order_release);
         m_isOpen.store(true, std::memory_order_release);
-
-        m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
-        m_isPlaying.store(false, std::memory_order_release);
-        m_workerOpenTelem.playingAfter = false;
-        m_workerOpenTelem.playingClearedNs = steadyNowNs();
         m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::AfterPlayCleared),
                           std::memory_order_release);
 
         m_committedRequestId.store(cmd.requestId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::Success, std::memory_order_release);
+        m_stateTransitionSeq.fetch_add(1, std::memory_order_release);
         m_workerOpenTelem.stateCommitEndNs = steadyNowNs();
         committed = true;
       }

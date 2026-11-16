@@ -287,6 +287,7 @@ private:
     void publishDecodePerf(const DecodePerfStats& stats) noexcept;
 
     std::atomic<uint8_t> m_openPhase{static_cast<uint8_t>(OpenTransitionPhase::Idle)};
+    std::atomic<uint64_t> m_stateTransitionSeq{0};
     std::atomic<uint64_t> m_openSeqCounter{0};
     std::atomic<int64_t> m_lastPlayRequestedNs{0};
     std::atomic<uint64_t> m_lastPlayRequestId{0};
