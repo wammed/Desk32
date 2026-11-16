@@ -1,6 +1,7 @@
 #include "FFmpegAudioDecoder.hpp"
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -294,7 +295,17 @@ bool FFmpegAudioDecoder::decodeNextPacket()
 
         if (ret == AVERROR(EAGAIN)) {
             // Need to feed more packets to decoder
+            const auto tReadStart = std::chrono::steady_clock::now();
             int readRet = av_read_frame(m_formatCtx, m_packet);
+            const auto tReadEnd = std::chrono::steady_clock::now();
+            const uint64_t readNs = static_cast<uint64_t>(std::max<int64_t>(
+                0, std::chrono::duration_cast<std::chrono::nanoseconds>(tReadEnd - tReadStart).count()));
+            m_lastReadPacketNs = readNs;
+            if (readNs > m_maxReadPacketNs) {
+                m_maxReadPacketNs = readNs;
+            }
+            m_totalReadPacketNs += readNs;
+
             if (readRet < 0) {
                 // Flush decoder on EOF
                 avcodec_send_packet(m_codecCtx, nullptr);

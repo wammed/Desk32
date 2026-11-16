@@ -57,6 +57,8 @@ struct WorkerCommand {
     uint64_t requestId = 0;
     uint64_t targetRequestId = 0; // Generation/target Request ID for CloseTrack (P0-26)
     bool isSynthetic = false;
+    int64_t requestedNs = 0;
+    int64_t notifiedNs = 0;
     std::shared_ptr<std::promise<bool>> openPromise;
 };
 
@@ -70,6 +72,80 @@ struct SeekResult {
     int32_t errorCode = 0;
     std::string stage;
     std::string errorMessage;
+};
+
+enum class OpenTransitionPhase : uint8_t {
+    Idle = 0,
+    OpenQueued = 1,
+    DecoderOpening = 2,
+    StateCommitStart = 3,
+    AfterEofClearedBeforePlayCleared = 4,
+    AfterPlayCleared = 5,
+    Prefilling = 6,
+    OpenComplete = 7
+};
+
+struct OpenTransitionSnapshot {
+    uint64_t openSeq = 0;
+    uint64_t requestId = 0;
+    int64_t openRequestedNs = 0;
+    int64_t cmdNotifiedNs = 0;
+    int64_t workerWokeNs = 0;
+    int64_t openProcessStartNs = 0;
+    int64_t decoderOpenStartNs = 0;
+    int64_t decoderOpenEndNs = 0;
+    int64_t stateCommitStartNs = 0;
+    int64_t ringResetNs = 0;
+    int64_t eofClearedNs = 0;
+    int64_t resamplerConfigStartNs = 0;
+    int64_t resamplerConfigEndNs = 0;
+    int64_t playingClearedNs = 0;
+    int64_t stateCommitEndNs = 0;
+    int64_t prefillStartNs = 0;
+    int64_t firstPcmSupplyNs = 0;
+    int64_t prefillEndNs = 0;
+    int64_t openCompleteNs = 0;
+    int64_t playRequestedNs = 0;
+    uint64_t prefillInputFrames = 0;
+    uint64_t prefillRingAvailAfter = 0;
+    bool eofBefore = false;
+    bool eofAfter = false;
+    bool playingBefore = false;
+    bool playingAfter = false;
+    bool valid = false;
+};
+
+struct UnderrunSnapshot {
+    int64_t steadyNs = 0;
+    uint64_t underrunTotal = 0;
+    uint64_t requestId = 0;
+    uint64_t activeRequestId = 0;
+    uint64_t openSeq = 0;
+    uint64_t eofEpoch = 0;
+    uint64_t ringCapacityFrames = 0;
+    uint64_t ringAvailBeforeRead = 0;
+    uint64_t requestedFrames = 0;
+    uint64_t readFrames = 0;
+    uint8_t openPhase = 0;
+    bool isOpenAtEntry = false;
+    bool isPlayingAtEntry = false;
+    bool isEofAtCheck = false;
+    bool isOpenAtUnderrun = false;
+    bool isPlayingAtUnderrun = false;
+};
+
+struct DecodePerfStats {
+    uint64_t lastChunkTotalNs = 0;
+    uint64_t maxChunkTotalNs = 0;
+    uint64_t lastReadFramesNs = 0;
+    uint64_t maxReadFramesNs = 0;
+    uint64_t lastFileReadPacketNs = 0;
+    uint64_t maxFileReadPacketNs = 0;
+    uint64_t lastResampleNs = 0;
+    uint64_t maxResampleNs = 0;
+    uint64_t lastWorkerIterIntervalNs = 0;
+    uint64_t maxWorkerIterIntervalNs = 0;
+    uint64_t totalChunksDecoded = 0;
 };
 
 /// Dedicated Background Decoder Worker for ReferenceDeck.
@@ -115,6 +191,21 @@ public:
     void setPreCommitHook(std::function<void(uint64_t)> hook) {
         std::lock_guard<std::mutex> lock(m_trackMutex);
         m_preCommitHook = std::move(hook);
+    }
+
+#ifdef DESK32_ENABLE_TEST_HOOKS
+    void setInTransitionHook(std::function<void(uint64_t)> hook) {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        m_inTransitionHook = std::move(hook);
+    }
+#endif
+
+    // Lock-free / Seqlock instrumentation readers (Control Thread / Tests)
+    [[nodiscard]] OpenTransitionSnapshot readOpenTransitionSnapshot() const noexcept;
+    [[nodiscard]] DecodePerfStats readDecodePerfStats() const noexcept;
+    bool popUnderrunSnapshot(UnderrunSnapshot& out) noexcept;
+    [[nodiscard]] uint64_t underrunSnapshotDropCount() const noexcept {
+        return m_underrunSnapshotDropCount.load(std::memory_order_relaxed);
     }
 
     void setOpenTimeoutMs(uint32_t timeoutMs) noexcept {
@@ -186,6 +277,79 @@ private:
     std::condition_variable m_cmdCv;
     std::vector<WorkerCommand> m_pendingCommands;
     std::function<void(uint64_t)> m_preCommitHook;
+#ifdef DESK32_ENABLE_TEST_HOOKS
+    std::function<void(uint64_t)> m_inTransitionHook;
+#endif
+
+    // Instrumentation state (RT-safe: SPSC ring for Audio->Control, Seqlock for Worker->Control)
+    static int64_t steadyNowNs() noexcept;
+    void publishOpenTransition(const OpenTransitionSnapshot& snap) noexcept;
+    void publishDecodePerf(const DecodePerfStats& stats) noexcept;
+
+    std::atomic<uint8_t> m_openPhase{static_cast<uint8_t>(OpenTransitionPhase::Idle)};
+    std::atomic<uint64_t> m_openSeqCounter{0};
+    std::atomic<int64_t> m_lastPlayRequestedNs{0};
+    std::atomic<uint64_t> m_lastPlayRequestId{0};
+    std::atomic<int64_t> m_lastCmdNotifiedNs{0};
+
+    // Seqlock for OpenTransitionSnapshot (single writer: DecoderWorker thread, TSan-clean atomic fields)
+    struct AtomicOpenTransitionSlot {
+        std::atomic<uint64_t> openSeq{0};
+        std::atomic<uint64_t> requestId{0};
+        std::atomic<int64_t> openRequestedNs{0};
+        std::atomic<int64_t> cmdNotifiedNs{0};
+        std::atomic<int64_t> workerWokeNs{0};
+        std::atomic<int64_t> openProcessStartNs{0};
+        std::atomic<int64_t> decoderOpenStartNs{0};
+        std::atomic<int64_t> decoderOpenEndNs{0};
+        std::atomic<int64_t> stateCommitStartNs{0};
+        std::atomic<int64_t> ringResetNs{0};
+        std::atomic<int64_t> eofClearedNs{0};
+        std::atomic<int64_t> resamplerConfigStartNs{0};
+        std::atomic<int64_t> resamplerConfigEndNs{0};
+        std::atomic<int64_t> playingClearedNs{0};
+        std::atomic<int64_t> stateCommitEndNs{0};
+        std::atomic<int64_t> prefillStartNs{0};
+        std::atomic<int64_t> firstPcmSupplyNs{0};
+        std::atomic<int64_t> prefillEndNs{0};
+        std::atomic<int64_t> openCompleteNs{0};
+        std::atomic<uint64_t> prefillInputFrames{0};
+        std::atomic<uint64_t> prefillRingAvailAfter{0};
+        std::atomic<bool> eofBefore{false};
+        std::atomic<bool> eofAfter{false};
+        std::atomic<bool> playingBefore{false};
+        std::atomic<bool> playingAfter{false};
+        std::atomic<bool> valid{false};
+    };
+    alignas(64) mutable std::atomic<uint64_t> m_openTelemSeq{0};
+    AtomicOpenTransitionSlot m_openTelemData{};
+    OpenTransitionSnapshot m_workerOpenTelem{};
+
+    // Seqlock for DecodePerfStats (single writer: DecoderWorker thread, TSan-clean atomic fields)
+    struct AtomicDecodePerfSlot {
+        std::atomic<uint64_t> lastChunkTotalNs{0};
+        std::atomic<uint64_t> maxChunkTotalNs{0};
+        std::atomic<uint64_t> lastReadFramesNs{0};
+        std::atomic<uint64_t> maxReadFramesNs{0};
+        std::atomic<uint64_t> lastFileReadPacketNs{0};
+        std::atomic<uint64_t> maxFileReadPacketNs{0};
+        std::atomic<uint64_t> lastResampleNs{0};
+        std::atomic<uint64_t> maxResampleNs{0};
+        std::atomic<uint64_t> lastWorkerIterIntervalNs{0};
+        std::atomic<uint64_t> maxWorkerIterIntervalNs{0};
+        std::atomic<uint64_t> totalChunksDecoded{0};
+    };
+    alignas(64) mutable std::atomic<uint64_t> m_perfSeq{0};
+    AtomicDecodePerfSlot m_perfData{};
+    DecodePerfStats m_workerPerf{};
+    int64_t m_lastWorkerIterNs = 0;
+
+    // Lock-free SPSC ring buffer for UnderrunSnapshot (single producer: Audio Thread, single consumer: Control Thread)
+    static constexpr size_t UNDERRUN_RING_SIZE = 32;
+    alignas(64) std::array<UnderrunSnapshot, UNDERRUN_RING_SIZE> m_underrunRing{};
+    alignas(64) std::atomic<uint64_t> m_underrunWriteIdx{0};
+    alignas(64) std::atomic<uint64_t> m_underrunReadIdx{0};
+    std::atomic<uint64_t> m_underrunSnapshotDropCount{0};
 
     // Worker thread local resources (NOT touched by Audio Thread)
     std::unique_ptr<FFmpegAudioDecoder> m_decoder;

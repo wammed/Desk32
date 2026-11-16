@@ -42,6 +42,13 @@ struct StreamDiagnostics {
     uint64_t totalFramesProcessed = 0;
     bool isDirectMode = false;
     DirectModeStatus directModeStatus = DirectModeStatus::Unknown;
+    uint64_t lastCallbackDurationNs = 0;
+    uint64_t maxCallbackDurationNs = 0;
+    uint64_t lastCallbackIntervalNs = 0;
+    uint64_t expectedPeriodNs = 0;
+    int64_t lastSchedJitterNs = 0;
+    uint64_t maxAbsSchedJitterNs = 0;
+    uint64_t callbackCount = 0;
 };
 
 /// Native low-latency stereo PCM audio output powered by PipeWire (pw_stream / SPA)
@@ -111,6 +118,14 @@ private:
     std::atomic<uint32_t> m_negotiatedQuantum{0};
     std::atomic<bool> m_isDirectMode{false};
     std::atomic<DirectModeStatus> m_directModeStatus{DirectModeStatus::Unknown};
+    std::atomic<uint64_t> m_lastCallbackDurationNs{0};
+    std::atomic<uint64_t> m_maxCallbackDurationNs{0};
+    std::atomic<uint64_t> m_lastCallbackIntervalNs{0};
+    std::atomic<uint64_t> m_expectedPeriodNs{0};
+    std::atomic<int64_t> m_lastSchedJitterNs{0};
+    std::atomic<uint64_t> m_maxAbsSchedJitterNs{0};
+    std::atomic<uint64_t> m_callbackCount{0};
+    int64_t m_prevCallbackStartNs = 0;
     bool m_offlineSimulation = false;
 
     mutable std::mutex m_deviceMutex;

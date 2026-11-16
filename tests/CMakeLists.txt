@@ -446,6 +446,45 @@ add_dependencies(test_phase4_export_render desk32_git_version)
 add_test(NAME test_phase4_export_render COMMAND test_phase4_export_render)
 set_tests_properties(test_phase4_export_render PROPERTIES TIMEOUT 300)
 
+# Decoder Ring-Buffer Underrun (Error Code 1020) Investigation & Reproducibility Tests
+add_executable(test_underrun_investigation
+    test_underrun_investigation.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_compile_definitions(test_underrun_investigation PRIVATE
+    DESK32_ENABLE_TEST_HOOKS
+)
+
+target_link_libraries(test_underrun_investigation PRIVATE
+    Qt6::Core
+    Qt6::Test
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+)
+
+target_include_directories(test_underrun_investigation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_underrun_investigation SYSTEM PRIVATE
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+)
+
+add_test(NAME test_underrun_investigation COMMAND test_underrun_investigation)
+set_tests_properties(test_underrun_investigation PROPERTIES TIMEOUT 300)
+
 
 
 

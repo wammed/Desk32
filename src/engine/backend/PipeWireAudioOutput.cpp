@@ -4,6 +4,8 @@
 #include <spa/param/audio/raw.h>
 #include <spa/debug/types.h>
 #include <spa/utils/result.h>
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 
@@ -235,6 +237,13 @@ StreamDiagnostics PipeWireAudioOutput::diagnostics() const noexcept
     diag.totalFramesProcessed = m_totalFramesProcessed.load(std::memory_order_relaxed);
     diag.isDirectMode = m_isDirectMode.load(std::memory_order_relaxed);
     diag.directModeStatus = m_directModeStatus.load(std::memory_order_relaxed);
+    diag.lastCallbackDurationNs = m_lastCallbackDurationNs.load(std::memory_order_relaxed);
+    diag.maxCallbackDurationNs = m_maxCallbackDurationNs.load(std::memory_order_relaxed);
+    diag.lastCallbackIntervalNs = m_lastCallbackIntervalNs.load(std::memory_order_relaxed);
+    diag.expectedPeriodNs = m_expectedPeriodNs.load(std::memory_order_relaxed);
+    diag.lastSchedJitterNs = m_lastSchedJitterNs.load(std::memory_order_relaxed);
+    diag.maxAbsSchedJitterNs = m_maxAbsSchedJitterNs.load(std::memory_order_relaxed);
+    diag.callbackCount = m_callbackCount.load(std::memory_order_relaxed);
     return diag;
 }
 
@@ -317,7 +326,10 @@ void PipeWireAudioOutput::onStreamParamChanged(void* data, uint32_t id, const st
 
 void PipeWireAudioOutput::onStreamProcess(void* data)
 {
+    const auto cbStart = std::chrono::steady_clock::now();
+    const int64_t cbStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(cbStart.time_since_epoch()).count();
     auto* self = static_cast<PipeWireAudioOutput*>(data);
+
     struct pw_buffer* pwBuf = pw_stream_dequeue_buffer(self->m_stream);
     if (!pwBuf) {
         self->m_xrunCount.fetch_add(1, std::memory_order_relaxed);
@@ -338,6 +350,22 @@ void PipeWireAudioOutput::onStreamProcess(void* data)
     }
     const uint32_t nFrames = std::min(maxFrames, reqFrames);
 
+    const uint32_t rate = (self->m_requestedSampleRate > 0) ? self->m_requestedSampleRate : 48000;
+    const uint64_t expectedNs = (static_cast<uint64_t>(nFrames) * 1000000000ULL) / static_cast<uint64_t>(rate);
+    self->m_expectedPeriodNs.store(expectedNs, std::memory_order_relaxed);
+    if (self->m_prevCallbackStartNs > 0 && cbStartNs >= self->m_prevCallbackStartNs) {
+        const uint64_t intervalNs = static_cast<uint64_t>(cbStartNs - self->m_prevCallbackStartNs);
+        self->m_lastCallbackIntervalNs.store(intervalNs, std::memory_order_relaxed);
+        const int64_t jitterNs = static_cast<int64_t>(intervalNs) - static_cast<int64_t>(expectedNs);
+        self->m_lastSchedJitterNs.store(jitterNs, std::memory_order_relaxed);
+        const uint64_t absJitter = static_cast<uint64_t>(jitterNs < 0 ? -jitterNs : jitterNs);
+        const uint64_t prevMaxJitter = self->m_maxAbsSchedJitterNs.load(std::memory_order_relaxed);
+        if (absJitter > prevMaxJitter) {
+            self->m_maxAbsSchedJitterNs.store(absJitter, std::memory_order_relaxed);
+        }
+    }
+    self->m_prevCallbackStartNs = cbStartNs;
+
     if (self->m_callback) {
         self->m_callback(dst, nFrames);
     } else {
@@ -349,7 +377,17 @@ void PipeWireAudioOutput::onStreamProcess(void* data)
     spaBuf->datas[0].chunk->size = nFrames * static_cast<uint32_t>(sizeof(float) * 2);
 
     self->m_totalFramesProcessed.fetch_add(nFrames, std::memory_order_relaxed);
+    self->m_callbackCount.fetch_add(1, std::memory_order_relaxed);
     pw_stream_queue_buffer(self->m_stream, pwBuf);
+
+    const auto cbEnd = std::chrono::steady_clock::now();
+    const uint64_t durNs = static_cast<uint64_t>(std::max<int64_t>(
+        0, std::chrono::duration_cast<std::chrono::nanoseconds>(cbEnd - cbStart).count()));
+    self->m_lastCallbackDurationNs.store(durNs, std::memory_order_relaxed);
+    const uint64_t prevMaxDur = self->m_maxCallbackDurationNs.load(std::memory_order_relaxed);
+    if (durNs > prevMaxDur) {
+        self->m_maxCallbackDurationNs.store(durNs, std::memory_order_relaxed);
+    }
 }
 
 } // namespace desk32::engine::backend

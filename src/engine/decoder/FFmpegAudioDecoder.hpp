@@ -35,6 +35,16 @@ public:
     [[nodiscard]] int64_t currentFrame() const noexcept override { return m_currentFrame; }
     [[nodiscard]] int64_t lastSeekActualFrame() const noexcept override { return m_seekActualFrame; }
 
+    // Instrumentation (read-only timing stats for av_read_frame)
+    [[nodiscard]] uint64_t lastReadPacketNs() const noexcept { return m_lastReadPacketNs; }
+    [[nodiscard]] uint64_t maxReadPacketNs() const noexcept { return m_maxReadPacketNs; }
+    [[nodiscard]] uint64_t totalReadPacketNs() const noexcept { return m_totalReadPacketNs; }
+    void resetReadPacketStats() noexcept {
+        m_lastReadPacketNs = 0;
+        m_maxReadPacketNs = 0;
+        m_totalReadPacketNs = 0;
+    }
+
 private:
     void cleanup();
     bool decodeNextPacket();
@@ -64,6 +74,10 @@ private:
     alignas(64) std::array<double, FIFO_CAPACITY> m_fifoR{};
     size_t m_fifoReadPos = 0;
     size_t m_fifoWritePos = 0;
+
+    uint64_t m_lastReadPacketNs = 0;
+    uint64_t m_maxReadPacketNs = 0;
+    uint64_t m_totalReadPacketNs = 0;
 };
 
 } // namespace desk32::engine::decoder

@@ -326,6 +326,43 @@ bool EngineController::initialize(bool offlineMode) {
                     det.insert(QStringLiteral("transition_complete_timestamp"), static_cast<qint64>(res.transitionCompleteTimestampMs));
                     det.insert(QStringLiteral("result"), QStringLiteral("success"));
                     det.insert(QStringLiteral("failure_reason"), QString());
+
+                    const auto openSnap = d->worker().readOpenTransitionSnapshot();
+                    if (openSnap.valid) {
+                        QJsonObject ot;
+                        ot.insert(QStringLiteral("open_seq"), static_cast<qint64>(openSnap.openSeq));
+                        ot.insert(QStringLiteral("request_id"), static_cast<qint64>(openSnap.requestId));
+                        ot.insert(QStringLiteral("open_wait_ms"),
+                                  openSnap.openRequestedNs > 0 && openSnap.openProcessStartNs >= openSnap.openRequestedNs
+                                      ? static_cast<double>(openSnap.openProcessStartNs - openSnap.openRequestedNs) / 1e6
+                                      : 0.0);
+                        ot.insert(QStringLiteral("worker_wake_delay_ms"),
+                                  openSnap.cmdNotifiedNs > 0 && openSnap.workerWokeNs >= openSnap.cmdNotifiedNs
+                                      ? static_cast<double>(openSnap.workerWokeNs - openSnap.cmdNotifiedNs) / 1e6
+                                      : 0.0);
+                        ot.insert(QStringLiteral("decoder_open_ms"),
+                                  static_cast<double>(std::max<int64_t>(0, openSnap.decoderOpenEndNs - openSnap.decoderOpenStartNs)) / 1e6);
+                        ot.insert(QStringLiteral("eof_to_play_cleared_ms"),
+                                  static_cast<double>(std::max<int64_t>(0, openSnap.playingClearedNs - openSnap.eofClearedNs)) / 1e6);
+                        ot.insert(QStringLiteral("resampler_config_ms"),
+                                  static_cast<double>(std::max<int64_t>(0, openSnap.resamplerConfigEndNs - openSnap.resamplerConfigStartNs)) / 1e6);
+                        ot.insert(QStringLiteral("prefill_ms"),
+                                  static_cast<double>(std::max<int64_t>(0, openSnap.prefillEndNs - openSnap.prefillStartNs)) / 1e6);
+                        ot.insert(QStringLiteral("first_pcm_ms"),
+                                  openSnap.openRequestedNs > 0 && openSnap.firstPcmSupplyNs >= openSnap.openRequestedNs
+                                      ? static_cast<double>(openSnap.firstPcmSupplyNs - openSnap.openRequestedNs) / 1e6
+                                      : 0.0);
+                        ot.insert(QStringLiteral("total_open_ms"),
+                                  openSnap.openRequestedNs > 0 && openSnap.openCompleteNs >= openSnap.openRequestedNs
+                                      ? static_cast<double>(openSnap.openCompleteNs - openSnap.openRequestedNs) / 1e6
+                                      : 0.0);
+                        ot.insert(QStringLiteral("prefill_input_frames"), static_cast<qint64>(openSnap.prefillInputFrames));
+                        ot.insert(QStringLiteral("prefill_ring_frames"), static_cast<qint64>(openSnap.prefillRingAvailAfter));
+                        ot.insert(QStringLiteral("eof_before"), openSnap.eofBefore);
+                        ot.insert(QStringLiteral("playing_before"), openSnap.playingBefore);
+                        det.insert(QStringLiteral("open_transition"), ot);
+                    }
+
                     log::LogService::instance().log(
                         QStringLiteral("FolderSession"),
                         QStringLiteral("AutoAdvance"),
@@ -592,7 +629,7 @@ void EngineController::checkAudioHealthAndGraph() {
     if (m_deckManager) {
         const std::array<char, 4> deckIds{'A', 'B', 'C', 'D'};
         for (size_t i = 0; i < deckIds.size(); ++i) {
-            const auto* d = m_deckManager->deck(deckIds[i]);
+            auto* d = m_deckManager->deck(deckIds[i]);
             if (!d) continue;
             const uint64_t curUnderruns = d->worker().underrunCount();
             if (curUnderruns > m_lastDeckUnderruns[i]) {
@@ -604,6 +641,74 @@ void EngineController::checkAudioHealthAndGraph() {
                 det.insert(QStringLiteral("underrun_delta"), static_cast<qint64>(delta));
                 det.insert(QStringLiteral("underrun_total"), static_cast<qint64>(curUnderruns));
                 det.insert(QStringLiteral("path"), QString::fromStdString(d->trackInfo().path));
+                det.insert(QStringLiteral("session_id"), log::LogService::instance().sessionId());
+
+                QJsonArray snapArr;
+                engine::decoder::UnderrunSnapshot uSnap{};
+                while (d->worker().popUnderrunSnapshot(uSnap)) {
+                    QJsonObject sObj;
+                    sObj.insert(QStringLiteral("steady_ns"), static_cast<qint64>(uSnap.steadyNs));
+                    sObj.insert(QStringLiteral("underrun_total"), static_cast<qint64>(uSnap.underrunTotal));
+                    sObj.insert(QStringLiteral("request_id"), static_cast<qint64>(uSnap.requestId));
+                    sObj.insert(QStringLiteral("active_request_id"), static_cast<qint64>(uSnap.activeRequestId));
+                    sObj.insert(QStringLiteral("open_seq"), static_cast<qint64>(uSnap.openSeq));
+                    sObj.insert(QStringLiteral("eof_epoch"), static_cast<qint64>(uSnap.eofEpoch));
+                    sObj.insert(QStringLiteral("open_phase"), static_cast<int>(uSnap.openPhase));
+                    sObj.insert(QStringLiteral("is_open_entry"), uSnap.isOpenAtEntry);
+                    sObj.insert(QStringLiteral("is_playing_entry"), uSnap.isPlayingAtEntry);
+                    sObj.insert(QStringLiteral("is_eof_check"), uSnap.isEofAtCheck);
+                    sObj.insert(QStringLiteral("is_open_underrun"), uSnap.isOpenAtUnderrun);
+                    sObj.insert(QStringLiteral("is_playing_underrun"), uSnap.isPlayingAtUnderrun);
+                    sObj.insert(QStringLiteral("ring_capacity_frames"), static_cast<qint64>(uSnap.ringCapacityFrames));
+                    sObj.insert(QStringLiteral("ring_avail_frames"), static_cast<qint64>(uSnap.ringAvailBeforeRead));
+                    const double gRate = (m_lastGraphSampleRate > 0.0) ? m_lastGraphSampleRate : 48000.0;
+                    sObj.insert(QStringLiteral("ring_avail_ms"),
+                                (static_cast<double>(uSnap.ringAvailBeforeRead) * 1000.0) / gRate);
+                    sObj.insert(QStringLiteral("requested_frames"), static_cast<qint64>(uSnap.requestedFrames));
+                    sObj.insert(QStringLiteral("read_frames"), static_cast<qint64>(uSnap.readFrames));
+                    snapArr.append(sObj);
+                }
+                det.insert(QStringLiteral("underrun_snapshots"), snapArr);
+                det.insert(QStringLiteral("snapshot_dropped"),
+                           static_cast<qint64>(d->worker().underrunSnapshotDropCount()));
+
+                const auto openSnap = d->worker().readOpenTransitionSnapshot();
+                if (openSnap.valid) {
+                    QJsonObject ot;
+                    ot.insert(QStringLiteral("open_seq"), static_cast<qint64>(openSnap.openSeq));
+                    ot.insert(QStringLiteral("request_id"), static_cast<qint64>(openSnap.requestId));
+                    ot.insert(QStringLiteral("open_requested_ns"), static_cast<qint64>(openSnap.openRequestedNs));
+                    ot.insert(QStringLiteral("eof_cleared_ns"), static_cast<qint64>(openSnap.eofClearedNs));
+                    ot.insert(QStringLiteral("playing_cleared_ns"), static_cast<qint64>(openSnap.playingClearedNs));
+                    ot.insert(QStringLiteral("eof_to_play_cleared_ms"),
+                              static_cast<double>(std::max<int64_t>(0, openSnap.playingClearedNs - openSnap.eofClearedNs)) / 1e6);
+                    ot.insert(QStringLiteral("open_complete_ns"), static_cast<qint64>(openSnap.openCompleteNs));
+                    ot.insert(QStringLiteral("play_requested_ns"), static_cast<qint64>(openSnap.playRequestedNs));
+                    ot.insert(QStringLiteral("prefill_ring_frames"), static_cast<qint64>(openSnap.prefillRingAvailAfter));
+                    det.insert(QStringLiteral("last_open_transition"), ot);
+                }
+
+                const auto perf = d->worker().readDecodePerfStats();
+                QJsonObject pf;
+                pf.insert(QStringLiteral("max_chunk_total_ms"), static_cast<double>(perf.maxChunkTotalNs) / 1e6);
+                pf.insert(QStringLiteral("max_read_frames_ms"), static_cast<double>(perf.maxReadFramesNs) / 1e6);
+                pf.insert(QStringLiteral("max_file_read_packet_ms"), static_cast<double>(perf.maxFileReadPacketNs) / 1e6);
+                pf.insert(QStringLiteral("max_resample_ms"), static_cast<double>(perf.maxResampleNs) / 1e6);
+                pf.insert(QStringLiteral("max_worker_iter_interval_ms"), static_cast<double>(perf.maxWorkerIterIntervalNs) / 1e6);
+                pf.insert(QStringLiteral("total_chunks_decoded"), static_cast<qint64>(perf.totalChunksDecoded));
+                det.insert(QStringLiteral("decoder_perf"), pf);
+
+                if (m_audioOutput) {
+                    const auto diag = m_audioOutput->diagnostics();
+                    QJsonObject cb;
+                    cb.insert(QStringLiteral("expected_period_ms"), static_cast<double>(diag.expectedPeriodNs) / 1e6);
+                    cb.insert(QStringLiteral("last_cb_duration_ms"), static_cast<double>(diag.lastCallbackDurationNs) / 1e6);
+                    cb.insert(QStringLiteral("max_cb_duration_ms"), static_cast<double>(diag.maxCallbackDurationNs) / 1e6);
+                    cb.insert(QStringLiteral("last_sched_jitter_ms"), static_cast<double>(diag.lastSchedJitterNs) / 1e6);
+                    cb.insert(QStringLiteral("max_abs_sched_jitter_ms"), static_cast<double>(diag.maxAbsSchedJitterNs) / 1e6);
+                    det.insert(QStringLiteral("audio_callback"), cb);
+                }
+
                 log::LogService::instance().log(
                     QStringLiteral("AudioEngine"),
                     QStringLiteral("Underrun"),
