@@ -252,6 +252,9 @@ private slots:
     // 26. Phase 4 Step 3: Render Monitor volume + rendered file audition rules
     void testStep3MonitorVolumeAndAudition();
 
+    // 27. A-1 / A-4: EngineController syncs individual DSP node enabled states & bypasses to RenderEngine
+    void testControllerDspNodeEnableSyncToRender();
+
 private:
     struct CleanupEvaluation {
         bool passed = true;
@@ -2214,6 +2217,130 @@ void TestPhase4ExportRender::testStep3MonitorVolumeAndAudition()
 
     // Missing file fails
     QVERIFY(!controller.auditionRenderedFile("C", m_tempDir->filePath("does_not_exist.wav")));
+}
+
+void TestPhase4ExportRender::testControllerDspNodeEnableSyncToRender()
+{
+    EngineController& controller = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+    engine.resetTaskInfo();
+    QVERIFY(controller.initialize(true));
+
+    // All Master DSP nodes start bypassed
+    QVERIFY(controller.isPeqBypassed());
+    QVERIFY(controller.isGeqBypassed());
+    QVERIFY(controller.isDspNodeBypassed("Filter"));
+    QVERIFY(controller.isDspNodeBypassed("Compressor"));
+    QVERIFY(controller.isDspNodeBypassed("Reverb"));
+    QVERIFY(controller.isDspNodeBypassed("Limiter"));
+
+    QString srcDir = m_tempDir->filePath("controller_dsp_sync");
+    QDir().mkpath(srcDir);
+    QString trackPath = srcDir + "/sine_440.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 4800, 440.0));
+    QVERIFY(controller.loadTrack("A", trackPath));
+
+    auto runFloat32Render = [&](bool enableDsp) -> QVector<float> {
+        QSignalSpy spyFinished(&engine, &RenderEngine::renderTaskFinished);
+        const QString taskId = controller.startTrackRender("A", 2 /*Float32*/, 0 /*Original*/, 48000.0, false /*dither*/, enableDsp);
+        if (taskId.isEmpty() || !spyFinished.wait(10000)) {
+            return {};
+        }
+        const QStringList files = controller.renderOutputFiles();
+        if (files.size() != 1) {
+            return {};
+        }
+        QFile f(files.first());
+        if (!f.open(QIODevice::ReadOnly)) {
+            return {};
+        }
+        QByteArray raw = f.readAll();
+        f.close();
+        if (raw.size() <= 44) {
+            return {};
+        }
+        const qsizetype numFloats = (raw.size() - 44) / static_cast<qsizetype>(sizeof(float));
+        QVector<float> samples(numFloats);
+        std::memcpy(samples.data(), raw.constData() + 44, static_cast<size_t>(numFloats) * sizeof(float));
+        controller.resetRenderStatus();
+        return samples;
+    };
+
+    auto maxAbsDiff = [](const QVector<float>& a, const QVector<float>& b) -> double {
+        if (a.size() != b.size() || a.isEmpty()) return -1.0;
+        double m = 0.0;
+        for (qsizetype i = 0; i < a.size(); ++i) {
+            m = std::max(m, std::abs(static_cast<double>(a[i]) - static_cast<double>(b[i])));
+        }
+        return m;
+    };
+
+    // 1. Baseline dry render (all nodes bypassed)
+    const QVector<float> dry = runFloat32Render(true);
+    QVERIFY(dry.size() >= 4800 * 2);
+
+    // 2. PEQ enabled via setDspNodeBypass("PEQ", false) / setPeqBypassed
+    controller.setPeqBand(false, 5, 440.0, 6.0, 1.0, 0, true);
+    controller.setPeqBand(true, 5, 440.0, 6.0, 1.0, 0, true);
+    controller.setPeqBypassed(false);
+    QVERIFY(!controller.isPeqBypassed());
+    QCOMPARE(controller.bitPerfectStatus(), 1);
+    const QVector<float> withPeq = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withPeq) > 0.1);
+    controller.setPeqBypassed(true);
+    QVERIFY(controller.isPeqBypassed());
+
+    // 3. GEQ enabled via setGeqBypassed(false)
+    controller.setGeqBandGain(15 /* 500 Hz */, 6.0);
+    controller.setGeqBypassed(false);
+    QVERIFY(!controller.isGeqBypassed());
+    const QVector<float> withGeq = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withGeq) > 0.05);
+    controller.setGeqBypassed(true);
+    QVERIFY(controller.isGeqBypassed());
+
+    // 4. Filter enabled via setDspNodeBypass("Filter", false)
+    controller.setFilterParams(1000.0, true, 1 /*24dB/oct*/, 20000.0, false, 0);
+    controller.setDspNodeBypass("Filter", false);
+    const QVector<float> withFilter = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withFilter) > 0.1);
+    controller.setDspNodeBypass("Filter", true);
+
+    // 5. Compressor configured while bypassed, then enabled via setDspNodeBypass("Compressor", false)
+    controller.setCompressorParams(-20.0, 8.0, 1.0, 50.0, 0.0, 0.0);
+    controller.setDspNodeBypass("Compressor", false);
+    const QVector<float> withComp = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withComp) > 0.05);
+    controller.setDspNodeBypass("Compressor", true);
+
+    // 6. Reverb configured while bypassed, then enabled via setDspNodeBypass("Reverb", false)
+    controller.setReverbParams(0.8, 0.3, 0.5, 0.0, true);
+    controller.setDspNodeBypass("Reverb", false);
+    const QVector<float> withRev = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withRev) > 0.05);
+    controller.setDspNodeBypass("Reverb", true);
+
+    // 7. Limiter configured while bypassed, then enabled via setDspNodeBypass("Limiter", false)
+    controller.setLimiterParams(-10.0, 50.0, 1.0);
+    controller.setDspNodeBypass("Limiter", false);
+    const QVector<float> withLim = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, withLim) > 0.05);
+    controller.setDspNodeBypass("Limiter", true);
+
+    // 8. Re-bypassing all nodes restores exact dry output
+    const QVector<float> reBypassed = runFloat32Render(true);
+    QVERIFY(maxAbsDiff(dry, reBypassed) < 1e-6);
+
+    // 9. When Global DSP Bypass + Render Monitor + unity gains + matching sample rate in offline mode,
+    // bitPerfectStatus never reports Verified (2) when Direct Mode is Unknown (0)
+    controller.setGlobalDspBypass(true);
+    controller.setOutputRoutingMode(1);
+    controller.setMasterGain(1.0);
+    controller.setMasterMute(false);
+    controller.setRenderMonitorVolume(1.0);
+    QCOMPARE(controller.bitPerfectStatus(), 0);
+    controller.setGlobalDspBypass(false);
+    controller.setOutputRoutingMode(0);
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

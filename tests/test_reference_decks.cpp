@@ -146,6 +146,7 @@ private slots:
     void testAutoAdvanceOverflowRecoveryConcurrentStopAndLock();
     void testAutoAdvanceOverflowContinuousWithControlDelay();
     void testAutoAdvanceSpscCapacityOverflowNoOverwrite();
+    void testComparativeSwitchTerminatesFolderSession();
     void cleanupTestCase();
 
 private:
@@ -2347,6 +2348,47 @@ void TestReferenceDecks::testAutoAdvanceSpscCapacityOverflowNoOverwrite()
         }
         QCOMPARE(deck.folderSession().currentIndex(), size_t(1));
     }
+}
+
+void TestReferenceDecks::testComparativeSwitchTerminatesFolderSession()
+{
+    // Specification §2.7.5:
+    // - Normal switch preserves Folder Session on the switched decks.
+    // - Comparative switch terminates Folder Session on the switched decks while keeping loaded tracks.
+    DeckManager manager(48000.0);
+    std::vector<std::string> filesA = { "track_01_intro.wav", "track_02_verse.wav" };
+    std::vector<std::string> filesB = { "track_01_intro.wav", "track_03_chorus.wav" };
+
+    QVERIFY(manager.deck('A')->startFolderSession(m_testDir.toStdString(), filesA, 48000.0));
+    QVERIFY(manager.deck('B')->startFolderSession(m_testDir.toStdString(), filesB, 48000.0));
+    QVERIFY(manager.deck('A')->folderSession().isActive());
+    QVERIFY(manager.deck('B')->folderSession().isActive());
+
+    // Normal switch A -> B preserves both Folder Sessions
+    auto normRes = manager.switchDeck('B', SwitchingMode::Normal);
+    QVERIFY(normRes.success);
+    QCOMPARE(manager.activeDeckId(), 'B');
+    QVERIFY(manager.deck('A')->folderSession().isActive());
+    QVERIFY(manager.deck('B')->folderSession().isActive());
+
+    // Normal switch B -> A preserves both Folder Sessions
+    normRes = manager.switchDeck('A', SwitchingMode::Normal);
+    QVERIFY(normRes.success);
+    QCOMPARE(manager.activeDeckId(), 'A');
+    QVERIFY(manager.deck('A')->folderSession().isActive());
+    QVERIFY(manager.deck('B')->folderSession().isActive());
+
+    // Start playing Deck A, then perform Comparative switch A -> B
+    manager.deck('A')->play();
+    auto cmpRes = manager.switchDeck('B', SwitchingMode::Comparative);
+    QVERIFY(cmpRes.success);
+    QCOMPARE(manager.activeDeckId(), 'B');
+    QVERIFY(!manager.deck('A')->folderSession().isActive());
+    QVERIFY(!manager.deck('B')->folderSession().isActive());
+    QVERIFY(manager.deck('A')->isOpen());
+    QVERIFY(manager.deck('B')->isOpen());
+    QCOMPARE(manager.deck('A')->state(), TransportState::Paused);
+    QCOMPARE(manager.deck('B')->state(), TransportState::Playing);
 }
 
 void TestReferenceDecks::cleanupTestCase()

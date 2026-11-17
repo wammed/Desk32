@@ -237,6 +237,17 @@ public:
             m_folderSession.stopSession(); // P0-10: Deck lock terminates and discards folder session
         }
     }
+
+    /// Section 2.7.5: Terminate and discard Folder Session while preserving the currently loaded track context
+    void terminateFolderSession() noexcept {
+        std::lock_guard<std::mutex> lock(m_controlMutex);
+        if (m_folderSession.isActive()) {
+            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+            m_needsFolderAdvance.store(false, std::memory_order_release);
+            discardPendingOverflow();
+            m_folderSession.stopSession();
+        }
+    }
     void setOffsetFrames(int64_t offset) noexcept { m_offsetFrames.store(offset, std::memory_order_release); }
 
     /// Reconfigure graph sample rate across worker and resamplers

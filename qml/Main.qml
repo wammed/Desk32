@@ -113,17 +113,17 @@ ApplicationWindow {
                     }
                 }
                 Rectangle {
-                    width: 100
+                    width: 110
                     height: 22
                     radius: 3
-                    color: "#00E5FF20"
-                    border.color: "#00E5FF"
+                    color: EngineController.bitPerfectStatus === 2 ? "#00E5FF20" : (EngineController.bitPerfectStatus === 1 ? "#22262c" : "#1c1f24")
+                    border.color: EngineController.bitPerfectStatus === 2 ? "#00E5FF" : (EngineController.bitPerfectStatus === 1 ? "#363d47" : "#2a3038")
                     Label {
                         anchors.centerIn: parent
-                        text: qsTr("BIT-PERFECT")
+                        text: EngineController.bitPerfectStatus === 2 ? qsTr("BIT-PERFECT") : (EngineController.bitPerfectStatus === 1 ? qsTr("NOT VERIFIED") : qsTr("BP: N/A"))
                         font.pixelSize: 10
                         font.bold: true
-                        color: "#00E5FF"
+                        color: EngineController.bitPerfectStatus === 2 ? "#00E5FF" : (EngineController.bitPerfectStatus === 1 ? "#758291" : "#55606d")
                     }
                 }
                 Rectangle {
@@ -1457,6 +1457,22 @@ ApplicationWindow {
                         }
                         Item { Layout.fillWidth: true }
                         Button {
+                            text: !EngineController.geqBypassed ? qsTr("GEQ [ON]") : qsTr("GEQ [BYPASS]")
+                            font.pixelSize: 11
+                            font.bold: true
+                            highlighted: !EngineController.geqBypassed
+                            visible: eqConsoleRect.eqMode === "geq"
+                            onClicked: EngineController.setDspNodeBypass("GEQ", !EngineController.geqBypassed)
+                        }
+                        Button {
+                            text: !EngineController.peqBypassed ? qsTr("PEQ [ON]") : qsTr("PEQ [BYPASS]")
+                            font.pixelSize: 11
+                            font.bold: true
+                            highlighted: !EngineController.peqBypassed
+                            visible: eqConsoleRect.eqMode === "peq"
+                            onClicked: EngineController.setDspNodeBypass("PEQ", !EngineController.peqBypassed)
+                        }
+                        Button {
                             text: qsTr("Reset All GEQ (0 dB)")
                             font.pixelSize: 11
                             visible: eqConsoleRect.eqMode === "geq"
@@ -1827,6 +1843,12 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 8
+
+                                    CheckBox {
+                                        text: qsTr("PEQ Active")
+                                        checked: !EngineController.peqBypassed
+                                        onToggled: EngineController.setDspNodeBypass("PEQ", !checked)
+                                    }
 
                                     Button {
                                         text: qsTr("LEFT CHANNEL (12 Bands)")

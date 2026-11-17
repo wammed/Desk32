@@ -48,6 +48,7 @@ class EngineController : public QObject {
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
+    Q_PROPERTY(int bitPerfectStatus READ bitPerfectStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
 
@@ -57,6 +58,8 @@ class EngineController : public QObject {
     Q_PROPERTY(int limiterLatencyFrames READ limiterLatencyFrames NOTIFY dspTelemetryChanged)
     Q_PROPERTY(QString listeningPresetName READ listeningPresetName NOTIFY listeningPresetChanged)
     Q_PROPERTY(bool listeningCorrectionActive READ listeningCorrectionActive NOTIFY outputRoutingModeChanged)
+    Q_PROPERTY(bool geqBypassed READ isGeqBypassed WRITE setGeqBypassed NOTIFY geqParametersChanged)
+    Q_PROPERTY(bool peqBypassed READ isPeqBypassed WRITE setPeqBypassed NOTIFY peqParametersChanged)
 
     // Phase 3: External Insert & Host Bridge Telemetry
     Q_PROPERTY(int externalInsertState READ externalInsertState NOTIFY externalInsertStatusChanged)
@@ -136,6 +139,7 @@ public:
     [[nodiscard]] int xrunCount() const;
     [[nodiscard]] bool isDirectMode() const;
     [[nodiscard]] int directModeStatus() const;
+    [[nodiscard]] int bitPerfectStatus() const;
     [[nodiscard]] int backendStatus() const;
     [[nodiscard]] QString backendStatusText() const;
 
@@ -145,6 +149,8 @@ public:
     [[nodiscard]] int limiterLatencyFrames() const;
     [[nodiscard]] QString listeningPresetName() const;
     [[nodiscard]] bool listeningCorrectionActive() const;
+    [[nodiscard]] bool isGeqBypassed() const;
+    [[nodiscard]] bool isPeqBypassed() const;
 
     // Phase 3 Getters
     [[nodiscard]] int externalInsertState() const;
@@ -246,6 +252,8 @@ public:
     Q_INVOKABLE void setListeningPreset(const QString& presetName);
 
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
+    Q_INVOKABLE void setGeqBypassed(bool bypass);
+    Q_INVOKABLE void setPeqBypassed(bool bypass);
     Q_INVOKABLE bool resyncDspNodeBypass(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeAppliedBypassed(const QString& nodeName) const noexcept;

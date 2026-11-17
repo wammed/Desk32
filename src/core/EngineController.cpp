@@ -47,6 +47,18 @@ EngineController::~EngineController() {
 }
 
 bool EngineController::initialize(bool offlineMode) {
+    // Reset bypass states to defaults matching node construction
+    m_peqBypassed.store(true, std::memory_order_relaxed);
+    m_geqBypassed.store(true, std::memory_order_relaxed);
+    m_filterBypassed.store(true, std::memory_order_relaxed);
+    m_compBypassed.store(true, std::memory_order_relaxed);
+    m_insertBypassed.store(true, std::memory_order_relaxed);
+    m_limiterBypassed.store(true, std::memory_order_relaxed);
+    m_reverbBypassed.store(true, std::memory_order_relaxed);
+    m_listeningCorrectionBypassed.store(false, std::memory_order_relaxed);
+    m_globalDspBypass.store(false, std::memory_order_relaxed);
+    m_globalBypassDesynced.store(false, std::memory_order_relaxed);
+
     // 1. Initialize 4-Deck Manager
     m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
 
@@ -859,6 +871,65 @@ int EngineController::directModeStatus() const {
     return static_cast<int>(m_audioOutput->directModeStatus());
 }
 
+int EngineController::bitPerfectStatus() const {
+    // 0 = Unknown / Indeterminate, 1 = NotVerified (processing/resampling active), 2 = Verified
+    if (m_masterMute.load(std::memory_order_relaxed) ||
+        std::abs(m_masterGainL.load(std::memory_order_relaxed) - 1.0) > 1e-6 ||
+        std::abs(m_masterGainR.load(std::memory_order_relaxed) - 1.0) > 1e-6) {
+        return 1;
+    }
+
+    const int routeMode = m_outputRoutingMode.load(std::memory_order_relaxed);
+    if ((routeMode == 0 && std::abs(listeningVolume() - 1.0) > 1e-6) ||
+        (routeMode == 1 && std::abs(renderMonitorVolume() - 1.0) > 1e-6)) {
+        return 1;
+    }
+
+    if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
+        const bool filterActive = !m_filterBypassed.load(std::memory_order_relaxed) &&
+                                  (m_uiFilter.isHpfEnabled() || m_uiFilter.isLpfEnabled());
+        const bool insertActive = !m_insertBypassed.load(std::memory_order_relaxed) ||
+                                  (m_insertNode && !m_insertNode->isBypassed());
+        if (!m_peqBypassed.load(std::memory_order_relaxed) ||
+            !m_geqBypassed.load(std::memory_order_relaxed) ||
+            filterActive ||
+            !m_compBypassed.load(std::memory_order_relaxed) ||
+            insertActive ||
+            !m_reverbBypassed.load(std::memory_order_relaxed) ||
+            !m_limiterBypassed.load(std::memory_order_relaxed)) {
+            return 1;
+        }
+
+        if (routeMode == 0 && !m_listeningCorrectionBypassed.load(std::memory_order_relaxed)) {
+            for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+                if (m_uiListeningCorrection.leftBand(b).enabled ||
+                    m_uiListeningCorrection.rightBand(b).enabled) {
+                    return 1;
+                }
+            }
+        }
+    }
+
+    const auto* dm = m_deckManager.get();
+    const auto* active = dm ? dm->activeDeck() : nullptr;
+    const bool hasOpenTrack = active && active->isOpen();
+    if (hasOpenTrack && active->trackInfo().sampleRate > 0.0 &&
+        std::abs(active->trackInfo().sampleRate - graphSampleRate()) > 0.5) {
+        return 1;
+    }
+
+    const int dmStatus = directModeStatus();
+    if (dmStatus == 1) {
+        return 1;
+    }
+
+    if (dmStatus == 2 && hasOpenTrack) {
+        return 2;
+    }
+
+    return 0;
+}
+
 int EngineController::backendStatus() const {
     if (!m_audioOutput) return 0; // Unconnected
     return static_cast<int>(m_audioOutput->state());
@@ -899,6 +970,22 @@ bool EngineController::listeningCorrectionActive() const {
     if (m_outputRoutingMode.load(std::memory_order_relaxed) != 0) return false;
     if (m_globalDspBypass.load(std::memory_order_relaxed)) return false;
     return !m_listeningCorrectionBypassed.load(std::memory_order_relaxed);
+}
+
+bool EngineController::isGeqBypassed() const {
+    return m_geqBypassed.load(std::memory_order_relaxed);
+}
+
+void EngineController::setGeqBypassed(bool bypass) {
+    setDspNodeBypass(QStringLiteral("GEQ"), bypass);
+}
+
+bool EngineController::isPeqBypassed() const {
+    return m_peqBypassed.load(std::memory_order_relaxed);
+}
+
+void EngineController::setPeqBypassed(bool bypass) {
+    setDspNodeBypass(QStringLiteral("PEQ"), bypass);
 }
 
 int EngineController::externalInsertState() const {
@@ -1098,6 +1185,7 @@ void EngineController::setOutputRoutingMode(int path) {
     const int prev = m_outputRoutingMode.exchange(path);
     if (prev != path) {
         emit outputRoutingModeChanged(path);
+        emit diagnosticsChanged();
         QJsonObject det;
         det.insert(QStringLiteral("from"), prev == 1 ? QStringLiteral("RenderMonitor") : QStringLiteral("Listening"));
         det.insert(QStringLiteral("to"), path == 1 ? QStringLiteral("RenderMonitor") : QStringLiteral("Listening"));
@@ -1169,6 +1257,7 @@ void EngineController::setGlobalDspBypass(bool bypass) {
 
     // Section 10.2.3 & 5.9: Global DSP Bypass is temporary and does NOT destroy individual DSP node ON/OFF states!
     emit globalDspBypassChanged(bypass);
+    emit diagnosticsChanged();
     emit peqParametersChanged();
     emit geqParametersChanged();
     emit filterParametersChanged();
@@ -1238,6 +1327,7 @@ void EngineController::setMasterMute(bool mute) {
     bool prev = m_masterMute.exchange(mute);
     if (prev != mute) {
         emit masterMuteChanged(mute);
+        emit diagnosticsChanged();
         log::LogService::instance().log(
             "MasterControl",
             "Mute",
@@ -1258,6 +1348,7 @@ void EngineController::setMasterGain(double gain) {
         emit masterGainChanged(clamped);
         emit masterGainLChanged(clamped);
         emit masterGainRChanged(clamped);
+        emit diagnosticsChanged();
     }
 }
 
@@ -1269,6 +1360,7 @@ void EngineController::setMasterGainL(double gain) {
         double avg = (clamped + m_masterGainR.load(std::memory_order_relaxed)) * 0.5;
         m_masterGain.store(avg, std::memory_order_relaxed);
         emit masterGainChanged(avg);
+        emit diagnosticsChanged();
     }
 }
 
@@ -1280,6 +1372,7 @@ void EngineController::setMasterGainR(double gain) {
         double avg = (m_masterGainL.load(std::memory_order_relaxed) + clamped) * 0.5;
         m_masterGain.store(avg, std::memory_order_relaxed);
         emit masterGainChanged(avg);
+        emit diagnosticsChanged();
     }
 }
 
@@ -1461,6 +1554,7 @@ void EngineController::switchDeck(const QString& targetDeckId, int mode) {
         emit deckStateChanged("B");
         emit deckStateChanged("C");
         emit deckStateChanged("D");
+        emit diagnosticsChanged();
         log::LogService::instance().log(
             "Deck",
             "SwitchDeck",
@@ -1490,6 +1584,7 @@ void EngineController::quickSwitchAB() {
         emit activeDeckChanged(act);
         emit deckStateChanged("A");
         emit deckStateChanged("B");
+        emit diagnosticsChanged();
         if (res.hadSeek) {
             const auto* tgtDeck = m_deckManager->deck(res.targetDeck);
             const std::string tgtPath = tgtDeck ? tgtDeck->trackInfo().path : std::string();
@@ -1529,6 +1624,7 @@ bool EngineController::loadTrack(const QString& deckId, const QString& filePath)
 
     if (ok) {
         emit deckStateChanged(deckId);
+        emit diagnosticsChanged();
         const auto info = d->trackInfo();
         const double sr = info.sampleRate;
         const double durMs = (sr > 0.0) ? (static_cast<double>(info.totalFrames) * 1000.0 / sr) : 0.0;
@@ -1607,6 +1703,7 @@ bool EngineController::startFolderSession(const QString& deckId, const QString& 
     bool ok = d->startFolderSession(folderPath.toStdString(), files, m_deckManager->graphRate());
     if (ok) {
         emit deckStateChanged(deckId);
+        emit diagnosticsChanged();
         const auto& fs = d->folderSession();
         const QString firstPath = fs.currentTrack() ? QString::fromStdString(fs.currentTrack()->path) : QString();
         QJsonObject det;
@@ -1908,6 +2005,7 @@ void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope,
     m_uiFilter.setLpfSlope(lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB);
 
     emit filterParametersChanged();
+    emit diagnosticsChanged();
 }
 
 QVariantMap EngineController::getFilterParams() {
@@ -1950,8 +2048,10 @@ void EngineController::setCompressorParams(double thresholdDb, double ratio, dou
     emit compressorParametersChanged();
 
     if (m_pipeline) {
-        // P0-14, P0-21: Configure executed on Control Thread and published lock-free via EpochReclaimer
-        m_pipeline->updateCompressor(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, enabled);
+        // P0-14, P0-21: Configure executed on Control Thread and published lock-free via EpochReclaimer.
+        // Live pipeline uses AudioNode::isBypassed() as the bypass gate so parameter changes while bypassed
+        // remain ready when unbypassed.
+        m_pipeline->updateCompressor(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb, true);
     }
 }
 
@@ -1977,7 +2077,7 @@ void EngineController::setLimiterParams(double ceilingDb, double releaseMs, doub
 
     if (m_pipeline) {
         // P0-14, P0-21: Configure and instance preparation executed on Control Thread
-        m_pipeline->updatePeakLimiter(ceilingDb, releaseMs, lookaheadMs, enabled);
+        m_pipeline->updatePeakLimiter(ceilingDb, releaseMs, lookaheadMs, true);
     }
 }
 
@@ -2001,7 +2101,7 @@ void EngineController::setReverbParams(double roomSize, double damping, double w
 
     if (m_pipeline) {
         // P0-14, P0-21: Configure and instance preparation executed on Control Thread
-        m_pipeline->updateReverb(roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
+        m_pipeline->updateReverb(roomSize, damping, wetLevel, predelayMs, tailPreserving, true);
     }
 }
 
@@ -2031,6 +2131,7 @@ void EngineController::setListeningPreset(const QString& presetName) {
         m_listeningPresetName = presetName;
         emit listeningPresetChanged(presetName);
         emit peqParametersChanged();
+        emit diagnosticsChanged();
         log::LogService::instance().log(
             "ListeningCorrection",
             "ApplyPreset",
@@ -2103,12 +2204,15 @@ void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
     // Parameter values are strictly PRESERVED and not erased or reset on bypass
     if (nodeName == "PEQ") {
         m_peqBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiPeq.setEnabled(!bypass);
     } else if (nodeName == "GEQ") {
         m_geqBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiGeq.setEnabled(!bypass);
     } else if (nodeName == "Filter") {
         m_filterBypassed.store(bypass, std::memory_order_relaxed);
     } else if (nodeName == "Compressor") {
         m_compBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiComp.setEnabled(!bypass);
     } else if (nodeName == "ExternalInsert" || nodeName == "Insert") {
         m_insertBypassed.store(bypass, std::memory_order_relaxed);
         if (m_insertNode) {
@@ -2116,13 +2220,16 @@ void EngineController::setDspNodeBypass(const QString& nodeName, bool bypass) {
         }
     } else if (nodeName == "Reverb") {
         m_reverbBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiReverb.setEnabled(!bypass);
     } else if (nodeName == "Limiter") {
         m_limiterBypassed.store(bypass, std::memory_order_relaxed);
+        m_uiLimiter.setEnabled(!bypass);
     } else if (nodeName == "ListeningCorrection") {
         m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
     }
 
     emitDspNodeSignal(nodeName);
+    emit diagnosticsChanged();
     log::LogService::instance().log(
         "DSP",
         "NodeBypass",
@@ -2322,6 +2429,7 @@ bool EngineController::configureExternalInsert(const QString& clientName,
     }
 
     emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
     return ok;
 }
 
@@ -2337,6 +2445,7 @@ void EngineController::setExternalInsertBypass(bool bypass) {
         QString::fromStdString(m_insertNode->bridge().config().clientName)
     );
     emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
 }
 
 void EngineController::triggerInsertLatencyMeasurement() {
@@ -2439,6 +2548,7 @@ void EngineController::disconnectExternalInsert() {
         QString::fromStdString(m_insertNode->bridge().config().clientName)
     );
     emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
 }
 
 void EngineController::resetInsertXRuns() {
@@ -2685,7 +2795,9 @@ QVariantMap EngineController::captureCurrentStateAsPreset(const QString& categor
 // =========================================================================
 
 void EngineController::syncMasterDspToRenderEngine() {
-    m_renderEngine.templateChain().copyParametersFrom(
+    auto lock = m_renderEngine.lockTemplateChain();
+    auto& tc = m_renderEngine.templateChain();
+    tc.copyParametersFrom(
         m_uiPeq,
         m_uiGeq,
         m_uiFilter,
@@ -2693,6 +2805,21 @@ void EngineController::syncMasterDspToRenderEngine() {
         m_uiReverb,
         m_uiLimiter
     );
+
+    const bool peqOn = !m_peqBypassed.load(std::memory_order_relaxed);
+    const bool geqOn = !m_geqBypassed.load(std::memory_order_relaxed);
+    const bool fltOn = !m_filterBypassed.load(std::memory_order_relaxed);
+    const bool compOn = !m_compBypassed.load(std::memory_order_relaxed);
+    const bool revOn = !m_reverbBypassed.load(std::memory_order_relaxed);
+    const bool limOn = !m_limiterBypassed.load(std::memory_order_relaxed);
+
+    tc.peq().setEnabled(peqOn);
+    tc.geq().setEnabled(geqOn);
+    tc.filter().setHpfEnabled(fltOn && m_uiFilter.isHpfEnabled());
+    tc.filter().setLpfEnabled(fltOn && m_uiFilter.isLpfEnabled());
+    tc.compressor().setEnabled(compOn);
+    tc.reverb().setEnabled(revOn);
+    tc.limiter().setEnabled(limOn);
 }
 
 QString EngineController::startTrackRender(const QString& deckId, int bitDepth, int rateMode, double customRate, bool applyDither, bool enableDsp) {
@@ -2788,6 +2915,7 @@ void EngineController::setRenderMonitorVolume(double volume) {
     if (std::abs(prev - clamped) > 1e-6) {
         m_pipeline->setRenderMonitorVolume(clamped);
         emit renderMonitorVolumeChanged(clamped);
+        emit diagnosticsChanged();
     }
 }
 
@@ -2798,6 +2926,7 @@ void EngineController::setListeningVolume(double volume) {
     if (std::abs(prev - clamped) > 1e-6) {
         m_pipeline->setListeningVolume(clamped);
         emit listeningVolumeChanged(clamped);
+        emit diagnosticsChanged();
     }
 }
 
