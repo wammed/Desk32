@@ -64,6 +64,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS
 )
 
 find_package(ALSA REQUIRED)
+find_package(Vulkan REQUIRED)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PIPEWIRE REQUIRED libpipewire-0.3)
@@ -144,6 +145,7 @@ target_link_libraries(desk32 PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Sql
+    Vulkan::Headers
     ${PIPEWIRE_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}

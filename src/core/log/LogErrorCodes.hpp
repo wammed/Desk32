@@ -49,6 +49,10 @@ constexpr int32_t PresetParseFailed = 5002;
 constexpr int32_t PresetNotFound = 5003;
 constexpr int32_t PresetSaveFailed = 5004;
 
+// 6000-6999: Graphics / RHI / SceneGraph
+constexpr int32_t VulkanFallbackToOpenGL = 6001;
+constexpr int32_t SceneGraphInitError = 6002;
+
 // 9000-9999: Logging / Diagnostics Subsystem
 constexpr int32_t LogQueueOverflow = 9001;
 
