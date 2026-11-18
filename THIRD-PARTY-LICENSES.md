@@ -1,7 +1,7 @@
 # Third-Party Licenses Ledger
 
-- **Document Version:** 1.0.0
-- **Last Updated:** 2026-11-07
+- **Document Version:** 1.1.0
+- **Last Updated:** 2026-11-18
 - **Project:** Desk32
 - **Desk32 Own License:** MIT License (Primary / Default)
 - **Distribution Model:** Source Code Only (No binary redistribution by Desk32 project)
@@ -18,11 +18,13 @@ Desk32 does not vendor or bundle third-party source code into this repository. A
 | **libpipewire-0.3** | 1.6.10 | Standard audio backend, graph routing | `MIT` / `LGPL-2.1-or-later` | Wim Taymans, Red Hat, PipeWire contributors<br>https://pipewire.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 | **JACK (libjack)** | 1.9.22 | Pro-audio routing, external host bridge | `LGPL-2.1-or-later` | Stephane Letz, Paul Davis, JACK contributors<br>https://jackaudio.org/ | None (Unmodified) | Dynamic link (`.so` / PipeWire-JACK) |
 | **alsa-lib (libasound)** | 1.2.16.1 | Hardware direct capability query, ALSA direct | `LGPL-2.1-or-later` | Jaroslav Kysela, ALSA Project contributors<br>https://www.alsa-project.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
-| **SQLite** | 3.54.0 | Operation logs (Log Tab), configs, library DB | `blessing` (Public Domain) | D. Richard Hipp, SQLite contributors<br>https://www.sqlite.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
+| **SQLite** | 3.54.0 | Operation logs (Log Tab), preset DB, render sequence management | `blessing` (Public Domain) | D. Richard Hipp, SQLite contributors<br>https://www.sqlite.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 | **libFLAC** | 1.5.0 | Hi-Res PCM decoding (FLAC) | `BSD-3-Clause` | Xiph.Org Foundation<br>https://xiph.org/flac/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 | **libvorbisfile** | 1.3.7 | Ogg Vorbis compressed audio decoding | `BSD-3-Clause` | Xiph.Org Foundation<br>https://xiph.org/vorbis/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 | **libopus** | 1.6.1 | Opus low-latency audio decoding | `BSD-3-Clause` | Xiph.Org Foundation, Skype Ltd., CSIRO<br>https://opus-codec.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 | **FFmpeg (libavcodec, libavformat)** | 63.1.102 | Comprehensive multi-codec decoding candidate | `LGPL-2.1-or-later` | FFmpeg team<br>https://ffmpeg.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
+| **libsoxr** | 0.1.3 | High-precision multi-rate PCM resampling | `LGPL-2.1-or-later` | Rob Sykes, The SoX Resampler contributors<br>https://sourceforge.net/projects/soxr/ | None (Unmodified) | Dynamic link (`.so` / System package) |
+| **TagLib** | 2.3.2 | Audio metadata read/write & provenance tags (`DESK32*` / PropertyMap) | `LGPL-2.1-or-later` OR `MPL-1.1` | Scott Wheeler, TagLib contributors<br>https://taglib.org/ | None (Unmodified) | Dynamic link (`.so` / System package) |
 
 ---
 

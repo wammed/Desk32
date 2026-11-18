@@ -46,6 +46,7 @@ public:
     /// Direct query methods
     std::vector<LogEvent> queryLogs(const LogFilter& filter = {});
     std::vector<LogEvent> queryRelatedLogs(const std::string& operationId);
+    std::vector<LogEvent> queryPlaybackHistory(int limit = 200);
     bool exportJsonl(const QString& filePath, const LogFilter& filter = {});
 
     int64_t countEvents();
@@ -84,6 +85,7 @@ public:
 
     Q_INVOKABLE QVariantList fetchLogs(const QVariantMap& filter);
     Q_INVOKABLE QVariantList fetchRelatedLogs(const QString& operationId);
+    Q_INVOKABLE QVariantList fetchPlaybackHistory(int limit = 200);
     Q_INVOKABLE bool exportToJsonl(const QString& filePath);
     Q_INVOKABLE bool exportFilteredToJsonl(const QString& filePath, const QVariantMap& filter);
 

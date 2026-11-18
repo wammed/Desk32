@@ -186,12 +186,7 @@ bool FFmpegAudioDecoder::open(const std::string& filePath)
 
 void FFmpegAudioDecoder::extractMetadata()
 {
-    m_metadata.sampleRate = m_formatInfo.sampleRate;
-    m_metadata.channels = m_formatInfo.channels;
-    m_metadata.bitDepth = m_formatInfo.bitDepth;
-    m_metadata.durationSeconds = m_formatInfo.durationSeconds;
-    m_metadata.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, m_formatInfo.totalFrames));
-    m_metadata.codecName = m_formatInfo.codecName;
+    m_metadata = metadata::MetadataReader::parseTags(m_filePath);
 
     auto getTag = [this](const char* key) -> std::string {
         AVDictionaryEntry* entry = av_dict_get(m_formatCtx->metadata, key, nullptr, AV_DICT_MATCH_CASE);
@@ -201,28 +196,43 @@ void FFmpegAudioDecoder::extractMetadata()
         return entry && entry->value ? std::string(entry->value) : std::string();
     };
 
-    m_metadata.title = getTag("title");
-    m_metadata.artist = getTag("artist");
-    m_metadata.album = getTag("album");
-    m_metadata.albumArtist = getTag("album_artist");
+    if (m_metadata.title.empty()) m_metadata.title = getTag("title");
+    if (m_metadata.artist.empty()) m_metadata.artist = getTag("artist");
+    if (m_metadata.album.empty()) m_metadata.album = getTag("album");
     if (m_metadata.albumArtist.empty()) {
-        m_metadata.albumArtist = getTag("albumartist");
-    }
-    m_metadata.genre = getTag("genre");
-    m_metadata.dateOrYear = getTag("date");
-    if (m_metadata.dateOrYear.empty()) {
-        m_metadata.dateOrYear = getTag("year");
-    }
-    m_metadata.comment = getTag("comment");
-
-    std::string trackStr = getTag("track");
-    if (!trackStr.empty()) {
-        try {
-            m_metadata.trackNumber = std::stoi(trackStr);
-        } catch (...) {
-            m_metadata.trackNumber = 0;
+        m_metadata.albumArtist = getTag("album_artist");
+        if (m_metadata.albumArtist.empty()) {
+            m_metadata.albumArtist = getTag("albumartist");
         }
     }
+    if (m_metadata.genre.empty()) m_metadata.genre = getTag("genre");
+    if (m_metadata.dateOrYear.empty()) {
+        m_metadata.dateOrYear = getTag("date");
+        if (m_metadata.dateOrYear.empty()) {
+            m_metadata.dateOrYear = getTag("year");
+        }
+    }
+    if (m_metadata.comment.empty()) m_metadata.comment = getTag("comment");
+    if (m_metadata.composer.empty()) m_metadata.composer = getTag("composer");
+
+    if (m_metadata.trackNumber <= 0) {
+        std::string trackStr = getTag("track");
+        if (!trackStr.empty()) {
+            try {
+                m_metadata.trackNumber = std::stoi(trackStr);
+            } catch (...) {
+                m_metadata.trackNumber = 0;
+            }
+        }
+    }
+
+    // Stream technical audio parameters from decoded FFmpeg stream
+    m_metadata.sampleRate = m_formatInfo.sampleRate;
+    m_metadata.channels = m_formatInfo.channels;
+    m_metadata.bitDepth = m_formatInfo.bitDepth;
+    m_metadata.durationSeconds = m_formatInfo.durationSeconds;
+    m_metadata.totalFrames = static_cast<uint64_t>(std::max<int64_t>(0, m_formatInfo.totalFrames));
+    m_metadata.codecName = m_formatInfo.codecName;
 }
 
 bool FFmpegAudioDecoder::decodeNextPacket()

@@ -393,24 +393,7 @@ public:
 
         if (q.exec()) {
             while (q.next()) {
-                LogEvent ev;
-                ev.eventId = q.value(0).toLongLong();
-                ev.id = ev.eventId;
-                ev.operationId = q.value(1).toString().toStdString();
-                ev.parentOperationId = q.value(2).isNull() ? "" : q.value(2).toString().toStdString();
-                ev.timestampUtc = q.value(3).toString().toStdString();
-                ev.localUtcOffset = q.value(4).toString().toStdString();
-                ev.category = q.value(5).toString().toStdString();
-                ev.operation = q.value(6).toString().toStdString();
-                ev.status = q.value(7).toString().toStdString();
-                ev.level = stringToLogLevel(ev.status);
-                ev.targetType = q.value(8).toString().toStdString();
-                ev.target = q.value(9).isNull() ? "" : q.value(9).toString().toStdString();
-                ev.message = q.value(10).toString().toStdString();
-                ev.errorCode = q.value(11).toInt();
-                ev.detailsJson = q.value(12).toString().toStdString();
-                ev.durationMs = q.value(13).toDouble();
-                results.push_back(std::move(ev));
+                results.push_back(readEventFromQuery(q));
             }
         } else {
             m_lastError = q.lastError().text().toStdString();
@@ -438,25 +421,40 @@ public:
 
         if (q.exec()) {
             while (q.next()) {
-                LogEvent ev;
-                ev.eventId = q.value(0).toLongLong();
-                ev.id = ev.eventId;
-                ev.operationId = q.value(1).toString().toStdString();
-                ev.parentOperationId = q.value(2).isNull() ? "" : q.value(2).toString().toStdString();
-                ev.timestampUtc = q.value(3).toString().toStdString();
-                ev.localUtcOffset = q.value(4).toString().toStdString();
-                ev.category = q.value(5).toString().toStdString();
-                ev.operation = q.value(6).toString().toStdString();
-                ev.status = q.value(7).toString().toStdString();
-                ev.level = stringToLogLevel(ev.status);
-                ev.targetType = q.value(8).toString().toStdString();
-                ev.target = q.value(9).isNull() ? "" : q.value(9).toString().toStdString();
-                ev.message = q.value(10).toString().toStdString();
-                ev.errorCode = q.value(11).toInt();
-                ev.detailsJson = q.value(12).toString().toStdString();
-                ev.durationMs = q.value(13).toDouble();
-                results.push_back(std::move(ev));
+                results.push_back(readEventFromQuery(q));
             }
+        }
+        return results;
+    }
+
+    /// Query chronological playback & load history from operation_logs (Spec v3.8.1 §9.5 / §10.5)
+    std::vector<LogEvent> queryPlaybackHistory(int limit = 200) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::vector<LogEvent> results;
+        if (!m_db.isOpen()) return results;
+
+        QSqlQuery q(m_db);
+        q.prepare(R"(
+            SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset,
+                   category, operation, status, target_type, target, message, error_code, details_json, duration_ms
+            FROM operation_logs
+            WHERE status = 'Success'
+              AND (
+                    (category = 'Transport' AND operation IN ('Play', 'AutoAdvance'))
+                 OR (category = 'Deck' AND operation = 'LoadTrack')
+                 OR (category = 'FolderSession' AND operation IN ('StartSession', 'AutoAdvance'))
+              )
+            ORDER BY event_id DESC
+            LIMIT ?
+        )");
+        q.addBindValue(std::clamp(limit, 1, 2000));
+
+        if (q.exec()) {
+            while (q.next()) {
+                results.push_back(readEventFromQuery(q));
+            }
+        } else {
+            m_lastError = q.lastError().text().toStdString();
         }
         return results;
     }
@@ -547,6 +545,27 @@ public:
     [[nodiscard]] std::string lastError() const { return m_lastError; }
 
 private:
+    static LogEvent readEventFromQuery(const QSqlQuery& q) {
+        LogEvent ev;
+        ev.eventId = q.value(0).toLongLong();
+        ev.id = ev.eventId;
+        ev.operationId = q.value(1).toString().toStdString();
+        ev.parentOperationId = q.value(2).isNull() ? "" : q.value(2).toString().toStdString();
+        ev.timestampUtc = q.value(3).toString().toStdString();
+        ev.localUtcOffset = q.value(4).toString().toStdString();
+        ev.category = q.value(5).toString().toStdString();
+        ev.operation = q.value(6).toString().toStdString();
+        ev.status = q.value(7).toString().toStdString();
+        ev.level = stringToLogLevel(ev.status);
+        ev.targetType = q.value(8).toString().toStdString();
+        ev.target = q.value(9).isNull() ? "" : q.value(9).toString().toStdString();
+        ev.message = q.value(10).toString().toStdString();
+        ev.errorCode = q.value(11).toInt();
+        ev.detailsJson = q.value(12).toString().toStdString();
+        ev.durationMs = q.value(13).toDouble();
+        return ev;
+    }
+
     QString m_connectionName;
     QSqlDatabase m_db;
     std::mutex m_mutex;

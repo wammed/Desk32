@@ -1,6 +1,7 @@
 #include "LogService.hpp"
 #include <QStandardPaths>
 #include <QDir>
+#include <QFileInfo>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonDocument>
@@ -208,6 +209,11 @@ std::vector<LogEvent> LogService::queryRelatedLogs(const std::string& operationI
     return m_queryRepo->queryRelatedEvents(operationId);
 }
 
+std::vector<LogEvent> LogService::queryPlaybackHistory(int limit) {
+    if (!m_queryRepo) return {};
+    return m_queryRepo->queryPlaybackHistory(limit);
+}
+
 bool LogService::exportJsonl(const QString& filePath, const LogFilter& filter) {
     if (!m_queryRepo) return false;
     return m_queryRepo->exportToJsonl(filePath, filter);
@@ -356,6 +362,42 @@ QVariantList LogService::fetchRelatedLogs(const QString& operationId) {
         m["errorCode"] = ev.errorCode;
         m["detailsJson"] = QString::fromStdString(ev.detailsJson);
         m["durationMs"] = ev.durationMs;
+        list.append(m);
+    }
+    return list;
+}
+
+QVariantList LogService::fetchPlaybackHistory(int limit) {
+    auto events = queryPlaybackHistory(limit);
+    QVariantList list;
+    for (const auto& ev : events) {
+        QVariantMap m;
+        m["eventId"] = QVariant::fromValue(ev.eventId);
+        m["timestampUtc"] = QString::fromStdString(ev.timestampUtc);
+        m["localUtcOffset"] = QString::fromStdString(ev.localUtcOffset);
+        m["category"] = QString::fromStdString(ev.category);
+        m["operation"] = QString::fromStdString(ev.operation);
+        m["message"] = QString::fromStdString(ev.message);
+
+        QJsonObject det;
+        if (!ev.detailsJson.empty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson));
+            if (doc.isObject()) det = doc.object();
+        }
+        const QString deck = det.value(QStringLiteral("deck")).toString(QString::fromStdString(ev.target));
+        QString trackPath = det.value(QStringLiteral("path")).toString();
+        if (trackPath.isEmpty()) {
+            trackPath = det.value(QStringLiteral("first_track_path")).toString();
+        }
+        if (trackPath.isEmpty() && ev.targetType == "File") {
+            trackPath = QString::fromStdString(ev.target);
+        }
+        m["deck"] = deck;
+        m["trackPath"] = trackPath;
+        m["fileName"] = trackPath.isEmpty() ? QString() : QFileInfo(trackPath).fileName();
+        m["durationMs"] = det.value(QStringLiteral("duration_ms_track")).toDouble(0.0);
+        m["positionMs"] = det.value(QStringLiteral("position_ms")).toDouble(0.0);
+        m["detailsJson"] = QString::fromStdString(ev.detailsJson);
         list.append(m);
     }
     return list;

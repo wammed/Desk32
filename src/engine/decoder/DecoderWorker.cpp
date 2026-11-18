@@ -1050,13 +1050,35 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     }
     break;
   case WorkerCommandType::ConfigureRate: {
-    std::lock_guard<std::mutex> lock(m_trackMutex);
-    if (m_trackInfo.sampleRate > 0.0 && cmd.graphRate > 0.0) {
-      m_resampler.configure(m_trackInfo.sampleRate, cmd.graphRate,
-                            m_trackInfo.channels);
-      m_ringBuffer.resetProducer();
-      m_pendingOutOffset = 0;
-      m_pendingOutCount = 0;
+    bool shouldPrefill = false;
+    {
+      std::lock_guard<std::mutex> lock(m_trackMutex);
+      if (m_trackInfo.sampleRate > 0.0 && cmd.graphRate > 0.0) {
+        m_resampler.configure(m_trackInfo.sampleRate, cmd.graphRate,
+                              m_trackInfo.channels);
+        m_ringBuffer.resetProducer();
+        m_pendingOutOffset = 0;
+        m_pendingOutCount = 0;
+        if (m_isOpen.load(std::memory_order_acquire)) {
+          m_isEof.store(false, std::memory_order_release);
+          m_eofDelivered.store(false, std::memory_order_release);
+          m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+          const int64_t resumeFrame = std::max<int64_t>(0, m_playhead.load(std::memory_order_acquire));
+          if (m_isSynthetic.load(std::memory_order_relaxed)) {
+            m_syntheticPos = resumeFrame;
+            shouldPrefill = true;
+          } else if (m_decoder) {
+            m_decoder->seek(resumeFrame);
+            m_resampler.reset();
+            shouldPrefill = true;
+          }
+        }
+      }
+    }
+    if (shouldPrefill) {
+      for (int i = 0; i < 4; ++i) {
+        doDecodeChunk();
+      }
     }
   } break;
   default:

@@ -53,6 +53,21 @@ constexpr int32_t PresetSaveFailed = 5004;
 constexpr int32_t VulkanFallbackToOpenGL = 6001;
 constexpr int32_t SceneGraphInitError = 6002;
 
+// 7000-7999: Dedicated Workspace / Provenance / Save & Rollback
+constexpr int32_t WorkspaceNotOpenFailClosed = 7001;
+constexpr int32_t WorkspaceLockedAccessDenied = 7002;
+constexpr int32_t WorkspaceInUseByOtherProcess = 7003;
+constexpr int32_t WorkspaceRegistrationConflict = 7004;
+constexpr int32_t WorkspaceContainmentViolation = 7005;
+constexpr int32_t WorkspaceHardLinkRejected = 7006;
+constexpr int32_t WorkspaceImportHashMismatch = 7007;
+constexpr int32_t WorkspaceImportNameConflict = 7008;
+constexpr int32_t WorkspaceCowEvacuationFailed = 7009;
+constexpr int32_t WorkspaceExternalModification = 7010;
+constexpr int32_t WorkspaceSaveAbortedOnChange = 7011;
+constexpr int32_t WorkspaceRollbackFailed = 7012;
+constexpr int32_t WorkspacePartialRecovery = 7013;
+
 // 9000-9999: Logging / Diagnostics Subsystem
 constexpr int32_t LogQueueOverflow = 9001;
 

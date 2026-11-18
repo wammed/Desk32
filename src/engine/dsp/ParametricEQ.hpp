@@ -7,11 +7,11 @@
 #include <atomic>
 #include <algorithm>
 
-// 24-Band PEQ (Left 12 Bands, Right 12 Bands) strictly independent
+// 32-Band PEQ (Left 16 Bands, Right 16 Bands) strictly independent
 class ParametricEQ
 {
 public:
-    static constexpr size_t BANDS_PER_CHANNEL = 12;
+    static constexpr size_t BANDS_PER_CHANNEL = 16;
 
     struct BandConfig {
         bool enabled = true;
@@ -47,10 +47,10 @@ public:
 
     void initDefaults()
     {
-        // Standard ISO frequencies distributed across audio band
+        // Standard 16 ISO frequencies distributed across audio band
         const double defaultFreqs[BANDS_PER_CHANNEL] = {
-            30.0, 60.0, 120.0, 250.0, 500.0, 1000.0,
-            2000.0, 4000.0, 6000.0, 8000.0, 12000.0, 16000.0
+            25.0, 40.0, 63.0, 100.0, 160.0, 250.0, 400.0, 630.0,
+            1000.0, 1600.0, 2500.0, 4000.0, 6300.0, 10000.0, 14000.0, 18000.0
         };
 
         for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
@@ -153,14 +153,32 @@ public:
         }
     }
 
+    /// Export all bands for dynamic vector serialization (Spec v3.8 §5.6)
+    [[nodiscard]] std::vector<BandConfig> exportBands(bool rightChannel) const {
+        const auto& src = rightChannel ? m_rightBands : m_leftBands;
+        return std::vector<BandConfig>(src.begin(), src.end());
+    }
+
+    /// Import bands from dynamic vector serialization
+    void importBands(bool rightChannel, const std::vector<BandConfig>& bands) {
+        const size_t n = std::min(bands.size(), BANDS_PER_CHANNEL);
+        for (size_t i = 0; i < n; ++i) {
+            if (rightChannel) {
+                setRightBand(i, bands[i]);
+            } else {
+                setLeftBand(i, bands[i]);
+            }
+        }
+    }
+
     /// Extract preset band configurations without modifying DSP state (Control Thread, P0-27)
     static bool getPresetBandConfigs(const std::string& presetName,
                                      std::array<BandConfig, BANDS_PER_CHANNEL>& leftBands,
                                      std::array<BandConfig, BANDS_PER_CHANNEL>& rightBands)
     {
         const double defaultFreqs[BANDS_PER_CHANNEL] = {
-            30.0, 60.0, 120.0, 250.0, 500.0, 1000.0,
-            2000.0, 4000.0, 6000.0, 8000.0, 12000.0, 16000.0
+            25.0, 40.0, 63.0, 100.0, 160.0, 250.0, 400.0, 630.0,
+            1000.0, 1600.0, 2500.0, 4000.0, 6300.0, 10000.0, 14000.0, 18000.0
         };
 
         for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
@@ -176,31 +194,35 @@ public:
         if (presetName == "Monitor Flat") {
             // Flat defaults
         } else if (presetName == "Acoustic Clarity") {
-            leftBands[3].gainDb = -2.0; // 250 Hz
-            leftBands[7].gainDb = 1.5;  // 4 kHz
-            leftBands[10].gainDb = 2.5; // 12 kHz
-            rightBands[3].gainDb = -2.0;
-            rightBands[7].gainDb = 1.5;
-            rightBands[10].gainDb = 2.5;
+            leftBands[5].gainDb = -2.0;  // 250 Hz
+            leftBands[11].gainDb = 1.5;  // 4 kHz
+            leftBands[13].gainDb = 2.5;  // 10 kHz
+            rightBands[5].gainDb = -2.0;
+            rightBands[11].gainDb = 1.5;
+            rightBands[13].gainDb = 2.5;
         } else if (presetName == "Harman Target") {
-            leftBands[1].gainDb = 4.0;  // 60 Hz shelf/peak
-            leftBands[7].gainDb = 2.5;  // 4 kHz
+            leftBands[1].frequency = 60.0;
+            leftBands[1].gainDb = 4.0;   // Low boost
+            leftBands[7].frequency = 4000.0;
+            leftBands[7].gainDb = 2.5;   // Presence boost
+            rightBands[1].frequency = 60.0;
             rightBands[1].gainDb = 4.0;
+            rightBands[7].frequency = 4000.0;
             rightBands[7].gainDb = 2.5;
         } else if (presetName == "Bass Punch") {
-            leftBands[1].gainDb = 3.5;  // 60 Hz
-            leftBands[2].gainDb = 2.0;  // 120 Hz
-            leftBands[3].gainDb = -1.5; // 250 Hz (clean mud)
-            rightBands[1].gainDb = 3.5;
-            rightBands[2].gainDb = 2.0;
-            rightBands[3].gainDb = -1.5;
+            leftBands[2].gainDb = 3.5;   // 63 Hz
+            leftBands[3].gainDb = 2.0;   // 100 Hz
+            leftBands[5].gainDb = -1.5;  // 250 Hz
+            rightBands[2].gainDb = 3.5;
+            rightBands[3].gainDb = 2.0;
+            rightBands[5].gainDb = -1.5;
         } else if (presetName == "Vocal Air") {
-            leftBands[4].gainDb = -1.0; // 500 Hz
-            leftBands[6].gainDb = 2.0;  // 2 kHz
-            leftBands[9].gainDb = 3.0;  // 8 kHz
-            rightBands[4].gainDb = -1.0;
-            rightBands[6].gainDb = 2.0;
-            rightBands[9].gainDb = 3.0;
+            leftBands[7].gainDb = -1.0;  // 630 Hz
+            leftBands[10].gainDb = 2.0;  // 2.5 kHz
+            leftBands[12].gainDb = 3.0;  // 6.3 kHz
+            rightBands[7].gainDb = -1.0;
+            rightBands[10].gainDb = 2.0;
+            rightBands[12].gainDb = 3.0;
         } else {
             return false;
         }

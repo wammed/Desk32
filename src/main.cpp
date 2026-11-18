@@ -16,6 +16,7 @@
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
 #include "core/log/LogErrorCodes.hpp"
+#include "engine/workspace/WorkspaceManager.hpp"
 
 namespace {
 struct VulkanProbeResult {
@@ -180,6 +181,7 @@ int main(int argc, char *argv[])
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager", &LanguageManager::instance());
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController", &desk32::core::EngineController::instance());
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LogService", &desk32::core::log::LogService::instance());
+    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "WorkspaceManager", &desk32::engine::workspace::WorkspaceManager::instance());
 
     const QUrl url(QStringLiteral("qrc:/Desk32/qml/Main.qml"));
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreated,
@@ -226,6 +228,7 @@ int main(int argc, char *argv[])
     }
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, []() {
+        desk32::engine::workspace::WorkspaceManager::instance().closeWorkspaceForShutdown();
         desk32::core::EngineController::instance().recordSessionEnd(QStringLiteral("normal_quit"));
         desk32::core::log::LogService::instance().flush();
     });

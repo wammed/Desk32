@@ -232,6 +232,7 @@ private slots:
     void testSeekObservabilityLogging();
     void testSessionAndFolderObservabilityLogging();
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
+    void testMasterGainPostTapIsolation();
     void cleanupTestCase();
 
 private:
@@ -258,7 +259,19 @@ void TestPhase2Dsp::test24BandParametricEqAndResponseCurve()
     peq.configure(48000.0);
     peq.setEnabled(true);
 
-    // 1. Verify 12 Left Bands + 12 Right Bands are strictly independent (Section 5.2)
+    QCOMPARE(ParametricEQ::BANDS_PER_CHANNEL, size_t(16));
+
+    // 1. Verify Left Bands + Right Bands are strictly independent (Section 5.6: 16 bands/ch)
+    ParametricEQ::BandConfig highShelf;
+    highShelf.frequency = 18000.0;
+    highShelf.gainDb = 3.0;
+    highShelf.Q = 0.707;
+    highShelf.type = BiquadFilterType::HighShelf;
+    highShelf.enabled = true;
+    peq.setLeftBand(15, highShelf);
+    QCOMPARE(peq.leftBand(15).frequency, 18000.0);
+    QCOMPARE(peq.rightBand(15).gainDb, 0.0);
+
     ParametricEQ::BandConfig leftCfg;
     leftCfg.frequency = 1000.0;
     leftCfg.gainDb = 6.0;
@@ -3341,6 +3354,33 @@ void TestPhase2Dsp::testAutoAdvanceLoggingAndNoDoubleAdvance() {
     QCOMPARE(autoAdvCount, 1);
     QCOMPARE(validEofCount, 1);
     QCOMPARE(ignoredEofCount, 1);
+}
+
+void TestPhase2Dsp::testMasterGainPostTapIsolation()
+{
+    using namespace desk32::engine::pipeline;
+    using namespace desk32::engine::dsp;
+    AudioPipeline pipe(48000.0);
+    ParameterSmoother smoothL(1.0, 1.0, 48000.0);
+    ParameterSmoother smoothR(1.0, 1.0, 48000.0);
+
+    const size_t N = 512;
+    std::vector<double> L(N, 0.5);
+    std::vector<double> R(N, 0.5);
+    std::vector<float> pcm(N * 2, 0.0f);
+
+    smoothL.reset(0.1);
+    smoothR.reset(0.1);
+    pipe.process(L.data(), R.data(), N, pcm.data(), desk32::engine::format::SampleFormat::Float32, false,
+                 &smoothL, &smoothR, 0.5, false);
+
+    const DspTelemetry tel = pipe.currentTelemetry();
+    // Logical Render Tap must reflect pre-fader, pre-level-match signal (~0.5)
+    QVERIFY(std::abs(tel.renderTapPeakL - 0.5) < 1e-4);
+    QVERIFY(std::abs(tel.renderTapPeakR - 0.5) < 1e-4);
+    // Final master peak must reflect 0.5 * 0.1 * 0.5 = 0.025
+    QVERIFY(std::abs(tel.masterPeakL - 0.025) < 1e-3);
+    QVERIFY(std::abs(tel.masterPeakR - 0.025) < 1e-3);
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

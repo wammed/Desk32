@@ -148,6 +148,27 @@ Rectangle {
 
                         Rectangle { Layout.fillWidth: true; height: 1; color: "#222730" }
 
+                        // Active Workspace Output Target Indicator (Spec v3.8.1 §19 D-2)
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 28
+                            radius: 3
+                            color: WorkspaceManager.hasOpenWorkspace ? "#0d1f18" : "#2b1616"
+                            border.color: WorkspaceManager.hasOpenWorkspace ? "#00E67660" : "#FF5252"
+                            Label {
+                                anchors.fill: parent
+                                anchors.margins: 6
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideMiddle
+                                font.pixelSize: 9
+                                font.bold: true
+                                color: WorkspaceManager.hasOpenWorkspace ? "#00E676" : "#FF8A80"
+                                text: WorkspaceManager.hasOpenWorkspace
+                                      ? qsTr("Output Workspace: %1").arg(WorkspaceManager.openWorkspacePath)
+                                      : qsTr("No Workspace Open (Read-Only Mode) — Open a Workspace to Render")
+                            }
+                        }
+
                         // Single track render from a Reference Deck
                         RowLayout {
                             Label { text: qsTr("Track Render:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 80 }
@@ -162,6 +183,7 @@ Rectangle {
                                 Layout.fillWidth: true
                                 text: qsTr("Render Deck %1 Track").arg(sourceDeckCombo.currentText)
                                 font.pixelSize: 10
+                                enabled: WorkspaceManager.hasOpenWorkspace
                                 onClicked: {
                                     EngineController.startTrackRender(
                                         sourceDeckCombo.currentText,
@@ -194,7 +216,7 @@ Rectangle {
                             Layout.fillWidth: true
                             text: qsTr("Start Album Render")
                             font.pixelSize: 10
-                            enabled: renderRoot.albumFolder.length > 0
+                            enabled: WorkspaceManager.hasOpenWorkspace && renderRoot.albumFolder.length > 0
                             onClicked: {
                                 EngineController.startAlbumRender(
                                     renderRoot.albumFolder,
@@ -210,7 +232,7 @@ Rectangle {
                             wrapMode: Text.WordWrap
                             font.pixelSize: 9
                             color: "#6c7885"
-                            text: qsTr("Output is written to a new {Serial}{YYYYMMDD_HHMMSS_mmm} folder inside the source folder. Originals are never modified.")
+                            text: qsTr("Output is written to a new {Serial}{YYYYMMDD_HHMMSS_mmm} folder inside the open dedicated workspace. Originals are never modified.")
                         }
                     }
                 }

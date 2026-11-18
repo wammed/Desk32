@@ -103,24 +103,24 @@ QJsonObject PresetManager::getFactoryPreset(const QString& category, const QStri
         };
 
         if (presetName == "Monitor Flat") {
-            for (int i = 0; i < 12; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
+            for (int i = 0; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
         } else if (presetName == "Acoustic Clarity") {
             addBand(0, 250.0, -1.5, 1.4, 0, true);
             addBand(1, 3500.0, 1.8, 1.2, 0, true);
             addBand(2, 10000.0, 2.0, 0.7, 2, true); // High shelf
-            for (int i = 3; i < 12; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
+            for (int i = 3; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
         } else if (presetName == "Harman Target") {
             addBand(0, 105.0, 4.5, 0.7, 1, true); // Low shelf
             addBand(1, 3000.0, 3.0, 1.4, 0, true);
             addBand(2, 8000.0, -1.0, 2.0, 0, true);
-            for (int i = 3; i < 12; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
+            for (int i = 3; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
         } else if (presetName == "Bass Punch") {
             addBand(0, 60.0, 3.5, 1.8, 0, true);
             addBand(1, 120.0, -1.0, 2.0, 0, true);
-            for (int i = 2; i < 12; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
+            for (int i = 2; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
         } else if (presetName == "Vocal Air") {
             addBand(0, 12000.0, 2.5, 0.7, 2, true); // High shelf
-            for (int i = 1; i < 12; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
+            for (int i = 1; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
         }
         root["bands"] = bands;
         return root;
@@ -156,9 +156,11 @@ QJsonObject PresetManager::getFactoryPreset(const QString& category, const QStri
             root["compressor"] = comp;
 
             QJsonObject filter;
+            filter["hpf_q"] = 0.70710678;
             filter["lpf_enabled"] = true;
             filter["lpf_frequency"] = 18000.0;
             filter["lpf_slope"] = 1; // 24dB/oct
+            filter["lpf_q"] = 0.70710678;
             root["filter"] = filter;
         }
         return root;

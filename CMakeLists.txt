@@ -74,6 +74,7 @@ pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
+pkg_check_modules(TAGLIB REQUIRED taglib)
 
 qt_standard_project_setup(REQUIRES 6.4)
 
@@ -112,6 +113,10 @@ qt_add_executable(desk32
     src/engine/render/RenderChain.hpp
     src/engine/render/RenderEngine.hpp
     src/engine/render/RenderEngine.cpp
+    src/engine/metadata/TrackMetadata.hpp
+    src/engine/metadata/TrackMetadata.cpp
+    src/engine/workspace/WorkspaceManager.hpp
+    src/engine/workspace/WorkspaceManager.cpp
 )
 
 # QML Module Setup
@@ -122,6 +127,7 @@ qt_add_qml_module(desk32
         qml/Main.qml
         qml/DspPreviewPanel.qml
         qml/RenderPanel.qml
+        qml/WorkspacePanel.qml
     RESOURCES
         images/Desk32-Icon.svg
 )
@@ -136,6 +142,7 @@ qt_add_translations(desk32
         qml/Main.qml
         qml/DspPreviewPanel.qml
         qml/RenderPanel.qml
+        qml/WorkspacePanel.qml
 )
 
 target_link_libraries(desk32 PRIVATE
@@ -152,6 +159,7 @@ target_link_libraries(desk32 PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
     ALSA::ALSA
 )
 
@@ -167,7 +175,9 @@ target_include_directories(desk32 SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(desk32 PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 # Testing support
 enable_testing()

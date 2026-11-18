@@ -20,6 +20,8 @@
 #include "engine/session/FolderSession.hpp"
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
+#include "core/log/LogErrorCodes.hpp"
+#include "engine/workspace/WorkspaceManager.hpp"
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <QCryptographicHash>
@@ -254,6 +256,9 @@ private slots:
 
     // 27. A-1 / A-4: EngineController syncs individual DSP node enabled states & bypasses to RenderEngine
     void testControllerDspNodeEnableSyncToRender();
+
+    // 28. v3.8.1 §19 D-2: Fail-closed render without workspace & workspace-scoped output + serials
+    void testFailClosedWithoutWorkspaceAndWorkspaceSerial();
 
 private:
     struct CleanupEvaluation {
@@ -493,6 +498,10 @@ void TestPhase4ExportRender::initTestCase()
     LogService::instance().start(m_dbPath);
     RenderSequenceManager::instance().initialize(m_dbPath);
     RenderEngine::instance().setDatabasePath(m_dbPath);
+
+    auto& wsMgr = desk32::engine::workspace::WorkspaceManager::instance();
+    wsMgr.setConfigFilePathForTesting(m_tempDir->filePath("test_workspaces.json"));
+    wsMgr.resetForTesting();
 }
 
 void TestPhase4ExportRender::init()
@@ -500,6 +509,8 @@ void TestPhase4ExportRender::init()
     g_renderTimeoutOccurred.store(false, std::memory_order_release);
     g_renderCleanupFailed.store(false, std::memory_order_release);
     RenderEngine::instance().clearTestTaskHook();
+    RenderEngine::instance().setWorkspacePath(QString());
+    desk32::engine::workspace::WorkspaceManager::instance().resetForTesting();
     QVERIFY2(RenderEngine::instance().isIdle(), "Render engine must be idle at start of test");
 }
 
@@ -515,6 +526,8 @@ void TestPhase4ExportRender::cleanup()
 void TestPhase4ExportRender::cleanupTestCase()
 {
     RenderEngine::instance().stop();
+    RenderEngine::instance().setWorkspacePath(QString());
+    desk32::engine::workspace::WorkspaceManager::instance().resetForTesting();
     RenderSequenceManager::instance().close();
     LogService::instance().stop();
     m_tempDir.reset();
@@ -878,6 +891,10 @@ void TestPhase4ExportRender::testListeningCorrectionAndVolumeIsolation()
 void TestPhase4ExportRender::testEngineControllerRenderIntegration()
 {
     RenderEngine::instance().resetTaskInfo();
+    const QString wsDir = m_tempDir->filePath("ctrl_ws_integration");
+    QDir().mkpath(wsDir);
+    QString wsErr;
+    QVERIFY2(desk32::engine::workspace::WorkspaceManager::instance().registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
     EngineController& controller = EngineController::instance();
     QVERIFY(controller.initialize());
 
@@ -2084,6 +2101,10 @@ void TestPhase4ExportRender::testRenderCleanupFailureAndTimeoutDetection()
 
 void TestPhase4ExportRender::testStep3ControllerCanonicalStateAndTrackResults()
 {
+    const QString wsDir = m_tempDir->filePath("ctrl_ws_step3");
+    QDir().mkpath(wsDir);
+    QString wsErr;
+    QVERIFY2(desk32::engine::workspace::WorkspaceManager::instance().registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
     EngineController& controller = EngineController::instance();
     RenderEngine& engine = RenderEngine::instance();
     engine.resetTaskInfo();
@@ -2131,6 +2152,10 @@ void TestPhase4ExportRender::testStep3ControllerCanonicalStateAndTrackResults()
 
 void TestPhase4ExportRender::testStep3CancelAllAndLogHierarchy()
 {
+    const QString wsDir = m_tempDir->filePath("ctrl_ws_cancel_all");
+    QDir().mkpath(wsDir);
+    QString wsErr;
+    QVERIFY2(desk32::engine::workspace::WorkspaceManager::instance().registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
     EngineController& controller = EngineController::instance();
     RenderEngine& engine = RenderEngine::instance();
     engine.resetTaskInfo();
@@ -2221,6 +2246,10 @@ void TestPhase4ExportRender::testStep3MonitorVolumeAndAudition()
 
 void TestPhase4ExportRender::testControllerDspNodeEnableSyncToRender()
 {
+    const QString wsDir = m_tempDir->filePath("ctrl_ws_dsp_sync");
+    QDir().mkpath(wsDir);
+    QString wsErr;
+    QVERIFY2(desk32::engine::workspace::WorkspaceManager::instance().registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
     EngineController& controller = EngineController::instance();
     RenderEngine& engine = RenderEngine::instance();
     engine.resetTaskInfo();
@@ -2341,6 +2370,73 @@ void TestPhase4ExportRender::testControllerDspNodeEnableSyncToRender()
     QCOMPARE(controller.bitPerfectStatus(), 0);
     controller.setGlobalDspBypass(false);
     controller.setOutputRoutingMode(0);
+}
+
+void TestPhase4ExportRender::testFailClosedWithoutWorkspaceAndWorkspaceSerial()
+{
+    EngineController& controller = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+    auto& wsMgr = desk32::engine::workspace::WorkspaceManager::instance();
+    QVERIFY(controller.initialize(true));
+
+    const QString prevWs = wsMgr.openWorkspacePath();
+    QString extDir = m_tempDir->filePath("ext_source_v381");
+    QDir().mkpath(extDir);
+    const QString trackPath = extDir + "/ext_src.wav";
+    QVERIFY(createTestWav(trackPath, 48000.0, 2400, 440.0));
+    QVERIFY(controller.loadTrack("A", trackPath));
+
+    // 1. Simulated startup in read-only mode (no open workspace) -> startTrackRender / startAlbumRender MUST fail closed
+    wsMgr.simulateAppRestartForTesting();
+    wsMgr.enterReadOnlyMode();
+    QVERIFY(!wsMgr.hasOpenWorkspace());
+    QVERIFY(controller.startTrackRender("A").isEmpty());
+    QVERIFY(controller.startAlbumRender(extDir).isEmpty());
+
+    LogService::instance().flush();
+    QVariantMap filter;
+    filter["category"] = "Render";
+    filter["status"] = "Failed";
+    const QVariantList logs = LogService::instance().fetchLogs(filter);
+    bool foundNotOpenErr = false;
+    for (const auto& item : logs) {
+        if (item.toMap().value("errorCode").toInt() == ErrorCode::WorkspaceNotOpenFailClosed) {
+            foundNotOpenErr = true;
+            break;
+        }
+    }
+    QVERIFY(foundNotOpenErr);
+
+    // 2. Restart cleanly & open dedicated workspace -> render outputs & serials stay inside workspace, NOT external source
+    wsMgr.simulateAppRestartForTesting();
+    const QString ws2 = m_tempDir->filePath("isolated_render_ws");
+    QDir().mkpath(ws2);
+    QString err;
+    QVERIFY2(wsMgr.registerAndOpenWorkspace(ws2, err), qPrintable(err));
+
+    QSignalSpy spy1(&engine, &RenderEngine::renderTaskFinished);
+    const QString tid1 = controller.startTrackRender("A");
+    QVERIFY(!tid1.isEmpty());
+    QVERIFY(spy1.wait(10000));
+    const QString outDir1 = spy1.at(0).at(2).toString();
+    QVERIFY(outDir1.startsWith(QDir::cleanPath(ws2) + "/A"));
+    QCOMPARE(QDir(extDir).entryList(QDir::Dirs | QDir::NoDotAndDotDot).size(), 0);
+    controller.resetRenderStatus();
+
+    QSignalSpy spy2(&engine, &RenderEngine::renderTaskFinished);
+    const QString tid2 = controller.startAlbumRender(extDir);
+    QVERIFY(!tid2.isEmpty());
+    QVERIFY(spy2.wait(10000));
+    const QString outDir2 = spy2.at(0).at(2).toString();
+    QVERIFY(outDir2.startsWith(QDir::cleanPath(ws2) + "/B"));
+    controller.resetRenderStatus();
+
+    // Restore original test workspace
+    if (!prevWs.isEmpty()) {
+        wsMgr.simulateAppRestartForTesting();
+        QString rerr;
+        wsMgr.openWorkspace(prevWs, rerr);
+    }
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

@@ -5,6 +5,7 @@
 #include "engine/dsp/Resampler.hpp"
 #include "engine/dsp/ParameterCommandQueue.hpp"
 #include "engine/dsp/DspParameterMailbox.hpp"
+#include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/format/FormatConverter.hpp"
 #include "engine/memory/EpochReclaimer.hpp"
 #include "engine/routing/OutputPathRouter.hpp"
@@ -32,6 +33,8 @@ struct DspTelemetry {
     uint64_t processedFrameCount = 0;
     double masterPeakL = 0.0;
     double masterPeakR = 0.0;
+    double renderTapPeakL = 0.0;
+    double renderTapPeakR = 0.0;
     double masterRmsL = 0.0;
     double masterRmsR = 0.0;
     bool masterClipped = false;
@@ -292,7 +295,11 @@ public:
     /// - Branches at Logical Render Tap: Render Monitor bypasses Listening Correction with 0.000000 leakage.
     /// - Converts to target device PCM format with TPDF dither via FormatConverter at the boundary.
     void process(double* left, double* right, size_t frameCount,
-                 void* outPcmBuffer, SampleFormat targetFormat, bool applyDither = true)
+                 void* outPcmBuffer, SampleFormat targetFormat, bool applyDither = true,
+                 dsp::ParameterSmoother* postTapSmootherL = nullptr,
+                 dsp::ParameterSmoother* postTapSmootherR = nullptr,
+                 double monitorLevelMatchGain = 1.0,
+                 bool directModeBypass = false)
     {
         // 1. Enter epoch to protect current active chains from destruction during Audio Thread execution
         auto masterGuard = m_masterReclaimer.enterRead();
@@ -313,33 +320,57 @@ public:
         drainParameterCommands(masterGuard.chain, listeningGuard.chain);
         drainParameterMailbox(masterGuard.chain, listeningGuard.chain);
 
+        double tapPeakL = 0.0;
+        double tapPeakR = 0.0;
+
+        if (directModeBypass) {
+            // Spec §2.6 Direct Mode: Bypass all DSP, External Insert, Listening Correction, and software gain/mute
+            for (size_t i = 0; i < frameCount; ++i) {
+                tapPeakL = std::max(tapPeakL, std::abs(left[i]));
+                tapPeakR = std::max(tapPeakR, std::abs(right[i]));
+            }
+            FormatConverter::convertPlanarFloat64ToPcm(
+                left, right, frameCount, outPcmBuffer, targetFormat, applyDither
+            );
+            publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR);
+            return;
+        }
+
         // 2. Upstream Master / DSP Chain (before Logical Render Tap)
         if (masterGuard.chain) {
             masterGuard.chain->process(left, right, frameCount);
         }
 
-        // 3. Logical Render Tap Branching (Section 5.11)
+        // Measure Logical Render Tap peak (post Master Chain, pre Monitor/Fader/Listening Correction)
+        for (size_t i = 0; i < frameCount; ++i) {
+            tapPeakL = std::max(tapPeakL, std::abs(left[i]));
+            tapPeakR = std::max(tapPeakR, std::abs(right[i]));
+        }
+
+        // 3. Logical Render Tap Branching (Section 5.11, Spec §5.2 downstream Master Gain & Level Match)
         const OutputPathMode currentMode = m_outputMode.load(std::memory_order_relaxed);
         const double listenVol = m_listeningVolume.load(std::memory_order_relaxed);
         const double renderMonVol = m_renderMonitorVolume.load(std::memory_order_relaxed);
 
         if (currentMode == OutputPathMode::RenderMonitorPath) {
-            // Render Monitor Path:
-            // Strictly NO Listening Correction. Directly scale by render monitor volume.
+            // Render Monitor Path: Strictly NO Listening Correction.
             for (size_t i = 0; i < frameCount; ++i) {
-                left[i]  *= renderMonVol;
-                right[i] *= renderMonVol;
+                const double masterGainL = postTapSmootherL ? postTapSmootherL->next() : 1.0;
+                const double masterGainR = postTapSmootherR ? postTapSmootherR->next() : 1.0;
+                left[i]  *= masterGainL * monitorLevelMatchGain * renderMonVol;
+                right[i] *= masterGainR * monitorLevelMatchGain * renderMonVol;
             }
         } else {
-            // Listening Path:
-            // Route through Listening Correction (PEQ headphone/speaker correction)
+            // Listening Path: Route through Listening Correction (PEQ headphone/speaker correction)
             if (listeningGuard.chain) {
                 listeningGuard.chain->process(left, right, frameCount);
             }
-            // Scale by listening volume
+            // Scale by post-tap Master Gain/Mute, comparative Level Match, and Listening Volume
             for (size_t i = 0; i < frameCount; ++i) {
-                left[i]  *= listenVol;
-                right[i] *= listenVol;
+                const double masterGainL = postTapSmootherL ? postTapSmootherL->next() : 1.0;
+                const double masterGainR = postTapSmootherR ? postTapSmootherR->next() : 1.0;
+                left[i]  *= masterGainL * monitorLevelMatchGain * listenVol;
+                right[i] *= masterGainR * monitorLevelMatchGain * listenVol;
             }
         }
 
@@ -349,7 +380,7 @@ public:
         );
 
         // 5. Publish Telemetry Snapshot to UI Thread (P0-26)
-        publishTelemetry(masterGuard.chain, frameCount, left, right);
+        publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR);
     }
 
 private:
@@ -518,10 +549,13 @@ private:
     /// Audio Thread: Mutex-free, non-blocking lock-free Telemetry publication (P0-29).
     /// Inspects up to AudioChain::MAX_NODES (strictly bounded O(N) where N <= 16, zero dynamic allocation, zero locks)
     /// and publishes the snapshot buffer via a single O(1) atomic exchange.
-    void publishTelemetry(AudioChain* master, size_t frames, const double* left = nullptr, const double* right = nullptr) noexcept {
+    void publishTelemetry(AudioChain* master, size_t frames, const double* left = nullptr, const double* right = nullptr,
+                          double renderTapPeakL = 0.0, double renderTapPeakR = 0.0) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
         t.processedFrameCount += frames;
+        t.renderTapPeakL = renderTapPeakL;
+        t.renderTapPeakR = renderTapPeakR;
 
         double peakL = 0.0;
         double peakR = 0.0;

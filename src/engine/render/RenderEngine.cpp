@@ -147,6 +147,16 @@ QString RenderEngine::databasePath() const {
     return m_dbPath;
 }
 
+void RenderEngine::setWorkspacePath(const QString& workspacePath) {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    m_workspacePath = workspacePath.trimmed().isEmpty() ? QString() : QDir::cleanPath(workspacePath);
+}
+
+QString RenderEngine::workspacePath() const {
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    return m_workspacePath;
+}
+
 RenderDspSnapshot RenderEngine::captureTemplateSnapshot() const {
     std::lock_guard<std::mutex> lock(m_templateMutex);
     return m_templateChain.createSnapshot();
@@ -183,25 +193,30 @@ bool RenderEngine::validatePreflight(const QString& sourceFolder, qint64 require
 bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task,
                                             QString& outError,
                                             StatDevResolver statDevFn) {
-    if (task.sourceFolder.isEmpty() || task.finalOutputDir.isEmpty()) {
-        outError = "Source folder or output directory path is empty.";
+    const bool usingWorkspace = !task.workspaceFolder.isEmpty();
+    const QString targetRoot = usingWorkspace ? task.workspaceFolder : task.sourceFolder;
+
+    if (targetRoot.isEmpty() || task.finalOutputDir.isEmpty()) {
+        outError = "Target output root or output directory path is empty.";
         return false;
     }
 
-    QFileInfo srcFolderInfo(task.sourceFolder);
+    QFileInfo srcFolderInfo(targetRoot);
     if (!srcFolderInfo.exists() || !srcFolderInfo.isDir()) {
-        outError = QString("Source folder does not exist or is not a directory: %1").arg(task.sourceFolder);
+        outError = QString("%1 does not exist or is not a directory: %2")
+                       .arg(usingWorkspace ? QStringLiteral("Workspace folder") : QStringLiteral("Source folder"),
+                            targetRoot);
         return false;
     }
 
-    // 1. Resolve canonical source directory
+    // 1. Resolve canonical target root directory
     QString canonicalSource = srcFolderInfo.canonicalFilePath();
     if (canonicalSource.isEmpty()) {
-        outError = QString("Failed to resolve canonical path for source folder: %1").arg(task.sourceFolder);
+        outError = QString("Failed to resolve canonical path for target folder: %1").arg(targetRoot);
         return false;
     }
 
-    // 2. Output directory parent must be strictly contained inside canonical source folder
+    // 2. Output directory parent must be strictly contained inside canonical target root
     QFileInfo outDirInfo(task.finalOutputDir);
     QDir parentDir = outDirInfo.dir();
     QString canonicalParent = parentDir.canonicalPath();
@@ -210,14 +225,22 @@ bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task,
         return false;
     }
 
-    // Output must be an immediate child of the source folder (prevent directory traversal or external paths)
+    // Output must be an immediate child of the target folder (prevent directory traversal or external paths)
     if (QDir::cleanPath(canonicalParent) != QDir::cleanPath(canonicalSource)) {
-        outError = QString("Render output directory '%1' escapes original sound source directory '%2'.")
-                       .arg(task.finalOutputDir, task.sourceFolder);
+        outError = usingWorkspace
+            ? QString("Render output directory '%1' escapes workspace directory '%2'.")
+                  .arg(task.finalOutputDir, targetRoot)
+            : QString("Render output directory '%1' escapes original sound source directory '%2'.")
+                  .arg(task.finalOutputDir, task.sourceFolder);
         return false;
     }
 
-    // 3. Output directory cannot point to source file itself or any track file
+    // 3. Output directory cannot point to source file itself or any track file or internal .desk32 directory
+    if (outDirInfo.fileName().startsWith(QStringLiteral(".desk32"))) {
+        outError = QString("Output directory conflicts with reserved internal metadata prefix: %1")
+                       .arg(outDirInfo.fileName());
+        return false;
+    }
     if (!task.sourcePath.isEmpty()) {
         QFileInfo srcFileInfo(task.sourcePath);
         if (QDir::cleanPath(outDirInfo.absoluteFilePath()) == QDir::cleanPath(srcFileInfo.absoluteFilePath())) {
@@ -238,14 +261,17 @@ bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task,
         return false;
     }
 
-    // 5. Staging directory must also be directly inside canonical source folder
+    // 5. Staging directory must also be directly inside canonical target folder
     if (!task.stagingDir.isEmpty()) {
         QFileInfo stagingInfo(task.stagingDir);
         QDir stagingParent = stagingInfo.dir();
         QString canonicalStagingParent = stagingParent.canonicalPath();
         if (QDir::cleanPath(canonicalStagingParent) != QDir::cleanPath(canonicalSource)) {
-            outError = QString("Staging directory '%1' escapes original sound source directory '%2'.")
-                           .arg(task.stagingDir, task.sourceFolder);
+            outError = usingWorkspace
+                ? QString("Staging directory '%1' escapes workspace directory '%2'.")
+                      .arg(task.stagingDir, targetRoot)
+                : QString("Staging directory '%1' escapes original sound source directory '%2'.")
+                      .arg(task.stagingDir, task.sourceFolder);
             return false;
         }
         if (stagingInfo.isSymLink() || QFileInfo(stagingInfo.dir().absolutePath()).isSymLink()) {
@@ -292,8 +318,8 @@ bool RenderEngine::validateOutputContainment(const RenderTaskInfo& task,
 
 QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderSettings& settings) {
     QFileInfo fi(trackPath);
-    if (!fi.exists() || !fi.isFile()) {
-        qWarning() << "RenderEngine: track file does not exist:" << trackPath;
+    if (!fi.exists() || !fi.isFile() || fi.isSymLink() || fi.fileName().startsWith(QStringLiteral(".desk32"))) {
+        qWarning() << "RenderEngine: track file invalid or excluded:" << trackPath;
         return QString();
     }
 
@@ -321,6 +347,7 @@ QString RenderEngine::enqueueTrackRender(const QString& trackPath, const RenderS
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
+        task.workspaceFolder = m_workspacePath;
         if (m_currentTask.taskId.isEmpty() &&
             m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
             !m_isRendering.load(std::memory_order_relaxed)) {
@@ -364,6 +391,7 @@ QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, con
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
+        task.workspaceFolder = m_workspacePath;
         if (m_currentTask.taskId.isEmpty() &&
             m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
             !m_isRendering.load(std::memory_order_relaxed)) {
@@ -376,26 +404,30 @@ QString RenderEngine::enqueueTrackRenderForTesting(const QString& trackPath, con
 }
 
 QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const RenderSettings& settings) {
+    QFileInfo folderInfo(folderPath);
     QDir dir(folderPath);
-    if (!dir.exists()) {
-        qWarning() << "RenderEngine: album folder does not exist:" << folderPath;
+    if (!dir.exists() || folderInfo.isSymLink() || folderInfo.fileName().startsWith(QStringLiteral(".desk32"))) {
+        qWarning() << "RenderEngine: album folder invalid or excluded:" << folderPath;
         return QString();
     }
 
     // Supported extensions: .flac, .wav, .mp3, .ogg, .opus, .m4a, .aac
     QStringList filters;
     filters << "*.flac" << "*.wav" << "*.mp3" << "*.ogg" << "*.opus" << "*.m4a" << "*.aac";
-    QFileInfoList list = dir.entryInfoList(filters, QDir::Files, QDir::Unsorted);
-
-    if (list.isEmpty()) {
-        qWarning() << "RenderEngine: no supported audio files in album folder:" << folderPath;
-        return QString();
-    }
+    QFileInfoList list = dir.entryInfoList(filters, QDir::Files | QDir::NoSymLinks, QDir::Unsorted);
 
     std::vector<std::string> fileNames;
     fileNames.reserve(static_cast<size_t>(list.size()));
     for (const auto& fi : list) {
+        if (fi.isSymLink() || fi.fileName().startsWith(QStringLiteral(".desk32"))) {
+            continue;
+        }
         fileNames.push_back(fi.fileName().toStdString());
+    }
+
+    if (fileNames.empty()) {
+        qWarning() << "RenderEngine: no supported audio files in album folder:" << folderPath;
+        return QString();
     }
 
     // Sort deterministically using NaturalSortComparator (Section 2.5)
@@ -432,6 +464,7 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
 
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
+        task.workspaceFolder = m_workspacePath;
         if (m_currentTask.taskId.isEmpty() &&
             m_workerState.load(std::memory_order_acquire) == RenderWorkerState::Idle &&
             !m_isRendering.load(std::memory_order_relaxed)) {
@@ -634,8 +667,10 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         estimatedBytes += (pcmBytes + 44 + 1024 * 1024); // header + 1MB safety margin per file
     }
 
+    const QString targetRoot = task.workspaceFolder.isEmpty() ? task.sourceFolder : task.workspaceFolder;
+
     QString preflightError;
-    if (!validatePreflight(task.sourceFolder, estimatedBytes, preflightError)) {
+    if (!validatePreflight(targetRoot, estimatedBytes, preflightError)) {
         task.status = RenderStatus::Failed;
         task.errorMessage = preflightError;
         core::log::LogService::instance().log(
@@ -644,7 +679,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             "Failed",
             QString("Pre-flight check failed: %1").arg(preflightError),
             "FileSystem",
-            task.sourceFolder,
+            targetRoot,
             QString("{\"error\":\"%1\"}").arg(preflightError),
             parentOpId, ""
         );
@@ -671,13 +706,13 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         }
     }
 
-    // 2. Allocate non-reusable serial letter via worker-owned manager (P0-01, P0-02)
-    task.serial = seqMgr.allocateNextSerial(task.sourceFolder);
+    // 2. Allocate non-reusable serial letter via worker-owned manager (P0-01, P0-02, v3.8 workspace-unit)
+    task.serial = seqMgr.allocateNextSerial(targetRoot);
     if (task.serial.isEmpty()) {
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to allocate render sequence number (database initialization or transaction error).";
         core::log::LogService::instance().log(
-            "Render", "AllocateSerial", "Failed", task.errorMessage, "Database", task.sourceFolder, "{}",
+            "Render", "AllocateSerial", "Failed", task.errorMessage, "Database", targetRoot, "{}",
             parentOpId, ""
         );
         return false;
@@ -687,10 +722,10 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     QString folderSuffix = RenderSequenceManager::formatFolderName(task.serial, now);
 
     if (task.stagingDir.isEmpty()) {
-        task.stagingDir = task.sourceFolder + "/.desk32_staging_" + folderSuffix;
+        task.stagingDir = targetRoot + "/.desk32_staging_" + folderSuffix;
     }
     if (task.finalOutputDir.isEmpty()) {
-        task.finalOutputDir = task.sourceFolder + "/" + folderSuffix;
+        task.finalOutputDir = targetRoot + "/" + folderSuffix;
     }
     {
         std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -979,7 +1014,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
 
     // 4. Transaction Resolution: Rollback vs Commit (P0-12)
     QFileInfo stagingFi(task.stagingDir);
-    bool isValidStaging = task.stagingDir.startsWith(task.sourceFolder) &&
+    bool isValidStaging = task.stagingDir.startsWith(targetRoot) &&
                           stagingFi.fileName().startsWith(".desk32_staging_");
 
     if (!allTracksOk || task.status == RenderStatus::Cancelled || task.status == RenderStatus::Failed) {

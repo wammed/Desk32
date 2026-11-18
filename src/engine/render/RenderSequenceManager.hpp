@@ -8,8 +8,9 @@
 
 namespace desk32::engine::render {
 
-/// Persistent sequential uppercase letter folder naming manager (Decision D-2).
-/// Manages base-26 bijective sequences (A..Z, AA..AZ, BA..BZ, AAA..) per source directory.
+/// Persistent sequential uppercase letter folder naming manager (Decision D-2, v3.8 revision).
+/// Manages base-26 bijective sequences (A..Z, AA..AZ, BA..BZ, AAA..) per target directory
+/// (workspace directory when active, keeping unit-level source directory fallback).
 /// Issued sequence numbers are permanently tracked in SQLite and NEVER reused.
 class RenderSequenceManager {
 public:

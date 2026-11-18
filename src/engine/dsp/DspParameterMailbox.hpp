@@ -50,6 +50,8 @@ struct ContinuousDspParameters {
     float lpfFrequency = 20000.0f;
     uint8_t hpfSlope = 0;
     uint8_t lpfSlope = 0;
+    float hpfQ = 0.70710678f;
+    float lpfQ = 0.70710678f;
     uint8_t hpfEnabled = 0;
     uint8_t lpfEnabled = 0;
     bool filterModified = false;
@@ -288,13 +290,18 @@ public:
     }
 
     // Set Filter parameters (Thread-safe for multiple Control Threads, P0-27 precomputed)
-    void setFilterParams(float hpfFreq, float lpfFreq, uint8_t hpfSlope, uint8_t lpfSlope, bool hpfOn, bool lpfOn) {
+    void setFilterParams(float hpfFreq, float lpfFreq, uint8_t hpfSlope, uint8_t lpfSlope, bool hpfOn, bool lpfOn,
+                         float hpfQ = 0.70710678f, float lpfQ = 0.70710678f) {
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
+        const float clampedHpfQ = std::clamp(hpfQ, 0.1f, 10.0f);
+        const float clampedLpfQ = std::clamp(lpfQ, 0.1f, 10.0f);
         m_staging.hpfFrequency = hpfFreq;
         m_staging.lpfFrequency = lpfFreq;
         m_staging.hpfSlope = hpfSlope;
         m_staging.lpfSlope = lpfSlope;
+        m_staging.hpfQ = clampedHpfQ;
+        m_staging.lpfQ = clampedLpfQ;
         m_staging.hpfEnabled = hpfOn ? 1 : 0;
         m_staging.lpfEnabled = lpfOn ? 1 : 0;
         m_staging.filterModified = true;
@@ -306,7 +313,9 @@ public:
             hpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
             lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
             hpfOn,
-            lpfOn
+            lpfOn,
+            static_cast<double>(clampedHpfQ),
+            static_cast<double>(clampedLpfQ)
         );
 
         publishStaging();

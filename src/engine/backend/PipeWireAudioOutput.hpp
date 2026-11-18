@@ -33,6 +33,7 @@ enum class DirectModeStatus {
 
 struct StreamDiagnostics {
     uint32_t sampleRate = 48000;
+    uint32_t requestedSampleRate = 48000;
     uint32_t channels = 2;
     uint32_t bufferFrames = 256;
     uint32_t negotiatedQuantum = 0;
@@ -76,11 +77,16 @@ public:
     /// Stop stream and disconnect
     void stop();
 
+    /// Re-negotiate hardware/graph sample rate by cleanly tearing down and restarting stream (Spec §2.6 Direct Mode).
+    /// Measures interruption/silence duration in milliseconds (`outSilenceMs`).
+    bool renegotiateSampleRate(uint32_t targetRate, double& outSilenceMs);
+
     /// Terminate and cleanup all PipeWire resources
     void shutdown();
 
     [[nodiscard]] StreamState state() const noexcept { return m_state.load(std::memory_order_relaxed); }
     [[nodiscard]] bool isRunning() const noexcept { return m_state.load(std::memory_order_relaxed) == StreamState::Streaming; }
+    [[nodiscard]] double lastRenegotiationSilenceMs() const noexcept { return m_lastRenegotiationSilenceMs.load(std::memory_order_relaxed); }
 
     [[nodiscard]] StreamDiagnostics diagnostics() const noexcept;
     [[nodiscard]] DirectModeStatus directModeStatus() const noexcept { return m_directModeStatus.load(std::memory_order_relaxed); }
@@ -113,6 +119,8 @@ private:
     uint32_t m_requestedBufferFrames = 256;
 
     std::atomic<StreamState> m_state{StreamState::Unconnected};
+    std::atomic<uint32_t> m_negotiatedSampleRate{0};
+    std::atomic<double> m_lastRenegotiationSilenceMs{0.0};
     std::atomic<uint64_t> m_xrunCount{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};
     std::atomic<uint32_t> m_negotiatedQuantum{0};

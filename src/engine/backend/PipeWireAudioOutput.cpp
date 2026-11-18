@@ -199,6 +199,7 @@ void PipeWireAudioOutput::stop()
             pw_stream_destroy(m_stream);
             m_stream = nullptr;
         }
+        m_streamListener = std::make_unique<struct spa_hook>();
         if (m_core) {
             pw_core_disconnect(m_core);
             m_core = nullptr;
@@ -206,6 +207,48 @@ void PipeWireAudioOutput::stop()
         m_state.store(StreamState::Unconnected, std::memory_order_relaxed);
         pw_thread_loop_unlock(m_threadLoop);
     }
+}
+
+bool PipeWireAudioOutput::renegotiateSampleRate(uint32_t targetRate, double& outSilenceMs)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    if (targetRate == 0) {
+        outSilenceMs = 0.0;
+        return false;
+    }
+
+    if (m_offlineSimulation || !m_threadLoop || !m_context) {
+        m_requestedSampleRate = targetRate;
+        m_negotiatedSampleRate.store(0, std::memory_order_relaxed);
+        const auto t1 = std::chrono::steady_clock::now();
+        outSilenceMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        m_lastRenegotiationSilenceMs.store(outSilenceMs, std::memory_order_relaxed);
+        return true;
+    }
+
+    const bool wasStreamingOrConnecting =
+        (m_state.load(std::memory_order_relaxed) == StreamState::Streaming ||
+         m_state.load(std::memory_order_relaxed) == StreamState::Connecting ||
+         m_stream != nullptr);
+
+    if (wasStreamingOrConnecting) {
+        stop();
+    }
+
+    m_requestedSampleRate = targetRate;
+    m_negotiatedSampleRate.store(0, std::memory_order_relaxed);
+    m_isDirectMode.store(false, std::memory_order_relaxed);
+    m_directModeStatus.store(DirectModeStatus::Unknown, std::memory_order_relaxed);
+
+    bool ok = true;
+    if (wasStreamingOrConnecting) {
+        ok = start();
+    }
+
+    const auto t1 = std::chrono::steady_clock::now();
+    outSilenceMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    m_lastRenegotiationSilenceMs.store(outSilenceMs, std::memory_order_relaxed);
+    return ok;
 }
 
 void PipeWireAudioOutput::shutdown()
@@ -224,7 +267,9 @@ void PipeWireAudioOutput::shutdown()
 StreamDiagnostics PipeWireAudioOutput::diagnostics() const noexcept
 {
     StreamDiagnostics diag;
-    diag.sampleRate = m_requestedSampleRate;
+    const uint32_t negotiated = m_negotiatedSampleRate.load(std::memory_order_relaxed);
+    diag.requestedSampleRate = m_requestedSampleRate;
+    diag.sampleRate = negotiated > 0 ? negotiated : m_requestedSampleRate;
     diag.channels = 2;
     diag.bufferFrames = m_requestedBufferFrames;
     diag.negotiatedQuantum = m_negotiatedQuantum.load(std::memory_order_relaxed);
@@ -311,10 +356,10 @@ void PipeWireAudioOutput::onStreamParamChanged(void* data, uint32_t id, const st
     if (info.media_type == SPA_MEDIA_TYPE_audio && info.media_subtype == SPA_MEDIA_SUBTYPE_raw) {
         struct spa_audio_info_raw raw = {};
         spa_format_audio_raw_parse(param, &raw);
-        self->m_requestedSampleRate = raw.rate;
+        self->m_negotiatedSampleRate.store(raw.rate, std::memory_order_relaxed);
 
-        // Section 2.6: Direct Mode verified when hardware graph rate matches requested track/pipeline rate
-        if (raw.rate == 48000 || raw.rate == self->m_requestedSampleRate) {
+        // Section 2.6: Direct Mode verified when negotiated hardware/graph rate matches requested rate
+        if (raw.rate > 0 && raw.rate == self->m_requestedSampleRate) {
             self->m_isDirectMode.store(true, std::memory_order_relaxed);
             self->m_directModeStatus.store(DirectModeStatus::Active, std::memory_order_relaxed);
         } else {

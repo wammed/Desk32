@@ -41,12 +41,16 @@ class EngineController : public QObject {
     Q_PROPERTY(bool masterMute READ isMasterMute WRITE setMasterMute NOTIFY masterMuteChanged)
     Q_PROPERTY(double masterPeakL READ masterPeakL NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterPeakR READ masterPeakR NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double renderTapPeakL READ renderTapPeakL NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double renderTapPeakR READ renderTapPeakR NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterRmsL READ masterRmsL NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterRmsR READ masterRmsR NOTIFY dspTelemetryChanged)
     Q_PROPERTY(bool masterClipped READ masterClipped NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterHeadroomDb READ masterHeadroomDb NOTIFY dspTelemetryChanged)
     Q_PROPERTY(int xrunCount READ xrunCount NOTIFY diagnosticsChanged)
     Q_PROPERTY(bool isDirectMode READ isDirectMode NOTIFY diagnosticsChanged)
+    Q_PROPERTY(bool directModeEnabled READ isDirectModeEnabled WRITE setDirectModeEnabled NOTIFY diagnosticsChanged)
+    Q_PROPERTY(double lastRenegotiationSilenceMs READ lastRenegotiationSilenceMs NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(int bitPerfectStatus READ bitPerfectStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
@@ -132,12 +136,16 @@ public:
     [[nodiscard]] bool isMasterMute() const;
     [[nodiscard]] double masterPeakL() const;
     [[nodiscard]] double masterPeakR() const;
+    [[nodiscard]] double renderTapPeakL() const;
+    [[nodiscard]] double renderTapPeakR() const;
     [[nodiscard]] double masterRmsL() const;
     [[nodiscard]] double masterRmsR() const;
     [[nodiscard]] bool masterClipped() const;
     [[nodiscard]] double masterHeadroomDb() const;
     [[nodiscard]] int xrunCount() const;
     [[nodiscard]] bool isDirectMode() const;
+    [[nodiscard]] bool isDirectModeEnabled() const noexcept { return m_directModeEnabled.load(std::memory_order_relaxed); }
+    [[nodiscard]] double lastRenegotiationSilenceMs() const noexcept;
     [[nodiscard]] int directModeStatus() const;
     [[nodiscard]] int bitPerfectStatus() const;
     [[nodiscard]] int backendStatus() const;
@@ -203,6 +211,7 @@ public:
     Q_INVOKABLE void setMasterGainL(double gain);
     Q_INVOKABLE void setMasterGainR(double gain);
     Q_INVOKABLE void setMasterMute(bool mute);
+    Q_INVOKABLE void setDirectModeEnabled(bool enabled);
 
     // QML-invokable Deck Operations
     Q_INVOKABLE void play(const QString& deckId);
@@ -214,6 +223,12 @@ public:
     Q_INVOKABLE void quickSwitchAB();
     Q_INVOKABLE void setDeckLocked(const QString& deckId, bool locked);
     Q_INVOKABLE bool loadTrack(const QString& deckId, const QString& filePath);
+    Q_INVOKABLE bool loadWorkspaceTrack(const QString& deckId, const QString& relativePath);
+    Q_INVOKABLE bool copyDeckTrackToWorkspace(const QString& deckId);
+    Q_INVOKABLE void setDeckOffsetFrames(const QString& deckId, qint64 offsetFrames);
+    Q_INVOKABLE qint64 getDeckOffsetFrames(const QString& deckId) const;
+    Q_INVOKABLE void setDeckLevelMatchDb(const QString& deckId, double gainDb);
+    Q_INVOKABLE double getDeckLevelMatchDb(const QString& deckId) const;
 
     // QML-invokable Folder Session Operations
     Q_INVOKABLE bool startFolderSession(const QString& deckId, const QString& folderPath, const QStringList& fileNames);
@@ -226,7 +241,7 @@ public:
     Q_INVOKABLE void resetAllGeqBands();
     Q_INVOKABLE QVariantList getGeqCurve(int numPoints = 128);
 
-    // 24-Band PEQ Operations (Left 12 + Right 12)
+    // 32-Band PEQ Operations (Left 16 + Right 16)
     Q_INVOKABLE QVariantMap getPeqBand(bool isRightChannel, int bandIndex);
     Q_INVOKABLE void setPeqBand(bool isRightChannel, int bandIndex, double frequency, double gainDb, double q, int filterType, bool enabled);
     Q_INVOKABLE void setPeqBandEnabled(bool isRightChannel, int bandIndex, bool enabled);
@@ -234,7 +249,8 @@ public:
     Q_INVOKABLE void applyPeqPreset(const QString& presetName);
 
     // Dynamic Processors & Filters
-    Q_INVOKABLE void setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope);
+    Q_INVOKABLE void setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope, double lpfFreq, bool lpfOn, int lpfSlope,
+                                     double hpfQ = 0.7071067811865475, double lpfQ = 0.7071067811865475);
     Q_INVOKABLE QVariantMap getFilterParams();
     Q_INVOKABLE QVariantList getFilterCurve(int numPoints = 128);
 
@@ -336,6 +352,7 @@ signals:
 
 private:
     void syncMasterDspToRenderEngine();
+    void followActiveDeckSampleRateIfDirectMode();
     void recordSeekEvent(
         char deckChar,
         int64_t beforeFrame,
@@ -387,6 +404,7 @@ private:
     std::atomic<double> m_masterGainL{1.0};
     std::atomic<double> m_masterGainR{1.0};
     std::atomic<bool> m_masterMute{false};
+    std::atomic<bool> m_directModeEnabled{false};
 
     // Private helpers for DSP node lookup and signal dispatch (P1-1, P1-2)
     void emitDspNodeSignal(const QString& nodeName);

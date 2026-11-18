@@ -203,6 +203,10 @@ public:
     [[nodiscard]] TransportState state() const noexcept { return m_state.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t playhead() const noexcept { return m_worker.playhead(); }
     [[nodiscard]] int64_t offsetFrames() const noexcept { return m_offsetFrames.load(std::memory_order_acquire); }
+    [[nodiscard]] double levelMatchGainDb() const noexcept { return m_levelMatchGainDb.load(std::memory_order_acquire); }
+    [[nodiscard]] double levelMatchLinearGain() const noexcept {
+        return std::pow(10.0, m_levelMatchGainDb.load(std::memory_order_acquire) / 20.0);
+    }
     [[nodiscard]] bool isLocked() const noexcept { return m_isLocked.load(std::memory_order_acquire); }
 
     [[nodiscard]] TrackInfo trackInfo() const noexcept {
@@ -249,6 +253,9 @@ public:
         }
     }
     void setOffsetFrames(int64_t offset) noexcept { m_offsetFrames.store(offset, std::memory_order_release); }
+    void setLevelMatchGainDb(double db) noexcept {
+        m_levelMatchGainDb.store(std::clamp(db, -24.0, 24.0), std::memory_order_release);
+    }
 
     /// Reconfigure graph sample rate across worker and resamplers
     void configureGraphRate(double graphSampleRate) noexcept {
@@ -803,6 +810,7 @@ private:
     std::atomic<TransportState> m_state{TransportState::Stopped};
     std::atomic<bool> m_isLocked{false};
     std::atomic<int64_t> m_offsetFrames{0};
+    std::atomic<double> m_levelMatchGainDb{0.0};
     std::atomic<double> m_graphRate{48000.0};
     std::atomic<bool> m_trackChanged{false};
     std::atomic<bool> m_needsFolderAdvance{false};

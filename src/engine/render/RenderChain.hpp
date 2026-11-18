@@ -21,8 +21,8 @@ struct RenderDspSnapshot {
 
     // PEQ
     bool peqEnabled = true;
-    std::array<ParametricEQ::BandConfig, 12> peqLeftBands{};
-    std::array<ParametricEQ::BandConfig, 12> peqRightBands{};
+    std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> peqLeftBands{};
+    std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> peqRightBands{};
 
     // GEQ
     bool geqEnabled = true;
@@ -32,9 +32,11 @@ struct RenderDspSnapshot {
     bool hpfEnabled = false;
     double hpfFrequency = 20.0;
     HighLowPassFilter::FilterSlope hpfSlope = HighLowPassFilter::FilterSlope::Slope12dB;
+    double hpfQ = 0.7071067811865475;
     bool lpfEnabled = false;
     double lpfFrequency = 20000.0;
     HighLowPassFilter::FilterSlope lpfSlope = HighLowPassFilter::FilterSlope::Slope12dB;
+    double lpfQ = 0.7071067811865475;
 
     // Compressor
     bool compEnabled = false;
@@ -120,7 +122,7 @@ public:
                             const PeakLimiter& lim)
     {
         // 1. Parametric EQ
-        for (size_t b = 0; b < 12; ++b) {
+        for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             m_peq.setLeftBand(b, peq.leftBand(b));
             m_peq.setRightBand(b, peq.rightBand(b));
         }
@@ -135,9 +137,11 @@ public:
         // 3. Filter
         m_filter.setHpfFrequency(flt.hpfFrequency());
         m_filter.setHpfSlope(flt.hpfSlope());
+        m_filter.setHpfQ(flt.hpfQ());
         m_filter.setHpfEnabled(flt.isHpfEnabled());
         m_filter.setLpfFrequency(flt.lpfFrequency());
         m_filter.setLpfSlope(flt.lpfSlope());
+        m_filter.setLpfQ(flt.lpfQ());
         m_filter.setLpfEnabled(flt.isLpfEnabled());
 
         // 4. Compressor
@@ -160,7 +164,7 @@ public:
 
         // 1. PEQ
         s.peqEnabled = m_peq.isEnabled();
-        for (size_t b = 0; b < 12; ++b) {
+        for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             s.peqLeftBands[b] = m_peq.leftBand(b);
             s.peqRightBands[b] = m_peq.rightBand(b);
         }
@@ -175,9 +179,11 @@ public:
         s.hpfEnabled = m_filter.isHpfEnabled();
         s.hpfFrequency = m_filter.hpfFrequency();
         s.hpfSlope = m_filter.hpfSlope();
+        s.hpfQ = m_filter.hpfQ();
         s.lpfEnabled = m_filter.isLpfEnabled();
         s.lpfFrequency = m_filter.lpfFrequency();
         s.lpfSlope = m_filter.lpfSlope();
+        s.lpfQ = m_filter.lpfQ();
 
         // 4. Compressor
         s.compEnabled = m_comp.isEnabled();
@@ -212,7 +218,7 @@ public:
 
         // 1. PEQ
         m_peq.setEnabled(s.peqEnabled);
-        for (size_t b = 0; b < 12; ++b) {
+        for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             m_peq.setLeftBand(b, s.peqLeftBands[b]);
             m_peq.setRightBand(b, s.peqRightBands[b]);
         }
@@ -226,9 +232,11 @@ public:
         // 3. Filter
         m_filter.setHpfFrequency(s.hpfFrequency);
         m_filter.setHpfSlope(s.hpfSlope);
+        m_filter.setHpfQ(s.hpfQ);
         m_filter.setHpfEnabled(s.hpfEnabled);
         m_filter.setLpfFrequency(s.lpfFrequency);
         m_filter.setLpfSlope(s.lpfSlope);
+        m_filter.setLpfQ(s.lpfQ);
         m_filter.setLpfEnabled(s.lpfEnabled);
 
         // 4. Compressor

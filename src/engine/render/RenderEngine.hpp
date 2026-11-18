@@ -67,6 +67,7 @@ struct RenderTaskInfo {
     RenderType type = RenderType::SingleTrack;
     QString sourcePath;
     QString sourceFolder;
+    QString workspaceFolder;
     QStringList trackFiles;
     RenderSettings settings;
     RenderDspSnapshot dspSnapshot;
@@ -112,6 +113,11 @@ public:
     /// Set SQLite database path for sequence management
     void setDatabasePath(const QString& dbPath);
     [[nodiscard]] QString databasePath() const;
+
+    /// Set active dedicated workspace path for render outputs (Spec §16 Phase 4 / §19 D-2 revision).
+    /// When set, rendered outputs, staging folders, and serial allocation occur under workspacePath.
+    void setWorkspacePath(const QString& workspacePath);
+    [[nodiscard]] QString workspacePath() const;
 
     /// Stop background worker thread safely
     void stop();
@@ -193,6 +199,7 @@ private:
     mutable std::mutex m_templateMutex;
     RenderChain m_templateChain;
     QString m_dbPath;
+    QString m_workspacePath;
 
     mutable std::mutex m_queueMutex;
     std::condition_variable m_queueCv;

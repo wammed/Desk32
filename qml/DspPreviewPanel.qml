@@ -28,10 +28,12 @@ Rectangle {
             hpfFreqSlider.value = flt.hpfFrequency !== undefined ? flt.hpfFrequency : 20.0;
             hpfEnableCheck.checked = flt.hpfEnabled !== undefined ? flt.hpfEnabled : false;
             hpfSlopeCombo.currentIndex = flt.hpfSlope === 1 ? 1 : 0;
+            hpfQSlider.value = flt.hpfQ !== undefined ? flt.hpfQ : 0.70710678;
 
             lpfFreqSlider.value = flt.lpfFrequency !== undefined ? flt.lpfFrequency : 20000.0;
             lpfEnableCheck.checked = flt.lpfEnabled !== undefined ? flt.lpfEnabled : false;
             lpfSlopeCombo.currentIndex = flt.lpfSlope === 1 ? 1 : 0;
+            lpfQSlider.value = flt.lpfQ !== undefined ? flt.lpfQ : 0.70710678;
         }
 
         // 2. Compressor
@@ -84,7 +86,9 @@ Rectangle {
             hpfSlopeCombo.currentIndex,
             lpfFreqSlider.value,
             lpfEnableCheck.checked,
-            lpfSlopeCombo.currentIndex
+            lpfSlopeCombo.currentIndex,
+            hpfQSlider.value,
+            lpfQSlider.value
         );
     }
 
@@ -216,9 +220,11 @@ Rectangle {
                                 hpfFreqSlider.value = 20.0;
                                 hpfEnableCheck.checked = false;
                                 hpfSlopeCombo.currentIndex = 0;
+                                hpfQSlider.value = 0.70710678;
                                 lpfFreqSlider.value = 20000.0;
                                 lpfEnableCheck.checked = false;
                                 lpfSlopeCombo.currentIndex = 0;
+                                lpfQSlider.value = 0.70710678;
                                 applyFilter();
                             }
                         }
@@ -277,6 +283,25 @@ Rectangle {
                                     horizontalAlignment: Text.AlignRight
                                 }
                             }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("HPF Q:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: hpfQSlider
+                                    Layout.fillWidth: true
+                                    from: 0.1
+                                    to: 10.0
+                                    stepSize: 0.01
+                                    value: 0.70710678
+                                    onMoved: applyFilter()
+                                }
+                                Label {
+                                    text: hpfQSlider.value.toFixed(2)
+                                    font.pixelSize: 10; font.family: "Monospace"; color: "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
+                                }
+                            }
                         }
                     }
 
@@ -329,6 +354,25 @@ Rectangle {
                                     color: "#00E5FF"
                                     Layout.preferredWidth: 60
                                     horizontalAlignment: Text.AlignRight
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("LPF Q:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: lpfQSlider
+                                    Layout.fillWidth: true
+                                    from: 0.1
+                                    to: 10.0
+                                    stepSize: 0.01
+                                    value: 0.70710678
+                                    onMoved: applyFilter()
+                                }
+                                Label {
+                                    text: lpfQSlider.value.toFixed(2)
+                                    font.pixelSize: 10; font.family: "Monospace"; color: "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
                                 }
                             }
                         }

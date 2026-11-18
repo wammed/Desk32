@@ -98,19 +98,17 @@ ApplicationWindow {
             // Direct / Bit-Perfect Verification Badges
             RowLayout {
                 spacing: 8
-                Rectangle {
-                    width: 90
-                    height: 22
-                    radius: 3
-                    color: EngineController.directModeStatus === 2 ? "#00E67620" : (EngineController.directModeStatus === 1 ? "#22262c" : "#1c1f24")
-                    border.color: EngineController.directModeStatus === 2 ? "#00E676" : (EngineController.directModeStatus === 1 ? "#363d47" : "#2a3038")
-                    Label {
-                        anchors.centerIn: parent
-                        text: EngineController.directModeStatus === 2 ? qsTr("DIRECT MODE") : (EngineController.directModeStatus === 1 ? qsTr("DIRECT: OFF") : qsTr("DIRECT: N/A"))
-                        font.pixelSize: 10
-                        font.bold: true
-                        color: EngineController.directModeStatus === 2 ? "#00E676" : (EngineController.directModeStatus === 1 ? "#758291" : "#55606d")
-                    }
+                Button {
+                    text: EngineController.directModeEnabled
+                          ? qsTr("DIRECT [ON]")
+                          : (EngineController.directModeStatus === 2 ? qsTr("DIRECT MODE") : qsTr("DIRECT [OFF]"))
+                    font.pixelSize: 10
+                    font.bold: true
+                    highlighted: EngineController.directModeEnabled
+                    onClicked: EngineController.setDirectModeEnabled(!EngineController.directModeEnabled)
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("Bypass DSP/gain & match track sample rate (last silence: %1 ms)")
+                                  .arg(EngineController.lastRenegotiationSilenceMs.toFixed(1))
                 }
                 Rectangle {
                     width: 110
@@ -187,6 +185,15 @@ ApplicationWindow {
                 width: 1
                 height: 20
                 color: "#2a3038"
+            }
+
+            // Workspace Manager Panel Toggle (v3.8.1 §2.5)
+            Button {
+                text: WorkspaceManager.hasOpenWorkspace ? qsTr("📁 WORKSPACE [OPEN]") : qsTr("📁 WORKSPACE [R/O]")
+                font.bold: true
+                font.pixelSize: 11
+                highlighted: workspacePanel.visible || WorkspaceManager.hasOpenWorkspace
+                onClicked: workspacePanel.visible = !workspacePanel.visible
             }
 
             // Export / Render Panel Toggle (Phase 4 Step 3)
@@ -442,6 +449,15 @@ ApplicationWindow {
                                             onClicked: EngineController.setDeckLocked(modelData, !(deckBox.deckState && deckBox.deckState.isLocked))
                                         }
 
+                                        // Copy deck track to active workspace
+                                        Button {
+                                            text: qsTr("->WS")
+                                            font.pixelSize: 9
+                                            Layout.preferredHeight: 24
+                                            enabled: WorkspaceManager.hasOpenWorkspace && !!(deckBox.deckState && deckBox.deckState.path && deckBox.deckState.path.length > 0)
+                                            onClicked: EngineController.copyDeckTrackToWorkspace(modelData)
+                                        }
+
                                         // Select button
                                         Button {
                                             text: qsTr("Select")
@@ -647,6 +663,33 @@ ApplicationWindow {
                                                 onClicked: EngineController.advanceFolderNext(modelData)
                                             }
                                         }
+                                    }
+
+                                    // Comparative Offset & Level Match Row (Spec §2.3 / §5.2)
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 4
+                                        Label {
+                                            text: qsTr("Off:%1").arg(deckBox.deckState ? deckBox.deckState.offsetFrames : 0)
+                                            font.pixelSize: 9; font.family: "Monospace"; color: "#78909C"
+                                        }
+                                        Button { text: "-1k"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 28
+                                            onClicked: EngineController.setDeckOffsetFrames(modelData, (deckBox.deckState ? deckBox.deckState.offsetFrames : 0) - 1000) }
+                                        Button { text: "0"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            onClicked: EngineController.setDeckOffsetFrames(modelData, 0) }
+                                        Button { text: "+1k"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 28
+                                            onClicked: EngineController.setDeckOffsetFrames(modelData, (deckBox.deckState ? deckBox.deckState.offsetFrames : 0) + 1000) }
+                                        Item { Layout.fillWidth: true }
+                                        Label {
+                                            text: qsTr("Trim:%1dB").arg((deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0).toFixed(1))
+                                            font.pixelSize: 9; font.family: "Monospace"; color: "#80DEEA"
+                                        }
+                                        Button { text: "-"; font.pixelSize: 9; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) - 0.5) }
+                                        Button { text: "0"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            onClicked: EngineController.setDeckLevelMatchDb(modelData, 0.0) }
+                                        Button { text: "+"; font.pixelSize: 9; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) + 0.5) }
                                     }
                                 }
                             }
@@ -1488,7 +1531,7 @@ ApplicationWindow {
                             onClicked: eqConsoleRect.eqMode = "geq"
                         }
                         Button {
-                            text: qsTr("24-Band PEQ (Left 12 + Right 12)")
+                            text: qsTr("32-Band PEQ (Left 16 + Right 16)")
                             flat: eqConsoleRect.eqMode !== "peq"
                             highlighted: eqConsoleRect.eqMode === "peq"
                             onClicked: eqConsoleRect.eqMode = "peq"
@@ -1851,7 +1894,7 @@ ApplicationWindow {
                                     }
 
                                     Button {
-                                        text: qsTr("LEFT CHANNEL (12 Bands)")
+                                        text: qsTr("LEFT CHANNEL (16 Bands)")
                                         flat: peqContainer.isRightChannel
                                         highlighted: !peqContainer.isRightChannel
                                         onClicked: {
@@ -1861,7 +1904,7 @@ ApplicationWindow {
                                     }
 
                                     Button {
-                                        text: qsTr("RIGHT CHANNEL (12 Bands)")
+                                        text: qsTr("RIGHT CHANNEL (16 Bands)")
                                         flat: !peqContainer.isRightChannel
                                         highlighted: peqContainer.isRightChannel
                                         onClicked: {
@@ -1893,15 +1936,19 @@ ApplicationWindow {
                                     }
                                 }
 
-                                // Band Selector Strip (1 to 12)
-                                RowLayout {
+                                // Band Selector Strip (1 to 16)
+                                GridLayout {
                                     Layout.fillWidth: true
-                                    spacing: 4
+                                    columns: 8
+                                    columnSpacing: 4
+                                    rowSpacing: 4
 
                                     Repeater {
-                                        model: 12
+                                        model: 16
                                         Button {
                                             Layout.fillWidth: true
+                                            Layout.preferredHeight: 24
+                                            font.pixelSize: 10
                                             text: "Band " + (index + 1)
                                             flat: peqContainer.currentBandIndex !== index
                                             highlighted: peqContainer.currentBandIndex === index
@@ -2654,6 +2701,14 @@ ApplicationWindow {
                     }
 
                     Button {
+                        id: playbackHistoryBtn
+                        text: qsTr("Playback History")
+                        checkable: true
+                        checked: false
+                        onToggled: logTable.refresh()
+                    }
+
+                    Button {
                         id: thisSessionBtn
                         text: qsTr("This Session")
                         checkable: true
@@ -2838,6 +2893,28 @@ ApplicationWindow {
                         }
 
                         function refresh() {
+                            if (playbackHistoryBtn.checked) {
+                                var hist = LogService.fetchPlaybackHistory(200)
+                                model = hist.map(function(h) {
+                                    return {
+                                        eventId: h.eventId,
+                                        operationId: "",
+                                        parentOperationId: "",
+                                        timestampUtc: h.timestampUtc || "",
+                                        localUtcOffset: h.localUtcOffset || "",
+                                        category: h.category || "Transport",
+                                        operation: h.operation || "Play",
+                                        status: "Success",
+                                        targetType: "Deck",
+                                        target: h.deck || "",
+                                        message: "[Deck " + (h.deck || "?") + "] " + (h.fileName || h.trackPath || h.message || ""),
+                                        errorCode: 0,
+                                        durationMs: h.durationMs || 0.0,
+                                        detailsJson: h.detailsJson || "{}"
+                                    }
+                                })
+                                return
+                            }
                             var rows = LogService.fetchLogs(buildFilter(300))
                             if (thisSessionBtn.checked && searchField.text.length > 0) {
                                 var sid = LogService.sessionId()
@@ -3103,6 +3180,26 @@ ApplicationWindow {
             statusFilter.currentIndex = 0
             searchField.text = ""
             logTable.refresh()
+        }
+    }
+
+    // v3.8.1 Dedicated Workspace Panel (startup selection, import, tags, saves, diff, rollback)
+    WorkspacePanel {
+        id: workspacePanel
+        anchors.right: parent.right
+        anchors.rightMargin: 16
+        anchors.top: parent.top
+        anchors.topMargin: 56
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 16
+        width: 540
+        z: 1001
+        visible: !WorkspaceManager.selectionFinalized
+        onCloseRequested: {
+            if (!WorkspaceManager.selectionFinalized) {
+                WorkspaceManager.continueInReadOnlyMode()
+            }
+            workspacePanel.visible = false
         }
     }
 }

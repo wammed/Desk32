@@ -99,6 +99,7 @@ add_test(NAME benchmark_k3_float64 COMMAND benchmark_k3_float64)
 # Step 3: Different Sample Rate Switching & Kill Gate K2 PoC
 add_executable(test_sample_rate_switching
     test_sample_rate_switching.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/session/FolderSession.cpp
@@ -114,6 +115,7 @@ target_link_libraries(test_sample_rate_switching PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
 )
 
 target_include_directories(test_sample_rate_switching PRIVATE
@@ -126,7 +128,9 @@ target_include_directories(test_sample_rate_switching SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_sample_rate_switching PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_test(NAME test_sample_rate_switching COMMAND test_sample_rate_switching)
 
@@ -149,6 +153,7 @@ add_test(NAME test_external_insert_bridge COMMAND test_external_insert_bridge)
 # Step 4: Deck, Folder Session, and Operation Log PoC
 add_executable(test_step4_deck_session_log
     test_step4_deck_session_log.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/session/FolderSession.cpp
@@ -165,6 +170,7 @@ target_link_libraries(test_step4_deck_session_log PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
 )
 
 target_include_directories(test_step4_deck_session_log PRIVATE
@@ -177,7 +183,9 @@ target_include_directories(test_step4_deck_session_log SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_step4_deck_session_log PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_test(NAME test_step4_deck_session_log COMMAND test_step4_deck_session_log)
 
@@ -227,6 +235,7 @@ add_test(NAME test_pipewire_output COMMAND test_pipewire_output)
 # Phase 1.3: FFmpeg Audio Decoder Implementation
 add_executable(test_ffmpeg_decoder
     test_ffmpeg_decoder.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
 )
 
@@ -237,6 +246,7 @@ target_link_libraries(test_ffmpeg_decoder PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
 )
 
 target_include_directories(test_ffmpeg_decoder PRIVATE
@@ -248,13 +258,16 @@ target_include_directories(test_ffmpeg_decoder SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_ffmpeg_decoder PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_test(NAME test_ffmpeg_decoder COMMAND test_ffmpeg_decoder)
 
 # Phase 1.4: Reference Deck System & Folder Session Implementation
 add_executable(test_reference_decks
     test_reference_decks.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/session/FolderSession.cpp
@@ -270,6 +283,7 @@ target_link_libraries(test_reference_decks PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
 )
 
 target_include_directories(test_reference_decks PRIVATE
@@ -282,7 +296,9 @@ target_include_directories(test_reference_decks SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_reference_decks PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_test(NAME test_reference_decks COMMAND test_reference_decks)
 
@@ -310,6 +326,8 @@ add_executable(test_phase2_dsp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
@@ -332,6 +350,7 @@ target_link_libraries(test_phase2_dsp PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
     ALSA::ALSA
 )
 
@@ -346,7 +365,9 @@ target_include_directories(test_phase2_dsp SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_phase2_dsp PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_dependencies(test_phase2_dsp desk32_git_version)
 add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
@@ -357,6 +378,8 @@ add_executable(test_phase3_external_insert
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
@@ -379,6 +402,7 @@ target_link_libraries(test_phase3_external_insert PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
     ALSA::ALSA
 )
 
@@ -393,7 +417,9 @@ target_include_directories(test_phase3_external_insert SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_phase3_external_insert PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_dependencies(test_phase3_external_insert desk32_git_version)
 add_test(NAME test_phase3_external_insert COMMAND test_phase3_external_insert)
@@ -404,6 +430,8 @@ add_executable(test_phase4_export_render
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
@@ -426,6 +454,7 @@ target_link_libraries(test_phase4_export_render PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
     ALSA::ALSA
 )
 
@@ -440,7 +469,9 @@ target_include_directories(test_phase4_export_render SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_phase4_export_render PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_dependencies(test_phase4_export_render desk32_git_version)
 add_test(NAME test_phase4_export_render COMMAND test_phase4_export_render)
@@ -449,6 +480,7 @@ set_tests_properties(test_phase4_export_render PROPERTIES TIMEOUT 300)
 # Decoder Ring-Buffer Underrun (Error Code 1020) Investigation & Reproducibility Tests
 add_executable(test_underrun_investigation
     test_underrun_investigation.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/session/FolderSession.cpp
@@ -468,6 +500,7 @@ target_link_libraries(test_underrun_investigation PRIVATE
     ${AVCODEC_LIBRARIES}
     ${SWRESAMPLE_LIBRARIES}
     ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
 )
 
 target_include_directories(test_underrun_investigation PRIVATE
@@ -480,10 +513,65 @@ target_include_directories(test_underrun_investigation SYSTEM PRIVATE
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
     ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
 )
+target_compile_options(test_underrun_investigation PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_test(NAME test_underrun_investigation COMMAND test_underrun_investigation)
 set_tests_properties(test_underrun_investigation PROPERTIES TIMEOUT 300)
+
+# v3.8.1 Dedicated Workspace, TagLib Metadata, Direct Mode, Tap Isolation, 16-Band PEQ, Filter Q & Presets
+add_executable(test_workspace_v381
+    test_workspace_v381.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_link_libraries(test_workspace_v381 PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_workspace_v381 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_workspace_v381 SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+)
+target_compile_options(test_workspace_v381 PRIVATE ${TAGLIB_CFLAGS_OTHER})
+
+add_dependencies(test_workspace_v381 desk32_git_version)
+add_test(NAME test_workspace_v381 COMMAND test_workspace_v381)
+set_tests_properties(test_workspace_v381 PROPERTIES TIMEOUT 300)
 
 
 
