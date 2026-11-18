@@ -37,7 +37,8 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
-            libswresample-dev
+            libswresample-dev \
+            libtag1-dev
 
       - name: Configure CMake (Release)
         run: |
@@ -83,7 +84,8 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
-            libswresample-dev
+            libswresample-dev \
+            libtag1-dev
 
       - name: Configure CMake (Debug)
         run: |
@@ -129,7 +131,8 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
-            libswresample-dev
+            libswresample-dev \
+            libtag1-dev
 
       - name: Configure CMake with ASan
         run: |
@@ -176,7 +179,8 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
-            libswresample-dev
+            libswresample-dev \
+            libtag1-dev
 
       - name: Configure CMake with UBSan
         run: |
@@ -223,7 +227,8 @@ jobs:
             libavcodec-dev \
             libavformat-dev \
             libavutil-dev \
-            libswresample-dev
+            libswresample-dev \
+            libtag1-dev
 
       - name: Configure CMake with TSan
         run: |

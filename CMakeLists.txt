@@ -74,7 +74,16 @@ pkg_check_modules(AVCODEC REQUIRED libavcodec)
 pkg_check_modules(AVFORMAT REQUIRED libavformat)
 pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
-pkg_check_modules(TAGLIB REQUIRED taglib)
+pkg_check_modules(TAGLIB QUIET taglib)
+if(NOT TAGLIB_FOUND)
+    message(FATAL_ERROR
+        "TagLib development package ('taglib' via pkg-config) was not found.\n"
+        "Please install the required development packages for your environment:\n"
+        "  - Ubuntu / Debian (CI): sudo apt-get install -y libtag1-dev pkg-config\n"
+        "  - CachyOS / Arch Linux: sudo pacman -S --needed taglib pkgconf"
+    )
+endif()
+message(STATUS "Found TagLib: ${TAGLIB_VERSION} (libraries: ${TAGLIB_LIBRARIES})")
 
 qt_standard_project_setup(REQUIRES 6.4)
 

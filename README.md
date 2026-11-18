@@ -40,9 +40,11 @@ Desk32 is distributed strictly as source code. Dependencies must be installed vi
 ### Prerequisites (Arch Linux / CachyOS)
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja qt6-base qt6-declarative qt6-tools \
-    pipewire jack2 alsa-lib sqlite flac libvorbis opus ffmpeg vulkan-headers vulkan-icd-loader
+sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-declarative qt6-tools \
+    pipewire jack2 alsa-lib sqlite flac libvorbis opus ffmpeg libsoxr taglib vulkan-headers vulkan-icd-loader
 ```
+
+> **Note:** Metadata tagging and discovery require `taglib` together with `pkgconf` (which provides the `pkg-config` module metadata during CMake configuration).
 
 ### Build & Test
 

@@ -40,9 +40,11 @@ Desk32 はソースコード公開のみで配布されます。依存ライブ�
 ### 前提パッケージの導入 (Arch Linux / CachyOS)
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja qt6-base qt6-declarative qt6-tools \
-    pipewire jack2 alsa-lib sqlite flac libvorbis opus ffmpeg vulkan-headers vulkan-icd-loader
+sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-declarative qt6-tools \
+    pipewire jack2 alsa-lib sqlite flac libvorbis opus ffmpeg libsoxr taglib vulkan-headers vulkan-icd-loader
 ```
+
+> **補足:** メタデータの読み書きには `taglib` と `pkgconf`（CMake 構成時の `pkg-config` 検出に必須）が必要です。
 
 ### ビルドとテストの実行
 

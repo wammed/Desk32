@@ -1,7 +1,7 @@
 # 第三者ライセンス台帳 (Third-Party Licenses Ledger)
 
-- **文書バージョン:** 1.0.0
-- **最終更新日:** 2026-11-07
+- **文書バージョン:** 1.1.0
+- **最終更新日:** 2026-11-18
 - **プロジェクト名:** Desk32
 - **Desk32 自作部分ライセンス:** MIT License（第一候補・既定）
 - **配布形態:** ソースコード公開のみ（Desk32側でのバイナリ再配布なし）
@@ -18,11 +18,13 @@ Desk32は第三者のソースコードをリポジトリ内にベンダリン�
 | **libpipewire-0.3** | 1.6.10 | 標準音声入出力バックエンド、グラフ接続 | `MIT` / `LGPL-2.1-or-later` | Wim Taymans, Red Hat, PipeWire contributors<br>https://pipewire.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 | **JACK (libjack)** | 1.9.22 | プロオーディオ接続、外部ホスト連携 | `LGPL-2.1-or-later` | Stephane Letz, Paul Davis, JACK contributors<br>https://jackaudio.org/ | なし (Unmodified) | 動的リンク (`.so` / PipeWire-JACK) |
 | **alsa-lib (libasound)** | 1.2.16.1 | ハードウェア能力直接取得、ALSA direct | `LGPL-2.1-or-later` | Jaroslav Kysela, ALSA Project contributors<br>https://www.alsa-project.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
-| **SQLite** | 3.54.0 | 操作履歴（Log Tab）、設定、ライブラリDB | `blessing` (Public Domain) | D. Richard Hipp, SQLite contributors<br>https://www.sqlite.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
+| **SQLite** | 3.54.0 | 操作履歴（Log Tab）、プリセットDB、レンダー連番管理 | `blessing` (Public Domain) | D. Richard Hipp, SQLite contributors<br>https://www.sqlite.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 | **libFLAC** | 1.5.0 | ハイレゾPCMデコード（FLAC） | `BSD-3-Clause` | Xiph.Org Foundation<br>https://xiph.org/flac/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 | **libvorbisfile** | 1.3.7 | Ogg Vorbis音声デコード | `BSD-3-Clause` | Xiph.Org Foundation<br>https://xiph.org/vorbis/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 | **libopus** | 1.6.1 | Opus高効率低遅延音声デコード | `BSD-3-Clause` | Xiph.Org Foundation, Skype Ltd., CSIRO<br>https://opus-codec.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 | **FFmpeg (libavcodec, libavformat)** | 63.1.102 | 包括的マルチコーデックデコード候補 | `LGPL-2.1-or-later` | FFmpeg team<br>https://ffmpeg.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
+| **libsoxr** | 0.1.3 | 高精度マルチレートPCMリサンプリング | `LGPL-2.1-or-later` | Rob Sykes, The SoX Resampler contributors<br>https://sourceforge.net/projects/soxr/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
+| **TagLib** | 2.3.2 | 音声ファイルのタグメタデータ抽出・書き出しおよび来歴タグ (`DESK32*` / PropertyMap) | `LGPL-2.1-or-later` OR `MPL-1.1` | Scott Wheeler, TagLib contributors<br>https://taglib.org/ | なし (Unmodified) | 動的リンク (`.so` / システムパッケージ) |
 
 ---
 
