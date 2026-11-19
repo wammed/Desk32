@@ -40,6 +40,20 @@ struct RenderSettings {
     double targetSampleRate = 48000.0;
     bool applyDither = true;
     bool enableMasterDsp = true;
+    bool includePeq = true;
+    bool includeGeq = true;
+    bool includeFilter = true;
+    bool includeCompressor = true;
+    bool includeReverb = true;
+    bool includeLimiter = true;
+
+    [[nodiscard]] static QString resolveOutputWavFilename(const QString& inputFile) {
+        const QFileInfo fi(inputFile);
+        if (fi.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0) {
+            return fi.fileName();
+        }
+        return fi.completeBaseName() + QStringLiteral(".wav");
+    }
 };
 
 enum class RenderStatus {

@@ -171,6 +171,21 @@ public:
         }
     }
 
+    static std::vector<std::string> factoryPresetNames()
+    {
+        return {
+            "Monitor Flat",
+            "Acoustic Clarity",
+            "Harman Target",
+            "Bass Punch",
+            "Vocal Air",
+            "Nearfield Speaker",
+            "Open-Back Headphone",
+            "Closed-Back Headphone",
+            "DJ Club Monitor"
+        };
+    }
+
     /// Extract preset band configurations without modifying DSP state (Control Thread, P0-27)
     static bool getPresetBandConfigs(const std::string& presetName,
                                      std::array<BandConfig, BANDS_PER_CHANNEL>& leftBands,
@@ -223,6 +238,43 @@ public:
             rightBands[7].gainDb = -1.0;
             rightBands[10].gainDb = 2.0;
             rightBands[12].gainDb = 3.0;
+        } else if (presetName == "Nearfield Speaker") {
+            leftBands[4].gainDb = -2.0;  // 160 Hz desk boundary dip
+            leftBands[4].Q = 1.2;
+            leftBands[10].gainDb = 1.0;  // 2.5 kHz presence
+            leftBands[14].gainDb = 1.5;  // 14 kHz off-axis HF lift
+            rightBands[4] = leftBands[4];
+            rightBands[10] = leftBands[10];
+            rightBands[14] = leftBands[14];
+        } else if (presetName == "Open-Back Headphone") {
+            leftBands[0].gainDb = 3.5;   // 25 Hz LowShelf sub-bass extension
+            leftBands[2].gainDb = 2.0;   // 63 Hz warmth
+            leftBands[10].gainDb = -1.5; // 2.5 kHz ear-gain smooth
+            leftBands[12].gainDb = -1.5; // 6.3 kHz sibilance tame
+            rightBands[0] = leftBands[0];
+            rightBands[2] = leftBands[2];
+            rightBands[10] = leftBands[10];
+            rightBands[12] = leftBands[12];
+        } else if (presetName == "Closed-Back Headphone") {
+            leftBands[4].gainDb = -2.5;  // 160 Hz cup boom reduction
+            leftBands[5].gainDb = -1.5;  // 250 Hz mud reduction
+            leftBands[11].gainDb = 2.0;  // 4 kHz clarity
+            leftBands[14].gainDb = 2.5;  // 14 kHz openness
+            rightBands[4] = leftBands[4];
+            rightBands[5] = leftBands[5];
+            rightBands[11] = leftBands[11];
+            rightBands[14] = leftBands[14];
+        } else if (presetName == "DJ Club Monitor") {
+            leftBands[1].gainDb = 2.5;   // 40 Hz sub weight
+            leftBands[3].gainDb = 1.5;   // 100 Hz kick punch
+            leftBands[10].gainDb = -2.5; // 2.5 kHz harshness protection
+            leftBands[11].gainDb = -2.0; // 4 kHz fatigue control
+            leftBands[13].gainDb = 1.0;  // 10 kHz hi-hat crispness
+            rightBands[1] = leftBands[1];
+            rightBands[3] = leftBands[3];
+            rightBands[10] = leftBands[10];
+            rightBands[11] = leftBands[11];
+            rightBands[13] = leftBands[13];
         } else {
             return false;
         }

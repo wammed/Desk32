@@ -166,9 +166,19 @@ public:
     using FaultCallback = std::function<bool(WorkspaceFaultPoint point, const QString& detailPath)>;
     void setTestFaultCallback(FaultCallback cb);
 
-    /// Callback invoked prior to rollback/adoptSave when workspace files are currently loaded/playing in Reference Decks
+    /// Callback invoked prior to rollback/adoptSave or destructive file operations when workspace files are loaded/playing
     using StopPlaybackCallback = std::function<void(const QStringList& affectedPaths)>;
     void setStopPlaybackCallback(StopPlaybackCallback cb);
+
+    /// Callback invoked after Stage 2 integrity verification detects modified workspace files on disk
+    using MetadataReloadCallback = std::function<void(const QStringList& modifiedAbsPaths)>;
+    void setMetadataReloadCallback(MetadataReloadCallback cb);
+
+    /// Refresh .desk32/state_index.json and QFileSystemWatcher immediately after internal engine writes (e.g. RenderEngine output)
+    void refreshIndexAfterInternalWrite();
+
+    /// Acknowledge and clear persisted external modification badges for currently tracked files
+    Q_INVOKABLE void acknowledgeExternalModifications();
 
     // -------------------------------------------------------------------------
     // Registration, Startup Selection, Locking & Process Exclusion
@@ -333,6 +343,8 @@ private:
     std::unique_ptr<QFileSystemWatcher> m_watcher;
     FaultCallback m_faultCallback;
     StopPlaybackCallback m_stopPlaybackCallback;
+    MetadataReloadCallback m_metadataReloadCallback;
+    std::map<QString, QString> m_externalChangeDetails;
 
     // Dedicated Workspace Worker Thread (Specification §9.5)
     mutable std::mutex m_workerQueueMutex;

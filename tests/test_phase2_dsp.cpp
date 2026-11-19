@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QJsonArray>
 #include <cmath>
 #include <vector>
 #include <array>
@@ -233,6 +234,7 @@ private slots:
     void testSessionAndFolderObservabilityLogging();
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
     void testMasterGainPostTapIsolation();
+    void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
     void cleanupTestCase();
 
 private:
@@ -3381,6 +3383,128 @@ void TestPhase2Dsp::testMasterGainPostTapIsolation()
     // Final master peak must reflect 0.5 * 0.1 * 0.5 = 0.025
     QVERIFY(std::abs(tel.masterPeakL - 0.025) < 1e-3);
     QVERIFY(std::abs(tel.masterPeakR - 0.025) < 1e-3);
+}
+
+void TestPhase2Dsp::testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing()
+{
+    using namespace desk32::engine::pipeline;
+    using namespace desk32::engine::routing;
+    using namespace desk32::engine::preset;
+    using desk32::core::EngineController;
+
+    // 1. Item 8 & Item 14: AudioPipeline Direct Mode zero-dither, Level 1 comparison & Pre-DSP Peak/RMS
+    {
+        AudioPipeline pipe(48000.0);
+        auto masterChain = std::make_unique<AudioChain>("MC", ChainPurpose::MasteringChain);
+        masterChain->appendNode(std::make_shared<GraphicEqNode>("Graphic EQ"));
+        pipe.swapMasterChain(std::move(masterChain));
+        ParameterSmoother sL(1.0, 1.0, 48000.0), sR(1.0, 1.0, 48000.0);
+        sL.reset(0.25);
+        sR.reset(0.25);
+
+        constexpr size_t N = 256;
+        std::vector<double> L(N, 0.5), R(N, 0.5);
+        std::vector<int32_t> pcmInt(N * 2, 0);
+        pipe.process(L.data(), R.data(), N, pcmInt.data(), desk32::engine::format::SampleFormat::Int24_32,
+                     true, &sL, &sR, 1.0, /*directModeBypass=*/true);
+        const DspTelemetry directTel = pipe.currentTelemetry();
+        QVERIFY(directTel.level1SamplesIdentical);
+        QCOMPARE(directTel.level1MaxAbsDiff, 0.0);
+        QVERIFY(directTel.level1VerifiedBlocks >= 1);
+        QVERIFY(std::abs(directTel.preDspPeakL - 0.5) < 1e-9);
+        QVERIFY(std::abs(directTel.preDspRmsL - 0.5) < 1e-9);
+
+        // Non-direct mode with post-tap attenuation: Pre-DSP remains 0.5 while Master Peak is attenuated (~0.125)
+        pipe.process(L.data(), R.data(), N, pcmInt.data(), desk32::engine::format::SampleFormat::Int24_32,
+                     false, &sL, &sR, 1.0, /*directModeBypass=*/false);
+        const DspTelemetry postTel = pipe.currentTelemetry();
+        QVERIFY(std::abs(postTel.preDspPeakL - 0.5) < 1e-9);
+        QVERIFY(std::abs(postTel.masterPeakL - 0.125) < 1e-3);
+    }
+
+    // 2. Item 15: OutputPathRouter & AudioPipeline volume smoothing
+    {
+        OutputPathRouter router;
+        router.setSampleRate(48000.0);
+        router.setMode(OutputPathMode::RenderMonitorPath);
+        router.setRenderMonitorVolume(1.0);
+        std::vector<double> in(256 * 2, 1.0), out(256 * 2, 0.0);
+        router.routeBlock(in.data(), out.data(), 256); // primes smoother at 1.0
+        QCOMPARE(out[0], 1.0);
+        router.setRenderMonitorVolume(0.2);
+        router.routeBlock(in.data(), out.data(), 256);
+        // Should smooth gradually rather than jumping straight to 0.2 on frame 0
+        QVERIFY(out[0] > 0.5 && out[0] < 1.0);
+        QVERIFY(out[255 * 2] < out[0]);
+    }
+
+    // 3. EngineController Integration (Items 8, 9, 12, 13)
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    PresetManager::instance().setCustomRootPath(m_tempDir->path() + "/p2_presets");
+
+    // Item 9: Fixed sample rate + 4-state getAudioCapabilities()
+    QVERIFY(ctrl.setFixedGraphSampleRate(96000.0));
+    QCOMPARE(ctrl.graphSampleRate(), 96000.0);
+    const QVariantMap caps = ctrl.getAudioCapabilities();
+    QVERIFY(caps.contains("directMode"));
+    QVERIFY(caps.contains("sampleRateFollowing"));
+    QVERIFY(caps.contains("exclusiveAccess"));
+    QVERIFY(caps.contains("hardwareBitPerfect"));
+
+    // Item 8: 5-state bit-perfect & Level 1/2/3 verification report
+    const QVariantMap bpReport = ctrl.getBitPerfectVerificationReport();
+    QVERIFY(bpReport.contains("modeStateText"));
+    QVERIFY(bpReport.contains("level1"));
+    QVERIFY(bpReport.contains("level2"));
+    QVERIFY(bpReport.contains("level3"));
+    QCOMPARE(bpReport["level3"].toMap()["status"].toString(), QString("NotVerified"));
+
+    // Item 12: GEQ per-band enable/disable preserves gain while flattening curve
+    ctrl.setDspNodeBypass("GEQ", false);
+    ctrl.setGeqBandGain(18 /* 1 kHz */, 6.0);
+    QVERIFY(ctrl.isGeqBandEnabled(18));
+    ctrl.setGeqBandEnabled(18, false);
+    QVERIFY(!ctrl.isGeqBandEnabled(18));
+    QCOMPARE(ctrl.getGeqBandGain(18), 6.0); // Gain preserved!
+    const QVariantList disabledCurve = ctrl.getGeqCurve(64);
+    double maxDisabledDb = 0.0;
+    for (const auto& pt : disabledCurve) {
+        maxDisabledDb = std::max(maxDisabledDb, std::abs(pt.toMap()["db"].toDouble()));
+    }
+    QVERIFY(maxDisabledDb < 0.05);
+    ctrl.setGeqBandEnabled(18, true);
+    const QVariantList enabledCurve = ctrl.getGeqCurve(64);
+    double maxEnabledDb = 0.0;
+    for (const auto& pt : enabledCurve) {
+        maxEnabledDb = std::max(maxEnabledDb, std::abs(pt.toMap()["db"].toDouble()));
+    }
+    QVERIFY(maxEnabledDb > 5.0);
+
+    // Item 13: Unified Listening Correction presets (9 factory + user L/R 16-band roundtrip)
+    const QStringList lcPresets = ctrl.availableListeningPresets();
+    QVERIFY(lcPresets.contains("Nearfield Speaker"));
+    QVERIFY(lcPresets.contains("Open-Back Headphone"));
+    QVERIFY(lcPresets.contains("Closed-Back Headphone"));
+    QVERIFY(lcPresets.contains("DJ Club Monitor"));
+
+    const QJsonObject acPreset = PresetManager::instance().loadPreset(PresetCategories::ListeningCorrection, "Acoustic Clarity");
+    std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> expectedL{}, expectedR{};
+    QVERIFY(ParametricEQ::getPresetBandConfigs("Acoustic Clarity", expectedL, expectedR));
+    QCOMPARE(acPreset["left_bands"].toArray()[5].toObject()["gain_db"].toDouble(), expectedL[5].gainDb);
+
+    // Independent L vs R bands + user preset save/load
+    ctrl.setListeningBand(false, 4, 250.0, 5.5, 1.4, 0, true);
+    ctrl.setListeningBand(true, 4, 250.0, -4.5, 1.4, 0, true);
+    QCOMPARE(ctrl.getListeningBand(false, 4)["gainDb"].toDouble(), 5.5);
+    QCOMPARE(ctrl.getListeningBand(true, 4)["gainDb"].toDouble(), -4.5);
+    QVERIFY(ctrl.savePreset(PresetCategories::ListeningCorrection, "My Asymmetric Rig",
+                            ctrl.captureCurrentStateAsPreset(PresetCategories::ListeningCorrection)));
+    ctrl.setListeningPreset("Monitor Flat");
+    QCOMPARE(ctrl.getListeningBand(false, 4)["gainDb"].toDouble(), 0.0);
+    QVERIFY(ctrl.applyPresetProfile(PresetCategories::ListeningCorrection, "My Asymmetric Rig"));
+    QCOMPARE(ctrl.getListeningBand(false, 4)["gainDb"].toDouble(), 5.5);
+    QCOMPARE(ctrl.getListeningBand(true, 4)["gainDb"].toDouble(), -4.5);
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

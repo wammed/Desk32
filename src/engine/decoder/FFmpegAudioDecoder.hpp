@@ -25,6 +25,7 @@ public:
     bool open(const std::string& filePath) override;
     void close() override;
     [[nodiscard]] bool isOpen() const noexcept override { return m_isOpen; }
+    [[nodiscard]] bool hasDecodeError() const noexcept override { return m_hasDecodeError; }
     [[nodiscard]] std::string lastError() const override { return m_lastError; }
 
     [[nodiscard]] const AudioFormatInfo& formatInfo() const noexcept override { return m_formatInfo; }
@@ -51,6 +52,7 @@ private:
     void extractMetadata();
 
     bool m_isOpen = false;
+    bool m_hasDecodeError = false;
     std::string m_filePath;
     std::string m_lastError;
 

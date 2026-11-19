@@ -27,6 +27,11 @@ struct RenderDspSnapshot {
     // GEQ
     bool geqEnabled = true;
     std::array<double, 32> geqGains{};
+    std::array<bool, 32> geqBandEnabled = [] {
+        std::array<bool, 32> a{};
+        a.fill(true);
+        return a;
+    }();
 
     // Filter
     bool hpfEnabled = false;
@@ -130,6 +135,7 @@ public:
 
         // 2. Graphic EQ
         for (size_t b = 0; b < 32; ++b) {
+            m_geq.setBandEnabled(b, geq.isBandEnabled(b));
             m_geq.setBandGain(b, geq.bandGain(b));
         }
         m_geq.setEnabled(geq.isEnabled());
@@ -173,6 +179,7 @@ public:
         s.geqEnabled = m_geq.isEnabled();
         for (size_t b = 0; b < 32; ++b) {
             s.geqGains[b] = m_geq.bandGain(b);
+            s.geqBandEnabled[b] = m_geq.isBandEnabled(b);
         }
 
         // 3. Filter
@@ -226,6 +233,7 @@ public:
         // 2. GEQ
         m_geq.setEnabled(s.geqEnabled);
         for (size_t b = 0; b < 32; ++b) {
+            m_geq.setBandEnabled(b, s.geqBandEnabled[b]);
             m_geq.setBandGain(b, s.geqGains[b]);
         }
 

@@ -2,6 +2,7 @@
 #include "core/log/LogErrorCodes.hpp"
 #include "engine/decoder/FFmpegAudioDecoder.hpp"
 #include "engine/dsp/Resampler.hpp"
+#include "engine/workspace/WorkspaceManager.hpp"
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -686,23 +687,24 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         return false;
     }
 
-    // P1-RND-01: In Album Render, detect duplicate output base names upfront to prevent overwriting
+    // P1-RND-01: In Album Render, detect duplicate output filenames upfront to prevent overwriting
     if (task.type == RenderType::Album && task.trackFiles.size() > 1) {
-        QSet<QString> seenBaseNames;
+        QSet<QString> seenOutputNames;
         for (const auto& f : task.trackFiles) {
-            QString baseName = QFileInfo(f).completeBaseName();
-            if (seenBaseNames.contains(baseName)) {
+            const QString outName = RenderSettings::resolveOutputWavFilename(f);
+            const QString key = outName.toLower();
+            if (seenOutputNames.contains(key)) {
                 task.status = RenderStatus::Failed;
-                task.errorMessage = QString("Duplicate output track base name detected in album: '%1.wav'. "
+                task.errorMessage = QString("Duplicate output track base name detected in album: '%1'. "
                                             "Render aborted to prevent data overwrite.")
-                                        .arg(baseName);
+                                        .arg(outName);
                 core::log::LogService::instance().log(
                     "Render", "AlbumRender", "Failed", task.errorMessage, "AudioFile", task.sourceFolder, "{}",
                     parentOpId, ""
                 );
                 return false;
             }
-            seenBaseNames.insert(baseName);
+            seenOutputNames.insert(key);
         }
     }
 
@@ -849,8 +851,8 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         }
 
         QString inputFilePath = task.sourceFolder + "/" + trackFile;
-        QString baseName = QFileInfo(trackFile).completeBaseName();
-        QString outputFilePath = task.stagingDir + "/" + baseName + ".wav";
+        QString outFileName = RenderSettings::resolveOutputWavFilename(trackFile);
+        QString outputFilePath = task.stagingDir + "/" + outFileName;
 
         // P1-RND-01: Ensure destination file does not already exist in staging directory
         if (QFileInfo::exists(outputFilePath)) {
@@ -972,7 +974,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         if (i < task.trackResults.size()) {
             QVariantMap tr = task.trackResults[i].toMap();
             tr["status"] = QStringLiteral("Completed");
-            tr["outputFilePath"] = task.finalOutputDir + "/" + baseName + ".wav";
+            tr["outputFilePath"] = task.finalOutputDir + "/" + outFileName;
             task.trackResults[i] = tr;
         }
         task.progress = static_cast<double>(i + 1) / task.totalTracks;
@@ -1060,6 +1062,10 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         committed = QDir().rename(task.stagingDir, task.finalOutputDir);
     }
 
+    if (committed && !task.workspaceFolder.isEmpty()) {
+        desk32::engine::workspace::WorkspaceManager::instance().refreshIndexAfterInternalWrite();
+    }
+
     if (!committed) {
         task.status = RenderStatus::Failed;
         task.errorMessage = "Failed to commit staging directory to final output directory: " + task.finalOutputDir;
@@ -1085,8 +1091,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
     task.progress = 1.0;
     task.renderedFiles.clear();
     for (int i = 0; i < task.trackFiles.size(); ++i) {
-        QString baseName = QFileInfo(task.trackFiles[i]).completeBaseName();
-        QString finalPath = task.finalOutputDir + "/" + baseName + ".wav";
+        QString finalPath = task.finalOutputDir + "/" + RenderSettings::resolveOutputWavFilename(task.trackFiles[i]);
         task.renderedFiles.append(finalPath);
         if (i < task.trackResults.size()) {
             QVariantMap tr = task.trackResults[i].toMap();
@@ -1155,6 +1160,15 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
     RenderChain chain;
     if (settings.enableMasterDsp) {
         chain.applySnapshot(dspSnapshot, targetRate);
+        if (!settings.includePeq) chain.peq().setEnabled(false);
+        if (!settings.includeGeq) chain.geq().setEnabled(false);
+        if (!settings.includeFilter) {
+            chain.filter().setHpfEnabled(false);
+            chain.filter().setLpfEnabled(false);
+        }
+        if (!settings.includeCompressor) chain.compressor().setEnabled(false);
+        if (!settings.includeReverb) chain.reverb().setEnabled(false);
+        if (!settings.includeLimiter) chain.limiter().setEnabled(false);
     } else {
         chain.configure(targetRate);
         chain.setEnabled(false);

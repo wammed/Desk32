@@ -41,6 +41,10 @@ class EngineController : public QObject {
     Q_PROPERTY(bool masterMute READ isMasterMute WRITE setMasterMute NOTIFY masterMuteChanged)
     Q_PROPERTY(double masterPeakL READ masterPeakL NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterPeakR READ masterPeakR NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double preDspPeakL READ preDspPeakL NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double preDspPeakR READ preDspPeakR NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double preDspRmsL READ preDspRmsL NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double preDspRmsR READ preDspRmsR NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double renderTapPeakL READ renderTapPeakL NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double renderTapPeakR READ renderTapPeakR NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterRmsL READ masterRmsL NOTIFY dspTelemetryChanged)
@@ -53,6 +57,8 @@ class EngineController : public QObject {
     Q_PROPERTY(double lastRenegotiationSilenceMs READ lastRenegotiationSilenceMs NOTIFY diagnosticsChanged)
     Q_PROPERTY(int directModeStatus READ directModeStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(int bitPerfectStatus READ bitPerfectStatus NOTIFY diagnosticsChanged)
+    Q_PROPERTY(int bitPerfectModeState READ bitPerfectModeState NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString bitPerfectModeStateText READ bitPerfectModeStateText NOTIFY diagnosticsChanged)
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
 
@@ -80,6 +86,9 @@ class EngineController : public QObject {
     Q_PROPERTY(QString externalInsertSendPortR READ externalInsertSendPortR NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(QString externalInsertReturnPortL READ externalInsertReturnPortL NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(QString externalInsertReturnPortR READ externalInsertReturnPortR NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertPosition READ externalInsertPosition WRITE setExternalInsertPosition NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(int externalInsertDisconnectPolicy READ externalInsertDisconnectPolicy WRITE setExternalInsertDisconnectPolicy NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(bool syncMasterDspToRender READ syncMasterDspToRenderEnabled WRITE setSyncMasterDspToRender NOTIFY renderStateChanged)
 
     // Phase 4: Export & Render Telemetry (Section 5.11 & 20.1)
     // All render properties delegate directly to RenderEngine as the single canonical state source.
@@ -136,6 +145,10 @@ public:
     [[nodiscard]] bool isMasterMute() const;
     [[nodiscard]] double masterPeakL() const;
     [[nodiscard]] double masterPeakR() const;
+    [[nodiscard]] double preDspPeakL() const;
+    [[nodiscard]] double preDspPeakR() const;
+    [[nodiscard]] double preDspRmsL() const;
+    [[nodiscard]] double preDspRmsR() const;
     [[nodiscard]] double renderTapPeakL() const;
     [[nodiscard]] double renderTapPeakR() const;
     [[nodiscard]] double masterRmsL() const;
@@ -148,6 +161,10 @@ public:
     [[nodiscard]] double lastRenegotiationSilenceMs() const noexcept;
     [[nodiscard]] int directModeStatus() const;
     [[nodiscard]] int bitPerfectStatus() const;
+    [[nodiscard]] int bitPerfectModeState() const;
+    [[nodiscard]] QString bitPerfectModeStateText() const;
+    Q_INVOKABLE QVariantMap getBitPerfectVerificationReport() const;
+    Q_INVOKABLE QVariantMap getAudioCapabilities() const;
     [[nodiscard]] int backendStatus() const;
     [[nodiscard]] QString backendStatusText() const;
 
@@ -212,6 +229,7 @@ public:
     Q_INVOKABLE void setMasterGainR(double gain);
     Q_INVOKABLE void setMasterMute(bool mute);
     Q_INVOKABLE void setDirectModeEnabled(bool enabled);
+    Q_INVOKABLE bool setFixedGraphSampleRate(double sampleRate);
 
     // QML-invokable Deck Operations
     Q_INVOKABLE void play(const QString& deckId);
@@ -229,14 +247,19 @@ public:
     Q_INVOKABLE qint64 getDeckOffsetFrames(const QString& deckId) const;
     Q_INVOKABLE void setDeckLevelMatchDb(const QString& deckId, double gainDb);
     Q_INVOKABLE double getDeckLevelMatchDb(const QString& deckId) const;
+    Q_INVOKABLE double getTrackMeasuredRmsDb(const QString& deckId) const;
+    Q_INVOKABLE double measureAndApplyDeckLevelMatch(const QString& referenceDeckId, const QString& targetDeckId);
 
     // QML-invokable Folder Session Operations
     Q_INVOKABLE bool startFolderSession(const QString& deckId, const QString& folderPath, const QStringList& fileNames);
+    Q_INVOKABLE bool startFolderSessionFromDeck(const QString& deckId);
     Q_INVOKABLE bool advanceFolderNext(const QString& deckId);
     Q_INVOKABLE bool retreatFolderPrevious(const QString& deckId);
 
     // QML-invokable DSP & EQ Console Operations
     Q_INVOKABLE void setGeqBandGain(int bandIndex, double gainDb);
+    Q_INVOKABLE void setGeqBandEnabled(int bandIndex, bool enabled);
+    Q_INVOKABLE bool isGeqBandEnabled(int bandIndex) const;
     Q_INVOKABLE double getGeqBandGain(int bandIndex);
     Q_INVOKABLE void resetAllGeqBands();
     Q_INVOKABLE QVariantList getGeqCurve(int numPoints = 128);
@@ -263,9 +286,12 @@ public:
     Q_INVOKABLE void setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving);
     Q_INVOKABLE QVariantMap getReverbParams();
 
-    // Listening Correction Presets (Section 5.10)
+    // Listening Correction Presets & Per-Band Control (Section 5.10)
     Q_INVOKABLE QStringList availableListeningPresets();
     Q_INVOKABLE void setListeningPreset(const QString& presetName);
+    Q_INVOKABLE QVariantMap getListeningBand(bool isRightChannel, int bandIndex);
+    Q_INVOKABLE void setListeningBand(bool isRightChannel, int bandIndex, double frequency, double gainDb, double q, int filterType, bool enabled);
+    Q_INVOKABLE QVariantList getListeningCurve(bool isRightChannel, int numPoints = 128);
 
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
     Q_INVOKABLE void setGeqBypassed(bool bypass);
@@ -276,11 +302,23 @@ public:
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
 
     // Phase 3: External Insert Host Operations (Section 6.0)
+    Q_INVOKABLE QVariantList discoverExternalInsertPorts() const;
     Q_INVOKABLE bool configureExternalInsert(const QString& clientName,
                                             const QString& sendL, const QString& sendR,
                                             const QString& returnL, const QString& returnR,
                                             double sampleRate = 0.0, int bufferSize = 0,
                                             int reportedLatencyFrames = 0);
+    Q_INVOKABLE bool configureExternalInsertWithMetadata(const QString& clientName,
+                                                        const QString& sendL, const QString& sendR,
+                                                        const QString& returnL, const QString& returnR,
+                                                        double sampleRate, int bufferSize,
+                                                        int reportedLatencyFrames, bool latencyReported,
+                                                        const QString& pluginName, const QString& pluginUri,
+                                                        const QString& hostPresetReference);
+    Q_INVOKABLE void setExternalInsertPosition(int positionIndex);
+    [[nodiscard]] int externalInsertPosition() const noexcept;
+    Q_INVOKABLE void setExternalInsertDisconnectPolicy(int policy);
+    [[nodiscard]] int externalInsertDisconnectPolicy() const noexcept;
     Q_INVOKABLE void setExternalInsertBypass(bool bypass);
     Q_INVOKABLE void triggerInsertLatencyMeasurement();
     Q_INVOKABLE void calibrateInsertLatency();
@@ -301,6 +339,11 @@ public:
     Q_INVOKABLE QVariantMap captureCurrentStateAsPreset(const QString& category);
 
     // Phase 4: Export & Render Operations (Section 5.11 & 20.1)
+    Q_INVOKABLE void setRenderNodeEnabled(const QString& nodeName, bool enabled);
+    [[nodiscard]] Q_INVOKABLE bool isRenderNodeEnabled(const QString& nodeName) const;
+    Q_INVOKABLE void setSyncMasterDspToRender(bool sync);
+    [[nodiscard]] bool syncMasterDspToRenderEnabled() const noexcept;
+    Q_INVOKABLE QVariantMap verifyRenderTapConsistency();
     Q_INVOKABLE QString startTrackRender(const QString& deckId, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
     Q_INVOKABLE QString startAlbumRender(const QString& folderPath, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
     Q_INVOKABLE void cancelRender();
@@ -310,6 +353,11 @@ public:
     Q_INVOKABLE void setListeningVolume(double volume);
     Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath, bool switchToRenderMonitor = true);
     Q_INVOKABLE QVariantMap getRenderStatus() const;
+
+    // Session State Persistence
+    Q_INVOKABLE QString defaultSessionStatePath() const;
+    Q_INVOKABLE bool saveSessionState(const QString& filePath = QString()) const;
+    Q_INVOKABLE bool restoreSessionState(const QString& filePath = QString());
 
     // Direct access to nodes and engine components for testing
     [[nodiscard]] std::shared_ptr<engine::insert::ExternalInsertNode> insertNode() const noexcept { return m_insertNode; }
@@ -352,6 +400,12 @@ signals:
 
 private:
     void syncMasterDspToRenderEngine();
+    bool applyMasterDspJson(const QJsonObject& obj);
+    bool applyListeningCorrectionJson(const QJsonObject& obj, const QString& presetLabel);
+    bool applyExternalInsertJson(const QJsonObject& obj);
+    bool applyAudioDeviceJson(const QJsonObject& obj);
+    std::atomic<bool>* renderNodeFlagPtr(const QString& nodeName) noexcept;
+    const std::atomic<bool>* renderNodeFlagPtr(const QString& nodeName) const noexcept;
     void followActiveDeckSampleRateIfDirectMode();
     void recordSeekEvent(
         char deckChar,
@@ -405,6 +459,16 @@ private:
     std::atomic<double> m_masterGainR{1.0};
     std::atomic<bool> m_masterMute{false};
     std::atomic<bool> m_directModeEnabled{false};
+    std::atomic<double> m_fixedGraphSampleRate{48000.0};
+    std::atomic<int> m_externalInsertPosition{4};
+    std::array<std::atomic<uint8_t>, 7> m_masterNodeIndices{};
+    std::atomic<bool> m_syncMasterDspToRender{true};
+    std::atomic<bool> m_renderIncludePeq{true};
+    std::atomic<bool> m_renderIncludeGeq{true};
+    std::atomic<bool> m_renderIncludeFilter{true};
+    std::atomic<bool> m_renderIncludeCompressor{true};
+    std::atomic<bool> m_renderIncludeReverb{true};
+    std::atomic<bool> m_renderIncludeLimiter{true};
 
     // Private helpers for DSP node lookup and signal dispatch (P1-1, P1-2)
     void emitDspNodeSignal(const QString& nodeName);

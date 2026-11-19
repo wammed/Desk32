@@ -1,4 +1,5 @@
 #include "PresetManager.hpp"
+#include "engine/dsp/ParametricEQ.hpp"
 #include <QFile>
 #include <QFileInfo>
 #include <QDateTime>
@@ -59,11 +60,13 @@ QString PresetManager::sanitizeName(const QString& name) const {
 
 bool PresetManager::isFactoryPreset(const QString& category, const QString& presetName) const {
     if (category == PresetCategories::ListeningCorrection) {
-        return presetName == "Monitor Flat" ||
-               presetName == "Acoustic Clarity" ||
-               presetName == "Harman Target" ||
-               presetName == "Bass Punch" ||
-               presetName == "Vocal Air";
+        const auto names = ParametricEQ::factoryPresetNames();
+        for (const auto& n : names) {
+            if (presetName.toStdString() == n) {
+                return true;
+            }
+        }
+        return false;
     }
     if (category == PresetCategories::MasterDsp) {
         return presetName == "Default Bypass" ||
@@ -86,43 +89,37 @@ QJsonObject PresetManager::getFactoryPreset(const QString& category, const QStri
     root["category"] = category;
     root["name"] = presetName;
     root["version"] = 1;
+    root["format_version"] = 1;
     root["is_factory"] = true;
     root["created_at"] = "2026-11-07T00:00:00Z";
 
     if (category == PresetCategories::ListeningCorrection) {
-        QJsonArray bands;
-        auto addBand = [&](int idx, double freq, double gain, double q, int type, bool enabled) {
-            QJsonObject b;
-            b["index"] = idx;
-            b["frequency"] = freq;
-            b["gain_db"] = gain;
-            b["q"] = q;
-            b["type"] = type;
-            b["enabled"] = enabled;
-            bands.append(b);
+        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> lBands{};
+        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> rBands{};
+        if (!ParametricEQ::getPresetBandConfigs(presetName.toStdString(), lBands, rBands)) {
+            return {};
+        }
+
+        auto toBandArray = [](const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& src) {
+            QJsonArray arr;
+            for (size_t i = 0; i < src.size(); ++i) {
+                QJsonObject b;
+                b["index"] = static_cast<int>(i);
+                b["frequency"] = src[i].frequency;
+                b["gain_db"] = src[i].gainDb;
+                b["q"] = src[i].Q;
+                b["type"] = static_cast<int>(src[i].type);
+                b["enabled"] = src[i].enabled;
+                arr.append(b);
+            }
+            return arr;
         };
 
-        if (presetName == "Monitor Flat") {
-            for (int i = 0; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
-        } else if (presetName == "Acoustic Clarity") {
-            addBand(0, 250.0, -1.5, 1.4, 0, true);
-            addBand(1, 3500.0, 1.8, 1.2, 0, true);
-            addBand(2, 10000.0, 2.0, 0.7, 2, true); // High shelf
-            for (int i = 3; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
-        } else if (presetName == "Harman Target") {
-            addBand(0, 105.0, 4.5, 0.7, 1, true); // Low shelf
-            addBand(1, 3000.0, 3.0, 1.4, 0, true);
-            addBand(2, 8000.0, -1.0, 2.0, 0, true);
-            for (int i = 3; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
-        } else if (presetName == "Bass Punch") {
-            addBand(0, 60.0, 3.5, 1.8, 0, true);
-            addBand(1, 120.0, -1.0, 2.0, 0, true);
-            for (int i = 2; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
-        } else if (presetName == "Vocal Air") {
-            addBand(0, 12000.0, 2.5, 0.7, 2, true); // High shelf
-            for (int i = 1; i < 16; ++i) addBand(i, 1000.0, 0.0, 1.0, 0, false);
-        }
-        root["bands"] = bands;
+        QJsonArray leftArr = toBandArray(lBands);
+        QJsonArray rightArr = toBandArray(rBands);
+        root["left_bands"] = leftArr;
+        root["right_bands"] = rightArr;
+        root["bands"] = leftArr; // Legacy single-array alias
         return root;
     }
 
@@ -215,7 +212,9 @@ QStringList PresetManager::listPresets(const QString& category) const {
 
     // 1. Add factory presets
     if (category == PresetCategories::ListeningCorrection) {
-        result << "Monitor Flat" << "Acoustic Clarity" << "Harman Target" << "Bass Punch" << "Vocal Air";
+        for (const auto& name : ParametricEQ::factoryPresetNames()) {
+            result << QString::fromStdString(name);
+        }
     } else if (category == PresetCategories::MasterDsp) {
         result << "Default Bypass" << "Transparent Master" << "Warm Tape";
     } else if (category == PresetCategories::ExternalInsert) {
@@ -265,6 +264,7 @@ bool PresetManager::savePreset(const QString& category, const QString& presetNam
     root["category"] = cleanCategory;
     root["name"] = cleanName;
     root["version"] = 1;
+    root["format_version"] = 1;
     root["is_factory"] = false;
     root["saved_at"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
 
@@ -319,6 +319,27 @@ QJsonObject PresetManager::loadPreset(const QString& category, const QString& pr
         qWarning() << "Category mismatch for preset:" << filePath
                    << "Expected:" << category << "Found:" << obj["category"].toString();
         return {};
+    }
+
+    // Validate & migrate format_version / version schema (Spec §11.1)
+    constexpr int CURRENT_FORMAT_VERSION = 1;
+    int fmtVer = obj.contains("format_version")
+                     ? obj["format_version"].toInt(-1)
+                     : (obj.contains("version") ? obj["version"].toInt(1) : 1);
+    if (fmtVer < 1 || fmtVer > CURRENT_FORMAT_VERSION) {
+        qWarning() << "Unsupported preset format_version:" << fmtVer << "in" << filePath;
+        return {};
+    }
+    if (!obj.contains("format_version")) {
+        obj["format_version"] = fmtVer;
+    }
+    if (!obj.contains("version")) {
+        obj["version"] = fmtVer;
+    }
+    if (category == PresetCategories::ListeningCorrection && obj.contains("bands") &&
+        (!obj.contains("left_bands") || !obj.contains("right_bands"))) {
+        if (!obj.contains("left_bands")) obj["left_bands"] = obj["bands"];
+        if (!obj.contains("right_bands")) obj["right_bands"] = obj["bands"];
     }
 
     return obj;

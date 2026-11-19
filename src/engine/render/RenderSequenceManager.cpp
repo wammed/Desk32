@@ -61,12 +61,16 @@ bool RenderSequenceManager::initializeLocked(const QString& dbPath) {
 
     QString actualPath = dbPath.isEmpty() ? m_dbPath : dbPath;
     if (actualPath.isEmpty()) {
-        QString stateDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+        QString stateHome = qEnvironmentVariable("XDG_STATE_HOME");
+        if (stateHome.isEmpty()) {
+            stateHome = QDir::homePath() + QStringLiteral("/.local/state");
+        }
+        QString stateDir = QDir(stateHome).filePath(QStringLiteral("desk32"));
         if (stateDir.isEmpty() || !QDir().mkpath(stateDir)) {
             stateDir = QDir::tempPath() + "/desk32";
             QDir().mkpath(stateDir);
         }
-        actualPath = stateDir + "/operation_logs.db";
+        actualPath = QDir(stateDir).filePath(QStringLiteral("operation_logs.db"));
     }
     m_dbPath = actualPath;
 

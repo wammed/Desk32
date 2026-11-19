@@ -24,6 +24,7 @@ class LogService : public QObject {
 
 public:
     static LogService& instance();
+    static QString defaultDatabasePath();
 
     explicit LogService(QObject* parent = nullptr);
     ~LogService() override;

@@ -9,12 +9,15 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
+#include <QStandardPaths>
 #include <QSysInfo>
 #include <QTimer>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 namespace desk32::core {
 
@@ -71,17 +74,82 @@ bool EngineController::initialize(bool offlineMode) {
   m_globalDspBypass.store(false, std::memory_order_relaxed);
   m_globalBypassDesynced.store(false, std::memory_order_relaxed);
   m_directModeEnabled.store(false, std::memory_order_relaxed);
+  m_fixedGraphSampleRate.store(48000.0, std::memory_order_relaxed);
+  m_externalInsertPosition.store(4, std::memory_order_relaxed);
+  for (uint8_t k = 0; k < 7; ++k) {
+    m_masterNodeIndices[k].store(k, std::memory_order_relaxed);
+  }
+  m_syncMasterDspToRender.store(true, std::memory_order_relaxed);
+  m_renderIncludePeq.store(true, std::memory_order_relaxed);
+  m_renderIncludeGeq.store(true, std::memory_order_relaxed);
+  m_renderIncludeFilter.store(true, std::memory_order_relaxed);
+  m_renderIncludeCompressor.store(true, std::memory_order_relaxed);
+  m_renderIncludeReverb.store(true, std::memory_order_relaxed);
+  m_renderIncludeLimiter.store(true, std::memory_order_relaxed);
 
   // 1. Initialize 4-Deck Manager
   m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
 
-  // Wire workspace playback-stop guard (e.g., before rollback)
+  for (char cid : {'A', 'B', 'C', 'D'}) {
+    if (auto *d = m_deckManager->deck(cid)) {
+      d->setErrorLogCallback([this, cid](const std::string &act,
+                                         int32_t code,
+                                         const std::string &target,
+                                         const std::string &msg) {
+        log::LogService::instance().log(
+            QStringLiteral("Deck"), QString::fromStdString(act),
+            QStringLiteral("Warning"), QString::fromStdString(msg),
+            QStringLiteral("AudioFile"), QString::fromStdString(target),
+            QStringLiteral("{}"), QString(), QString(), code, 0.0);
+        emit deckStateChanged(QString(cid));
+        emit diagnosticsChanged();
+      });
+    }
+  }
+
+  auto canonPath = [](const std::string &p) -> QString {
+    if (p.empty()) return QString();
+    std::error_code ec;
+    const auto cp = std::filesystem::weakly_canonical(p, ec);
+    return ec ? QString::fromStdString(p) : QString::fromStdString(cp.string());
+  };
+
+  // Wire targeted workspace playback-stop guard (only stops decks matching affectedPaths)
   engine::workspace::WorkspaceManager::instance().setStopPlaybackCallback(
-      [this](const QStringList & /*affectedPaths*/) {
-        if (m_deckManager) {
-          for (char cid : {'A', 'B', 'C', 'D'}) {
-            if (auto *d = m_deckManager->deck(cid)) {
+      [this, canonPath](const QStringList &affectedPaths) {
+        if (!m_deckManager) return;
+        QStringList canonAffected;
+        canonAffected.reserve(affectedPaths.size());
+        for (const QString &ap : affectedPaths) {
+          canonAffected.append(canonPath(ap.toStdString()));
+        }
+        for (char cid : {'A', 'B', 'C', 'D'}) {
+          if (auto *d = m_deckManager->deck(cid)) {
+            const QString loadedCanon = canonPath(d->trackInfo().path);
+            if (canonAffected.isEmpty() ||
+                (!loadedCanon.isEmpty() && canonAffected.contains(loadedCanon))) {
               d->stop();
+              emit deckStateChanged(QString(cid));
+            }
+          }
+        }
+      });
+
+  // Wire workspace Stage-2 external modification metadata reload callback
+  engine::workspace::WorkspaceManager::instance().setMetadataReloadCallback(
+      [this, canonPath](const QStringList &modifiedAbsPaths) {
+        if (!m_deckManager || modifiedAbsPaths.isEmpty()) return;
+        QStringList canonMod;
+        canonMod.reserve(modifiedAbsPaths.size());
+        for (const QString &mp : modifiedAbsPaths) {
+          canonMod.append(canonPath(mp.toStdString()));
+        }
+        for (char cid : {'A', 'B', 'C', 'D'}) {
+          if (auto *d = m_deckManager->deck(cid)) {
+            const QString loadedCanon = canonPath(d->trackInfo().path);
+            if (!loadedCanon.isEmpty() && canonMod.contains(loadedCanon)) {
+              d->reloadMetadata();
+              emit deckStateChanged(QString(cid));
             }
           }
         }
@@ -930,6 +998,29 @@ void EngineController::checkAudioHealthAndGraph() {
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
         QString(), QString(), log::ErrorCode::LogQueueOverflow, 0.0);
   }
+
+  // 5. External Insert DisconnectPolicy::StopPlayback enforcement
+  if (m_insertNode && m_insertNode->bridge().stopPlaybackRequested()) {
+    m_insertNode->bridge().clearStopPlaybackRequested();
+    if (m_deckManager) {
+      for (char cid : {'A', 'B', 'C', 'D'}) {
+        if (auto *d = m_deckManager->deck(cid)) {
+          d->stop();
+          emit deckStateChanged(QString(cid));
+        }
+      }
+    }
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"), QStringLiteral("StopPlaybackPolicy"),
+        QStringLiteral("Warning"),
+        QStringLiteral("External Insert disconnected with StopPlayback policy: stopped active deck playback."),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(m_insertNode->bridge().config().clientName),
+        QStringLiteral("{}"), QString(), QString(),
+        log::ErrorCode::ExternalHostFailed, 0.0);
+    emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
+  }
 }
 
 void EngineController::copyToClipboard(const QString &text) {
@@ -1004,6 +1095,22 @@ double EngineController::masterPeakR() const {
   return m_pipeline ? m_pipeline->masterPeakR() : 0.0;
 }
 
+double EngineController::preDspPeakL() const {
+  return m_pipeline ? m_pipeline->preDspPeakL() : 0.0;
+}
+
+double EngineController::preDspPeakR() const {
+  return m_pipeline ? m_pipeline->preDspPeakR() : 0.0;
+}
+
+double EngineController::preDspRmsL() const {
+  return m_pipeline ? m_pipeline->preDspRmsL() : 0.0;
+}
+
+double EngineController::preDspRmsR() const {
+  return m_pipeline ? m_pipeline->preDspRmsR() : 0.0;
+}
+
 double EngineController::renderTapPeakL() const {
   return m_pipeline ? m_pipeline->currentTelemetry().renderTapPeakL : 0.0;
 }
@@ -1051,7 +1158,8 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
   if (!m_deckManager || !m_audioOutput)
     return;
   const bool directOn = m_directModeEnabled.load(std::memory_order_acquire);
-  double targetRateD = 48000.0;
+  double targetRateD = m_fixedGraphSampleRate.load(std::memory_order_relaxed);
+  if (targetRateD <= 0.0) targetRateD = 48000.0;
   if (directOn) {
     auto *active = m_deckManager->activeDeck();
     if (!active || active->trackInfo().sampleRate <= 0.0) {
@@ -1091,6 +1199,86 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
   }
 }
 
+bool EngineController::setFixedGraphSampleRate(double sampleRate) {
+  if (sampleRate < 8000.0 || sampleRate > 768000.0)
+    return false;
+  m_fixedGraphSampleRate.store(sampleRate, std::memory_order_relaxed);
+  if (m_directModeEnabled.load(std::memory_order_acquire)) {
+    // Store fixed rate preference for when Direct Mode is turned off
+    emit diagnosticsChanged();
+    return true;
+  }
+  if (!m_deckManager || !m_audioOutput)
+    return false;
+
+  const uint32_t targetRate = static_cast<uint32_t>(std::llround(sampleRate));
+  double silenceMs = 0.0;
+  const bool ok = m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
+  m_deckManager->setGraphRate(sampleRate);
+  if (m_pipeline) {
+    m_pipeline->setGraphSampleRate(sampleRate);
+  }
+  m_gainSmootherL.configure(sampleRate, 15.0);
+  m_gainSmootherR.configure(sampleRate, 15.0);
+  emit graphSampleRateChanged(sampleRate);
+  emit diagnosticsChanged();
+  log::LogService::instance().log(
+      QStringLiteral("AudioEngine"),
+      QStringLiteral("FixedSampleRateChange"),
+      ok ? QStringLiteral("Success") : QStringLiteral("Warning"),
+      QString("Fixed graph sample rate set to %1 Hz (silence: %2 ms)")
+          .arg(targetRate)
+          .arg(silenceMs, 0, 'f', 2),
+      QStringLiteral("Backend"), QStringLiteral("PipeWire"));
+  return ok;
+}
+
+QVariantMap EngineController::getAudioCapabilities() const {
+  QVariantMap root;
+  root["backend"] = QStringLiteral("PipeWire");
+  if (!m_audioOutput) {
+    root["directMode"] = QStringLiteral("Unsupported");
+    root["sampleRateFollowing"] = QStringLiteral("Unsupported");
+    root["exclusiveAccess"] = QStringLiteral("Unsupported");
+    root["hardwareBitPerfect"] = QStringLiteral("Unsupported");
+    root["externalInsert"] = QStringLiteral("Supported");
+    root["offlineRender"] = QStringLiteral("Supported");
+    return root;
+  }
+
+  const auto state = m_audioOutput->state();
+  const auto diag = m_audioOutput->diagnostics();
+  if (state == engine::backend::StreamState::Unconnected ||
+      state == engine::backend::StreamState::Error) {
+    root["directMode"] = QStringLiteral("Unsupported");
+    root["sampleRateFollowing"] = QStringLiteral("Unsupported");
+    root["exclusiveAccess"] = QStringLiteral("Unsupported");
+    root["hardwareBitPerfect"] = QStringLiteral("Unsupported");
+  } else {
+    QString dmCap = QStringLiteral("Indeterminate");
+    if (diag.directModeStatus == engine::backend::DirectModeStatus::Active) {
+      dmCap = QStringLiteral("Supported");
+    } else if (diag.directModeStatus == engine::backend::DirectModeStatus::Disabled) {
+      dmCap = QStringLiteral("NotVerified");
+    }
+    root["directMode"] = dmCap;
+    root["sampleRateFollowing"] =
+        (diag.directModeStatus == engine::backend::DirectModeStatus::Active)
+            ? QStringLiteral("Supported")
+            : QStringLiteral("Indeterminate");
+    root["exclusiveAccess"] = QStringLiteral("NotVerified"); // PipeWire shared graph
+    root["hardwareBitPerfect"] = QStringLiteral("NotVerified"); // Requires Level 3 loopback capture
+  }
+  root["externalInsert"] = QStringLiteral("Supported");
+  root["offlineRender"] = QStringLiteral("Supported");
+  root["negotiatedSampleRate"] = static_cast<int>(diag.sampleRate);
+  root["requestedSampleRate"] = static_cast<int>(diag.requestedSampleRate);
+  root["negotiatedQuantum"] = static_cast<int>(diag.negotiatedQuantum > 0 ? diag.negotiatedQuantum : diag.bufferFrames);
+  root["formatName"] = QString::fromStdString(diag.formatName);
+  root["deviceName"] = QString::fromStdString(diag.deviceName);
+  return root;
+}
+
 void EngineController::setDirectModeEnabled(bool enabled) {
   const bool prev =
       m_directModeEnabled.exchange(enabled, std::memory_order_acq_rel);
@@ -1117,11 +1305,16 @@ int EngineController::directModeStatus() const {
 int EngineController::bitPerfectStatus() const {
   // 0 = Unknown / Indeterminate, 1 = NotVerified (processing/resampling
   // active), 2 = Verified
+  const auto *dm = m_deckManager.get();
+  const auto *active = dm ? dm->activeDeck() : nullptr;
+  const bool hasOpenTrack = active && active->isOpen();
+
   const bool directBypass = m_directModeEnabled.load(std::memory_order_relaxed);
   if (!directBypass) {
     if (m_masterMute.load(std::memory_order_relaxed) ||
         std::abs(m_masterGainL.load(std::memory_order_relaxed) - 1.0) > 1e-6 ||
-        std::abs(m_masterGainR.load(std::memory_order_relaxed) - 1.0) > 1e-6) {
+        std::abs(m_masterGainR.load(std::memory_order_relaxed) - 1.0) > 1e-6 ||
+        (active && std::abs(active->levelMatchGainDb()) > 1e-4)) {
       return 1;
     }
 
@@ -1158,9 +1351,6 @@ int EngineController::bitPerfectStatus() const {
     }
   }
 
-  const auto *dm = m_deckManager.get();
-  const auto *active = dm ? dm->activeDeck() : nullptr;
-  const bool hasOpenTrack = active && active->isOpen();
   if (hasOpenTrack && active->trackInfo().sampleRate > 0.0 &&
       std::abs(active->trackInfo().sampleRate - graphSampleRate()) > 0.5) {
     return 1;
@@ -1176,6 +1366,94 @@ int EngineController::bitPerfectStatus() const {
   }
 
   return 0;
+}
+
+int EngineController::bitPerfectModeState() const {
+  // 0 = Unsupported, 1 = Indeterminate, 2 = NotVerified, 3 = Verified, 4 = Direct
+  if (!m_audioOutput ||
+      m_audioOutput->state() == engine::backend::StreamState::Unconnected ||
+      m_audioOutput->state() == engine::backend::StreamState::Error) {
+    return 0; // Unsupported
+  }
+  const int legacy = bitPerfectStatus();
+  if (legacy == 1) {
+    return 2; // NotVerified
+  }
+  if (m_pipeline && m_pipeline->currentTelemetry().processedFrameCount > 0 &&
+      m_pipeline->level1MaxAbsDiff() > 0.0) {
+    return 2; // NotVerified
+  }
+  if (legacy == 2) {
+    return m_directModeEnabled.load(std::memory_order_relaxed) ? 4 : 3;
+  }
+  if (m_directModeEnabled.load(std::memory_order_relaxed)) {
+    // Direct mode requested, backend status is Unknown (offline/indeterminate)
+    return 1; // Indeterminate
+  }
+  return 1; // Indeterminate
+}
+
+QString EngineController::bitPerfectModeStateText() const {
+  switch (bitPerfectModeState()) {
+  case 0: return QStringLiteral("Unsupported");
+  case 1: return QStringLiteral("Indeterminate");
+  case 2: return QStringLiteral("NotVerified");
+  case 3: return QStringLiteral("Verified");
+  case 4: return QStringLiteral("Direct");
+  }
+  return QStringLiteral("Indeterminate");
+}
+
+QVariantMap EngineController::getBitPerfectVerificationReport() const {
+  QVariantMap report;
+  const int modeState = bitPerfectModeState();
+  report["modeState"] = modeState;
+  report["modeStateText"] = bitPerfectModeStateText();
+  report["legacyStatus"] = bitPerfectStatus();
+
+  const auto telem = m_pipeline ? m_pipeline->currentTelemetry() : engine::pipeline::DspTelemetry{};
+  QVariantMap level1;
+  level1["internalSamplesIdentical"] = telem.level1SamplesIdentical;
+  level1["maxAbsDiff"] = telem.level1MaxAbsDiff;
+  level1["inputHash"] = static_cast<qulonglong>(telem.level1InputHash);
+  level1["outputHash"] = static_cast<qulonglong>(telem.level1OutputHash);
+  level1["verifiedBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1VerifiedBlocks() : 0);
+  level1["status"] = telem.level1SamplesIdentical
+                         ? QStringLiteral("Verified")
+                         : (telem.processedFrameCount == 0 ? QStringLiteral("Indeterminate")
+                                                           : QStringLiteral("NotVerified"));
+  report["level1"] = level1;
+
+  const auto *dm = m_deckManager.get();
+  const auto *active = dm ? dm->activeDeck() : nullptr;
+  const bool hasTrack = active && active->isOpen();
+  const double trackRate = hasTrack ? active->trackInfo().sampleRate : 0.0;
+  const double gRate = graphSampleRate();
+  const bool noResample = hasTrack && trackRate > 0.0 && std::abs(trackRate - gRate) <= 0.5;
+  const auto diag = m_audioOutput ? m_audioOutput->diagnostics() : engine::backend::StreamDiagnostics{};
+  const bool backendOk = m_audioOutput && diag.directModeStatus == engine::backend::DirectModeStatus::Active;
+
+  QVariantMap level2;
+  level2["backendParamsVerified"] = backendOk;
+  level2["graphRateMatchesTrack"] = noResample;
+  level2["requestedRate"] = static_cast<int>(diag.requestedSampleRate);
+  level2["actualRate"] = static_cast<int>(diag.sampleRate);
+  level2["formatName"] = QString::fromStdString(diag.formatName);
+  level2["noResampling"] = noResample;
+  level2["status"] = (backendOk && noResample && bitPerfectStatus() == 2)
+                         ? QStringLiteral("Verified")
+                         : (diag.directModeStatus == engine::backend::DirectModeStatus::Disabled
+                                ? QStringLiteral("NotVerified")
+                                : QStringLiteral("Indeterminate"));
+  report["level2"] = level2;
+
+  QVariantMap level3;
+  level3["status"] = QStringLiteral("NotVerified");
+  level3["externalHardwareCaptureRequired"] = true;
+  level3["message"] = QStringLiteral("Level 3 verification requires external hardware loopback capture comparison.");
+  report["level3"] = level3;
+
+  return report;
 }
 
 int EngineController::backendStatus() const {
@@ -1971,6 +2249,47 @@ double EngineController::getDeckLevelMatchDb(const QString &deckId) const {
   return d ? d->levelMatchGainDb() : 0.0;
 }
 
+double EngineController::getTrackMeasuredRmsDb(const QString &deckId) const {
+  if (!m_deckManager || deckId.isEmpty())
+    return -96.0;
+  char id = deckId.toUpper().at(0).toLatin1();
+  const auto *d = m_deckManager->deck(id);
+  if (!d || !d->isOpen() || d->trackInfo().path.empty())
+    return -96.0;
+  double rmsDb = -96.0;
+  engine::deck::ReferenceDeck::measureTrackRmsDb(d->trackInfo().path, 0.0, 10.0, rmsDb);
+  return rmsDb;
+}
+
+double EngineController::measureAndApplyDeckLevelMatch(
+    const QString &referenceDeckId, const QString &targetDeckId) {
+  if (!m_deckManager || referenceDeckId.isEmpty() || targetDeckId.isEmpty())
+    return 0.0;
+  auto *refDeck = m_deckManager->deck(referenceDeckId.toUpper().at(0).toLatin1());
+  auto *tgtDeck = m_deckManager->deck(targetDeckId.toUpper().at(0).toLatin1());
+  if (!refDeck || !tgtDeck || !refDeck->isOpen() || !tgtDeck->isOpen())
+    return 0.0;
+
+  double refRmsDb = -96.0;
+  double tgtRmsDb = -96.0;
+  if (!engine::deck::ReferenceDeck::measureTrackRmsDb(refDeck->trackInfo().path, 0.0, 10.0, refRmsDb) ||
+      !engine::deck::ReferenceDeck::measureTrackRmsDb(tgtDeck->trackInfo().path, 0.0, 10.0, tgtRmsDb))
+    return 0.0;
+
+  const double deltaDb = std::clamp(refRmsDb - tgtRmsDb, -24.0, 24.0);
+  setDeckLevelMatchDb(targetDeckId, deltaDb);
+  log::LogService::instance().log(
+      QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
+      QStringLiteral("Success"),
+      QString("Measured level match %1 -> %2: %3 dB (Ref: %4 dBFS, Target: %5 dBFS)")
+          .arg(referenceDeckId, targetDeckId)
+          .arg(deltaDb, 0, 'f', 2)
+          .arg(refRmsDb, 0, 'f', 2)
+          .arg(tgtRmsDb, 0, 'f', 2),
+      QStringLiteral("Deck"), targetDeckId);
+  return deltaDb;
+}
+
 bool EngineController::loadTrack(const QString &deckId,
                                  const QString &filePath) {
   if (!m_deckManager || deckId.isEmpty())
@@ -2084,9 +2403,9 @@ bool EngineController::startFolderSession(const QString &deckId,
   if (fileNames.isEmpty()) {
     QStringList nameFilters;
     nameFilters << "*.flac" << "*.wav" << "*.mp3" << "*.ogg" << "*.opus"
-                << "*.aac" << "*.m4a"
+                << "*.aac" << "*.m4a" << "*.aif" << "*.aiff"
                 << "*.FLAC" << "*.WAV" << "*.MP3" << "*.OGG" << "*.OPUS"
-                << "*.AAC" << "*.M4A";
+                << "*.AAC" << "*.M4A" << "*.AIF" << "*.AIFF";
     QFileInfoList entries =
         dir.entryInfoList(nameFilters, QDir::Files | QDir::NoSymLinks);
     for (const auto &fi : entries) {
@@ -2147,6 +2466,39 @@ bool EngineController::startFolderSession(const QString &deckId,
         "Folder", folderPath,
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
         QString(), QString(), log::ErrorCode::TrackOpenFailed, 0.0);
+  }
+  return ok;
+}
+
+bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
+  if (!m_deckManager || deckId.isEmpty())
+    return false;
+  char id = deckId.toUpper().at(0).toLatin1();
+  auto *d = m_deckManager->deck(id);
+  if (!d)
+    return false;
+
+  const QString folderPath =
+      QFileInfo(QString::fromStdString(d->trackInfo().path)).absolutePath();
+  if (folderPath.isEmpty() ||
+      engine::workspace::WorkspaceManager::instance()
+          .isPathBlockedByLockedWorkspace(folderPath)) {
+    return false;
+  }
+
+  bool ok = d->startFolderSessionFromCurrentTrack(m_deckManager->graphRate());
+  if (ok) {
+    if (m_deckManager->activeDeckId() == id) {
+      followActiveDeckSampleRateIfDirectMode();
+    }
+    emit deckStateChanged(deckId);
+    emit diagnosticsChanged();
+    log::LogService::instance().log(
+        "FolderSession", "StartFromDeck", "Success",
+        QString("Started folder session from loaded track in Deck %1 (%2 tracks)")
+            .arg(deckId)
+            .arg(d->folderSession().tracks().size()),
+        "Folder", folderPath);
   }
   return ok;
 }
@@ -2241,6 +2593,23 @@ void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
   // Update Control Thread local UI Snapshot
   m_uiGeq.setBandGain(static_cast<size_t>(bandIndex), gainDb);
   emit geqParametersChanged();
+}
+
+void EngineController::setGeqBandEnabled(int bandIndex, bool enabled) {
+  if (bandIndex < 0 || bandIndex >= 32)
+    return;
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().setGeqBandEnabled(static_cast<size_t>(bandIndex),
+                                                 enabled);
+  }
+  m_uiGeq.setBandEnabled(static_cast<size_t>(bandIndex), enabled);
+  emit geqParametersChanged();
+}
+
+bool EngineController::isGeqBandEnabled(int bandIndex) const {
+  return (bandIndex >= 0 && bandIndex < 32)
+             ? m_uiGeq.isBandEnabled(static_cast<size_t>(bandIndex))
+             : false;
 }
 
 double EngineController::getGeqBandGain(int bandIndex) {
@@ -2600,8 +2969,8 @@ QVariantMap EngineController::getReverbParams() {
 }
 
 QStringList EngineController::availableListeningPresets() {
-  return QStringList{"Monitor Flat", "Acoustic Clarity", "Harman Target",
-                     "Bass Punch", "Vocal Air"};
+  return m_presetManager.listPresets(
+      engine::preset::PresetCategories::ListeningCorrection);
 }
 
 void EngineController::setListeningPreset(const QString &presetName) {
@@ -2623,43 +2992,98 @@ void EngineController::setListeningPreset(const QString &presetName) {
   }
 }
 
+QVariantMap EngineController::getListeningBand(bool isRightChannel,
+                                               int bandIndex) {
+  QVariantMap map;
+  if (bandIndex < 0 ||
+      bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL))
+    return map;
+
+  const auto &band =
+      isRightChannel
+          ? m_uiListeningCorrection.rightBand(static_cast<size_t>(bandIndex))
+          : m_uiListeningCorrection.leftBand(static_cast<size_t>(bandIndex));
+  map["index"] = bandIndex;
+  map["channel"] = isRightChannel ? "Right" : "Left";
+  map["enabled"] = band.enabled;
+  map["type"] = static_cast<int>(band.type);
+  map["frequency"] = band.frequency;
+  map["gainDb"] = band.gainDb;
+  map["q"] = band.Q;
+  return map;
+}
+
+void EngineController::setListeningBand(bool isRightChannel, int bandIndex,
+                                        double frequency, double gainDb,
+                                        double q, int filterType,
+                                        bool enabled) {
+  if (bandIndex < 0 ||
+      bandIndex >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL))
+    return;
+
+  ParametricEQ::BandConfig cfg;
+  cfg.frequency = frequency;
+  cfg.gainDb = gainDb;
+  cfg.Q = q;
+  cfg.type = static_cast<BiquadFilterType>(std::clamp(filterType, 0, 5));
+  cfg.enabled = enabled;
+
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().setListeningBand(isRightChannel,
+                                                static_cast<size_t>(bandIndex),
+                                                cfg);
+  }
+  if (isRightChannel) {
+    m_uiListeningCorrection.setRightBand(static_cast<size_t>(bandIndex), cfg);
+  } else {
+    m_uiListeningCorrection.setLeftBand(static_cast<size_t>(bandIndex), cfg);
+  }
+  m_listeningPresetName = QStringLiteral("Custom");
+  emit listeningPresetChanged(m_listeningPresetName);
+  emit diagnosticsChanged();
+}
+
+QVariantList EngineController::getListeningCurve(bool isRightChannel,
+                                                 int numPoints) {
+  QVariantList list;
+  if (numPoints < 2)
+    return list;
+
+  std::vector<double> freqs(static_cast<size_t>(numPoints));
+  for (int i = 0; i < numPoints; ++i) {
+    freqs[static_cast<size_t>(i)] =
+        20.0 *
+        std::pow(20000.0 / 20.0, static_cast<double>(i) / (numPoints - 1));
+  }
+
+  std::vector<double> leftDb, rightDb;
+  m_uiListeningCorrection.calculateCompositeResponse(freqs, leftDb, rightDb);
+  const auto &target = isRightChannel ? rightDb : leftDb;
+  for (int i = 0; i < numPoints; ++i) {
+    QVariantMap pt;
+    pt["f"] = freqs[static_cast<size_t>(i)];
+    pt["db"] = target[static_cast<size_t>(i)];
+    list.append(pt);
+  }
+  return list;
+}
+
 bool EngineController::findDspNode(const QString &nodeName, uint8_t &outChain,
                                    uint8_t &outIndex) const noexcept {
-  if (nodeName == "PEQ") {
+  auto idxOrInvalid = [&](size_t canonicalSlot) -> bool {
+    const uint8_t idx = m_masterNodeIndices[canonicalSlot].load(std::memory_order_relaxed);
+    if (idx == 0xFF) return false;
     outChain = 0;
-    outIndex = 0;
+    outIndex = idx;
     return true;
-  }
-  if (nodeName == "GEQ") {
-    outChain = 0;
-    outIndex = 1;
-    return true;
-  }
-  if (nodeName == "Filter") {
-    outChain = 0;
-    outIndex = 2;
-    return true;
-  }
-  if (nodeName == "Compressor") {
-    outChain = 0;
-    outIndex = 3;
-    return true;
-  }
-  if (nodeName == "ExternalInsert" || nodeName == "Insert") {
-    outChain = 0;
-    outIndex = 4;
-    return true;
-  }
-  if (nodeName == "Reverb") {
-    outChain = 0;
-    outIndex = 5;
-    return true;
-  }
-  if (nodeName == "Limiter") {
-    outChain = 0;
-    outIndex = 6;
-    return true;
-  }
+  };
+  if (nodeName == "PEQ") return idxOrInvalid(0);
+  if (nodeName == "GEQ") return idxOrInvalid(1);
+  if (nodeName == "Filter") return idxOrInvalid(2);
+  if (nodeName == "Compressor") return idxOrInvalid(3);
+  if (nodeName == "ExternalInsert" || nodeName == "Insert") return idxOrInvalid(4);
+  if (nodeName == "Reverb") return idxOrInvalid(5);
+  if (nodeName == "Limiter") return idxOrInvalid(6);
   if (nodeName == "ListeningCorrection") {
     outChain = 1;
     outIndex = 0;
@@ -2893,10 +3317,43 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
 // Phase 3: External Insert Host Operations (Section 6.0)
 // =========================================================================
 
+QVariantList EngineController::discoverExternalInsertPorts() const {
+  QVariantList out;
+  const double sr = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
+  const size_t bs = m_audioOutput ? m_audioOutput->diagnostics().bufferFrames : 256;
+  const auto ports = engine::insert::ExternalInsertBridge::discoverPorts(sr, bs);
+  for (const auto &p : ports) {
+    QVariantMap m;
+    m["clientName"] = QString::fromStdString(p.clientName);
+    m["sendPortL"] = QString::fromStdString(p.sendPortL);
+    m["sendPortR"] = QString::fromStdString(p.sendPortR);
+    m["returnPortL"] = QString::fromStdString(p.returnPortL);
+    m["returnPortR"] = QString::fromStdString(p.returnPortR);
+    m["sampleRate"] = p.sampleRate;
+    m["bufferSize"] = static_cast<int>(p.bufferSize);
+    m["reportedLatencyFrames"] = static_cast<int>(p.reportedLatencyFrames);
+    m["latencyReported"] = p.latencyReported;
+    out.append(m);
+  }
+  return out;
+}
+
 bool EngineController::configureExternalInsert(
     const QString &clientName, const QString &sendL, const QString &sendR,
     const QString &returnL, const QString &returnR, double sampleRate,
     int bufferSize, int reportedLatencyFrames) {
+  return configureExternalInsertWithMetadata(
+      clientName, sendL, sendR, returnL, returnR, sampleRate, bufferSize,
+      reportedLatencyFrames, reportedLatencyFrames >= 0, QString(), QString(),
+      QString());
+}
+
+bool EngineController::configureExternalInsertWithMetadata(
+    const QString &clientName, const QString &sendL, const QString &sendR,
+    const QString &returnL, const QString &returnR, double sampleRate,
+    int bufferSize, int reportedLatencyFrames, bool latencyReported,
+    const QString &pluginName, const QString &pluginUri,
+    const QString &hostPresetReference) {
   if (!m_insertNode)
     return false;
 
@@ -2913,29 +3370,39 @@ bool EngineController::configureExternalInsert(
       returnR.toStdString(),
       sRate,
       bSize,
-      static_cast<uint32_t>(std::max(0, reportedLatencyFrames))};
+      static_cast<uint32_t>(std::max(0, reportedLatencyFrames)),
+      latencyReported,
+      pluginName.toStdString(),
+      pluginUri.toStdString(),
+      hostPresetReference.toStdString()};
 
   bool ok = m_insertNode->bridge().configure(info, sRate, bSize);
   if (ok) {
     m_insertNode->setBypassed(false);
+    m_insertBypassed.store(false, std::memory_order_relaxed);
     QJsonObject det;
     det.insert(QStringLiteral("host_name"), clientName);
     det.insert(QStringLiteral("plugin_id"),
-               QStringLiteral("external_jack_bridge"));
+               pluginUri.isEmpty() ? QStringLiteral("external_jack_bridge") : pluginUri);
+    det.insert(QStringLiteral("plugin_name"), pluginName);
+    det.insert(QStringLiteral("host_preset_reference"), hostPresetReference);
     det.insert(QStringLiteral("sample_rate_hz"), sRate);
     det.insert(QStringLiteral("buffer_size"), static_cast<int>(bSize));
     det.insert(QStringLiteral("reported_latency_frames"),
                reportedLatencyFrames);
+    det.insert(QStringLiteral("latency_reported"), latencyReported);
     det.insert(QStringLiteral("reported_latency_ms"),
                (sRate > 0.0) ? (reportedLatencyFrames * 1000.0 / sRate) : 0.0);
     det.insert(QStringLiteral("latency_source"),
-               QStringLiteral("host_reported"));
+               latencyReported ? QStringLiteral("host_reported")
+                               : QStringLiteral("not_reported"));
     log::LogService::instance().log(
         "ExternalInsert", "Configure", "Success",
         QString("Connected external insert host '%1' [Send: %2/%3, Return: "
-                "%4/%5, Latency: %6 frames]")
-            .arg(clientName, sendL, sendR, returnL, returnR)
-            .arg(reportedLatencyFrames),
+                "%4/%5, Latency: %6]")
+            .arg(clientName, sendL, sendR, returnL, returnR,
+                 latencyReported ? (QString::number(reportedLatencyFrames) + " frames")
+                                 : QStringLiteral("Not Reported")),
         "InsertBridge", clientName,
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
   } else {
@@ -2959,10 +3426,62 @@ bool EngineController::configureExternalInsert(
   return ok;
 }
 
+void EngineController::setExternalInsertPosition(int positionIndex) {
+  const int clamped = std::clamp(positionIndex, 0, 6);
+  if (m_pipeline) {
+    std::array<uint8_t, 7> newIndices{};
+    if (m_pipeline->repositionExternalInsert(static_cast<size_t>(clamped), newIndices)) {
+      for (size_t k = 0; k < 7; ++k) {
+        m_masterNodeIndices[k].store(newIndices[k], std::memory_order_relaxed);
+      }
+      m_externalInsertPosition.store(clamped, std::memory_order_relaxed);
+      emit externalInsertStatusChanged();
+      emit diagnosticsChanged();
+      log::LogService::instance().log(
+          QStringLiteral("ExternalInsert"), QStringLiteral("Reposition"),
+          QStringLiteral("Success"),
+          QString("Repositioned External Insert to master slot %1").arg(clamped),
+          QStringLiteral("InsertBridge"), QStringLiteral("External Insert"));
+    }
+  }
+}
+
+int EngineController::externalInsertPosition() const noexcept {
+  return m_externalInsertPosition.load(std::memory_order_relaxed);
+}
+
+void EngineController::setExternalInsertDisconnectPolicy(int policy) {
+  if (!m_insertNode)
+    return;
+  const int clamped = std::clamp(policy, 0, 2);
+  m_insertNode->bridge().setDisconnectPolicy(
+      static_cast<engine::insert::DisconnectPolicy>(clamped));
+  emit externalInsertStatusChanged();
+  emit diagnosticsChanged();
+}
+
+int EngineController::externalInsertDisconnectPolicy() const noexcept {
+  if (!m_insertNode)
+    return 0;
+  return static_cast<int>(m_insertNode->bridge().disconnectPolicy());
+}
+
 void EngineController::setExternalInsertBypass(bool bypass) {
   if (!m_insertNode)
     return;
+  m_insertBypassed.store(bypass, std::memory_order_relaxed);
   m_insertNode->setBypassed(bypass);
+  if (m_pipeline) {
+    uint8_t chain = 0, idx = 0;
+    if (findDspNode(QStringLiteral("ExternalInsert"), chain, idx)) {
+      engine::dsp::DspCommand cmd;
+      cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
+      cmd.subIndex = chain;
+      cmd.index = idx;
+      cmd.boolFlag1 = bypass ? 1 : 0;
+      m_pipeline->paramQueue().push(cmd);
+    }
+  }
   log::LogService::instance().log(
       "ExternalInsert", "SetBypass", "Success",
       bypass ? "External insert bypassed (Dry)."
@@ -3058,6 +3577,8 @@ QVariantMap EngineController::getExternalInsertStatus() const {
   map["sampleRate"] = cfg.sampleRate;
   map["bufferSize"] = static_cast<int>(cfg.bufferSize);
   map["reportedLatencyFrames"] = static_cast<int>(b.reportedLatencyFrames());
+  map["latencyReported"] = b.hasReportedLatency();
+  map["reportedLatencyText"] = QString::fromStdString(b.reportedLatencyText());
   map["measuredLatencyFrames"] = static_cast<int>(b.measuredLatencyFrames());
   map["measuredLatencyMs"] = b.measuredLatencyMs();
   map["delayCompensationFrames"] =
@@ -3065,6 +3586,11 @@ QVariantMap EngineController::getExternalInsertStatus() const {
   map["latencySource"] = QString::fromUtf8(
       engine::insert::ExternalInsertBridge::latencySourceToString(
           b.latencySource()));
+  map["insertPosition"] = m_externalInsertPosition.load(std::memory_order_relaxed);
+  map["disconnectPolicy"] = static_cast<int>(b.disconnectPolicy());
+  map["pluginName"] = QString::fromStdString(cfg.pluginName);
+  map["pluginUri"] = QString::fromStdString(cfg.pluginUri);
+  map["hostPresetReference"] = QString::fromStdString(cfg.hostPresetReference);
   map["xrunCount"] = static_cast<int>(b.xrunCount());
   map["lastError"] = QString::fromStdString(b.lastError());
 
@@ -3175,6 +3701,251 @@ bool EngineController::deletePreset(const QString &category,
   return ok;
 }
 
+bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
+                                                    const QString &presetLabel) {
+  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> lBands{};
+  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> rBands{};
+  ParametricEQ::getPresetBandConfigs("Monitor Flat", lBands, rBands);
+
+  auto parseArray = [](const QJsonArray &arr,
+                       std::array<ParametricEQ::BandConfig,
+                                  ParametricEQ::BANDS_PER_CHANNEL> &out) {
+    for (int i = 0; i < arr.size(); ++i) {
+      const QJsonObject bo = arr[i].toObject();
+      const int idx = bo.contains("index") ? bo["index"].toInt(i) : i;
+      if (idx < 0 ||
+          idx >= static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL)) {
+        continue;
+      }
+      auto &cfg = out[static_cast<size_t>(idx)];
+      cfg.frequency = bo["frequency"].toDouble(cfg.frequency);
+      cfg.gainDb = bo.contains("gain_db") ? bo["gain_db"].toDouble(0.0)
+                                          : bo["gainDb"].toDouble(0.0);
+      cfg.Q = bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
+      cfg.type = static_cast<BiquadFilterType>(
+          std::clamp(bo["type"].toInt(0), 0, 5));
+      cfg.enabled = bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
+    }
+  };
+
+  if (obj.contains("left_bands")) {
+    parseArray(obj["left_bands"].toArray(), lBands);
+  } else if (obj.contains("bands")) {
+    parseArray(obj["bands"].toArray(), lBands);
+  }
+  if (obj.contains("right_bands")) {
+    parseArray(obj["right_bands"].toArray(), rBands);
+  } else if (obj.contains("bands")) {
+    parseArray(obj["bands"].toArray(), rBands);
+  }
+
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().applyListeningBands(lBands, rBands);
+  }
+  for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+    m_uiListeningCorrection.setLeftBand(b, lBands[b]);
+    m_uiListeningCorrection.setRightBand(b, rBands[b]);
+  }
+  m_listeningPresetName = presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
+  emit listeningPresetChanged(m_listeningPresetName);
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+  return true;
+}
+
+bool EngineController::applyExternalInsertJson(const QJsonObject &obj) {
+  QString client = obj["client_name"].toString();
+  QString sendL = obj["send_port_l"].toString();
+  QString sendR = obj["send_port_r"].toString();
+  QString retL = obj["return_port_l"].toString();
+  QString retR = obj["return_port_r"].toString();
+  double sRate = obj["sample_rate"].toDouble(48000.0);
+  int bSize = obj["buffer_size"].toInt(256);
+  int repLat = obj["reported_latency_frames"].toInt(0);
+  bool latRep = obj.contains("latency_reported")
+                    ? obj["latency_reported"].toBool(true)
+                    : true;
+  int delayComp = obj["delay_compensation_frames"].toInt(0);
+  QString pluginName = obj["plugin_name"].toString();
+  QString pluginUri = obj["plugin_uri"].toString();
+  QString hostPresetRef = obj["host_preset_reference"].toString();
+
+  bool ok = true;
+  if (!client.isEmpty()) {
+    ok = configureExternalInsertWithMetadata(
+        client, sendL, sendR, retL, retR, sRate, bSize, repLat, latRep,
+        pluginName, pluginUri, hostPresetRef);
+    if (ok) {
+      setInsertDelayCompensation(delayComp);
+    }
+  }
+  if (obj.contains("insert_position")) {
+    setExternalInsertPosition(obj["insert_position"].toInt(4));
+  }
+  if (obj.contains("disconnect_policy")) {
+    setExternalInsertDisconnectPolicy(obj["disconnect_policy"].toInt(0));
+  }
+  return ok;
+}
+
+bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
+  if (obj.contains("geq")) {
+    const QJsonObject geq = obj["geq"].toObject();
+    const QJsonArray gains = geq["gains"].toArray();
+    for (int b = 0; b < std::min<int>(static_cast<int>(gains.size()), 32);
+         ++b) {
+      setGeqBandGain(b, gains[b].toDouble(0.0));
+    }
+    if (geq.contains("band_enabled")) {
+      const QJsonArray enabledArr = geq["band_enabled"].toArray();
+      for (int b = 0;
+           b < std::min<int>(static_cast<int>(enabledArr.size()), 32); ++b) {
+        setGeqBandEnabled(b, enabledArr[b].toBool(true));
+      }
+    }
+    if (geq.contains("enabled")) {
+      setDspNodeBypass("GEQ", !geq["enabled"].toBool(false));
+    } else if (geq.contains("bypassed")) {
+      setDspNodeBypass("GEQ", geq["bypassed"].toBool(true));
+    }
+  }
+  if (obj.contains("peq")) {
+    const QJsonObject peq = obj["peq"].toObject();
+    auto applyChannelBands = [&](bool isRight, const QJsonArray &arr) {
+      for (int i = 0; i < arr.size(); ++i) {
+        const QJsonObject bo = arr[i].toObject();
+        const int idx = bo.contains("index") ? bo["index"].toInt(i) : i;
+        const double freq = bo["frequency"].toDouble(1000.0);
+        const double gain = bo.contains("gain_db")
+                                ? bo["gain_db"].toDouble(0.0)
+                                : bo["gainDb"].toDouble(0.0);
+        const double q = bo["q"].toDouble(1.0);
+        const int type = bo["type"].toInt(0);
+        const bool enabled =
+            bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
+        setPeqBand(isRight, idx, freq, gain, q, type, enabled);
+      }
+    };
+    if (peq.contains("left_bands"))
+      applyChannelBands(false, peq["left_bands"].toArray());
+    else if (peq.contains("leftBands"))
+      applyChannelBands(false, peq["leftBands"].toArray());
+    if (peq.contains("right_bands"))
+      applyChannelBands(true, peq["right_bands"].toArray());
+    else if (peq.contains("rightBands"))
+      applyChannelBands(true, peq["rightBands"].toArray());
+
+    if (peq.contains("enabled")) {
+      setDspNodeBypass("PEQ", !peq["enabled"].toBool(false));
+    } else if (peq.contains("bypassed")) {
+      setDspNodeBypass("PEQ", peq["bypassed"].toBool(true));
+    }
+  }
+  if (obj.contains("compressor")) {
+    const QJsonObject comp = obj["compressor"].toObject();
+    setCompressorParams(
+        comp.contains("threshold_db") ? comp["threshold_db"].toDouble(-12.0)
+                                      : comp["thresholdDb"].toDouble(-12.0),
+        comp["ratio"].toDouble(2.0),
+        comp.contains("attack_ms") ? comp["attack_ms"].toDouble(20.0)
+                                   : comp["attackMs"].toDouble(20.0),
+        comp.contains("release_ms") ? comp["release_ms"].toDouble(100.0)
+                                    : comp["releaseMs"].toDouble(100.0),
+        comp.contains("makeup_db") ? comp["makeup_db"].toDouble(0.0)
+                                   : comp["makeupGainDb"].toDouble(0.0),
+        comp.contains("knee_db") ? comp["knee_db"].toDouble(3.0)
+                                 : comp["kneeDb"].toDouble(3.0));
+    if (comp.contains("enabled")) {
+      setDspNodeBypass("Compressor", !comp["enabled"].toBool());
+    } else if (comp.contains("bypassed")) {
+      setDspNodeBypass("Compressor", comp["bypassed"].toBool(true));
+    }
+  }
+  if (obj.contains("limiter")) {
+    const QJsonObject lim = obj["limiter"].toObject();
+    setLimiterParams(
+        lim.contains("ceiling_db") ? lim["ceiling_db"].toDouble(-0.1)
+                                   : lim["ceilingDb"].toDouble(-0.1),
+        lim.contains("release_ms") ? lim["release_ms"].toDouble(50.0)
+                                   : lim["releaseMs"].toDouble(50.0),
+        lim.contains("lookahead_ms") ? lim["lookahead_ms"].toDouble(1.0)
+                                     : lim["lookaheadMs"].toDouble(1.0));
+    if (lim.contains("enabled")) {
+      setDspNodeBypass("Limiter", !lim["enabled"].toBool());
+    } else if (lim.contains("bypassed")) {
+      setDspNodeBypass("Limiter", lim["bypassed"].toBool(true));
+    }
+  }
+  if (obj.contains("reverb")) {
+    const QJsonObject rev = obj["reverb"].toObject();
+    setReverbParams(
+        rev.contains("room_size") ? rev["room_size"].toDouble(0.7)
+                                  : rev["roomSize"].toDouble(0.7),
+        rev.contains("damping") ? rev["damping"].toDouble(0.3)
+                                : rev["damping"].toDouble(0.3),
+        rev.contains("wet_level") ? rev["wet_level"].toDouble(0.2)
+                                  : rev["wetLevel"].toDouble(0.2),
+        rev.contains("predelay_ms") ? rev["predelay_ms"].toDouble(0.0)
+                                    : rev["predelayMs"].toDouble(0.0),
+        rev.contains("tail_preserving") ? rev["tail_preserving"].toBool(true)
+                                        : rev["tailPreserving"].toBool(true));
+    if (rev.contains("enabled")) {
+      setDspNodeBypass("Reverb", !rev["enabled"].toBool());
+    } else if (rev.contains("bypassed")) {
+      setDspNodeBypass("Reverb", rev["bypassed"].toBool(true));
+    }
+  }
+  if (obj.contains("filter")) {
+    const QJsonObject flt = obj["filter"].toObject();
+    setFilterParams(
+        flt.contains("hpf_frequency") ? flt["hpf_frequency"].toDouble(20.0)
+                                      : flt["hpfFrequency"].toDouble(20.0),
+        flt.contains("hpf_enabled") ? flt["hpf_enabled"].toBool(false)
+                                    : flt["hpfEnabled"].toBool(false),
+        flt.contains("hpf_slope") ? flt["hpf_slope"].toInt(0)
+                                  : flt["hpfSlope"].toInt(0),
+        flt.contains("lpf_frequency") ? flt["lpf_frequency"].toDouble(20000.0)
+                                      : flt["lpfFrequency"].toDouble(20000.0),
+        flt.contains("lpf_enabled") ? flt["lpf_enabled"].toBool(false)
+                                    : flt["lpfEnabled"].toBool(false),
+        flt.contains("lpf_slope") ? flt["lpf_slope"].toInt(0)
+                                  : flt["lpfSlope"].toInt(0),
+        flt.contains("hpf_q") ? flt["hpf_q"].toDouble(0.70710678)
+                              : flt["hpfQ"].toDouble(0.70710678),
+        flt.contains("lpf_q") ? flt["lpf_q"].toDouble(0.70710678)
+                              : flt["lpfQ"].toDouble(0.70710678));
+    if (flt.contains("enabled")) {
+      setDspNodeBypass("Filter", !flt["enabled"].toBool(false));
+    } else if (flt.contains("bypassed")) {
+      setDspNodeBypass("Filter", flt["bypassed"].toBool(true));
+    }
+  }
+  return true;
+}
+
+bool EngineController::applyAudioDeviceJson(const QJsonObject &obj) {
+  if (obj.contains("fixed_graph_sample_rate")) {
+    setFixedGraphSampleRate(obj["fixed_graph_sample_rate"].toDouble(48000.0));
+  } else if (obj.contains("graph_sample_rate")) {
+    setFixedGraphSampleRate(obj["graph_sample_rate"].toDouble(48000.0));
+  } else if (obj.contains("sample_rate")) {
+    setFixedGraphSampleRate(obj["sample_rate"].toDouble(48000.0));
+  }
+  if (obj.contains("direct_mode")) {
+    setDirectModeEnabled(obj["direct_mode"].toBool(false));
+  }
+  if (obj.contains("output_routing_mode")) {
+    setOutputRoutingMode(obj["output_routing_mode"].toInt(0));
+  }
+  if (obj.contains("listening_volume")) {
+    setListeningVolume(obj["listening_volume"].toDouble(1.0));
+  }
+  if (obj.contains("render_monitor_volume")) {
+    setRenderMonitorVolume(obj["render_monitor_volume"].toDouble(1.0));
+  }
+  return true;
+}
+
 bool EngineController::applyPresetProfile(const QString &category,
                                           const QString &presetName) {
   QJsonObject obj = m_presetManager.loadPreset(category, presetName);
@@ -3194,154 +3965,39 @@ bool EngineController::applyPresetProfile(const QString &category,
   }
 
   if (category == engine::preset::PresetCategories::ListeningCorrection) {
-    setListeningPreset(presetName);
-    return true;
+    if (m_presetManager.isFactoryPreset(category, presetName)) {
+      setListeningPreset(presetName);
+      return true;
+    }
+    const bool ok = applyListeningCorrectionJson(obj, presetName);
+    if (ok) {
+      log::LogService::instance().log(
+          "ListeningCorrection", "ApplyPreset", "Success",
+          "Applied user Listening Correction preset: " + presetName, "Preset",
+          presetName);
+    }
+    emit presetManagementChanged();
+    return ok;
   }
 
   if (category == engine::preset::PresetCategories::ExternalInsert) {
-    QString client = obj["client_name"].toString();
-    QString sendL = obj["send_port_l"].toString();
-    QString sendR = obj["send_port_r"].toString();
-    QString retL = obj["return_port_l"].toString();
-    QString retR = obj["return_port_r"].toString();
-    double sRate = obj["sample_rate"].toDouble(48000.0);
-    int bSize = obj["buffer_size"].toInt(256);
-    int repLat = obj["reported_latency_frames"].toInt(0);
-    int delayComp = obj["delay_compensation_frames"].toInt(0);
+    return applyExternalInsertJson(obj);
+  }
 
-    bool ok = configureExternalInsert(client, sendL, sendR, retL, retR, sRate,
-                                      bSize, repLat);
+  if (category == engine::preset::PresetCategories::AudioDevice) {
+    const bool ok = applyAudioDeviceJson(obj);
     if (ok) {
-      setInsertDelayCompensation(delayComp);
+      log::LogService::instance().log(
+          "PresetManagement", "ApplyPreset", "Success",
+          QString("Applied Audio Device preset '%1'.").arg(presetName), category,
+          presetName);
+      emit presetManagementChanged();
     }
     return ok;
   }
 
   if (category == engine::preset::PresetCategories::MasterDsp) {
-    if (obj.contains("geq")) {
-      const QJsonObject geq = obj["geq"].toObject();
-      const QJsonArray gains = geq["gains"].toArray();
-      for (int b = 0; b < std::min<int>(static_cast<int>(gains.size()), 32);
-           ++b) {
-        setGeqBandGain(b, gains[b].toDouble(0.0));
-      }
-      if (geq.contains("enabled")) {
-        setDspNodeBypass("GEQ", !geq["enabled"].toBool(false));
-      } else if (geq.contains("bypassed")) {
-        setDspNodeBypass("GEQ", geq["bypassed"].toBool(true));
-      }
-    }
-    if (obj.contains("peq")) {
-      const QJsonObject peq = obj["peq"].toObject();
-      auto applyChannelBands = [&](bool isRight, const QJsonArray &arr) {
-        for (int i = 0; i < arr.size(); ++i) {
-          const QJsonObject bo = arr[i].toObject();
-          const int idx = bo.contains("index") ? bo["index"].toInt(i) : i;
-          const double freq = bo["frequency"].toDouble(1000.0);
-          const double gain = bo.contains("gain_db")
-                                  ? bo["gain_db"].toDouble(0.0)
-                                  : bo["gainDb"].toDouble(0.0);
-          const double q = bo["q"].toDouble(1.0);
-          const int type = bo["type"].toInt(0);
-          const bool enabled =
-              bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
-          setPeqBand(isRight, idx, freq, gain, q, type, enabled);
-        }
-      };
-      if (peq.contains("left_bands"))
-        applyChannelBands(false, peq["left_bands"].toArray());
-      else if (peq.contains("leftBands"))
-        applyChannelBands(false, peq["leftBands"].toArray());
-      if (peq.contains("right_bands"))
-        applyChannelBands(true, peq["right_bands"].toArray());
-      else if (peq.contains("rightBands"))
-        applyChannelBands(true, peq["rightBands"].toArray());
-
-      if (peq.contains("enabled")) {
-        setDspNodeBypass("PEQ", !peq["enabled"].toBool(false));
-      } else if (peq.contains("bypassed")) {
-        setDspNodeBypass("PEQ", peq["bypassed"].toBool(true));
-      }
-    }
-    if (obj.contains("compressor")) {
-      const QJsonObject comp = obj["compressor"].toObject();
-      setCompressorParams(
-          comp.contains("threshold_db") ? comp["threshold_db"].toDouble(-12.0)
-                                        : comp["thresholdDb"].toDouble(-12.0),
-          comp["ratio"].toDouble(2.0),
-          comp.contains("attack_ms") ? comp["attack_ms"].toDouble(20.0)
-                                     : comp["attackMs"].toDouble(20.0),
-          comp.contains("release_ms") ? comp["release_ms"].toDouble(100.0)
-                                      : comp["releaseMs"].toDouble(100.0),
-          comp.contains("makeup_db") ? comp["makeup_db"].toDouble(0.0)
-                                     : comp["makeupGainDb"].toDouble(0.0),
-          comp.contains("knee_db") ? comp["knee_db"].toDouble(3.0)
-                                   : comp["kneeDb"].toDouble(3.0));
-      if (comp.contains("enabled")) {
-        setDspNodeBypass("Compressor", !comp["enabled"].toBool());
-      } else if (comp.contains("bypassed")) {
-        setDspNodeBypass("Compressor", comp["bypassed"].toBool(true));
-      }
-    }
-    if (obj.contains("limiter")) {
-      const QJsonObject lim = obj["limiter"].toObject();
-      setLimiterParams(
-          lim.contains("ceiling_db") ? lim["ceiling_db"].toDouble(-0.1)
-                                     : lim["ceilingDb"].toDouble(-0.1),
-          lim.contains("release_ms") ? lim["release_ms"].toDouble(50.0)
-                                     : lim["releaseMs"].toDouble(50.0),
-          lim.contains("lookahead_ms") ? lim["lookahead_ms"].toDouble(1.0)
-                                       : lim["lookaheadMs"].toDouble(1.0));
-      if (lim.contains("enabled")) {
-        setDspNodeBypass("Limiter", !lim["enabled"].toBool());
-      } else if (lim.contains("bypassed")) {
-        setDspNodeBypass("Limiter", lim["bypassed"].toBool(true));
-      }
-    }
-    if (obj.contains("reverb")) {
-      const QJsonObject rev = obj["reverb"].toObject();
-      setReverbParams(
-          rev.contains("room_size") ? rev["room_size"].toDouble(0.7)
-                                    : rev["roomSize"].toDouble(0.7),
-          rev.contains("damping") ? rev["damping"].toDouble(0.3)
-                                  : rev["damping"].toDouble(0.3),
-          rev.contains("wet_level") ? rev["wet_level"].toDouble(0.2)
-                                    : rev["wetLevel"].toDouble(0.2),
-          rev.contains("predelay_ms") ? rev["predelay_ms"].toDouble(0.0)
-                                      : rev["predelayMs"].toDouble(0.0),
-          rev.contains("tail_preserving") ? rev["tail_preserving"].toBool(true)
-                                          : rev["tailPreserving"].toBool(true));
-      if (rev.contains("enabled")) {
-        setDspNodeBypass("Reverb", !rev["enabled"].toBool());
-      } else if (rev.contains("bypassed")) {
-        setDspNodeBypass("Reverb", rev["bypassed"].toBool(true));
-      }
-    }
-    if (obj.contains("filter")) {
-      const QJsonObject flt = obj["filter"].toObject();
-      setFilterParams(
-          flt.contains("hpf_frequency") ? flt["hpf_frequency"].toDouble(20.0)
-                                        : flt["hpfFrequency"].toDouble(20.0),
-          flt.contains("hpf_enabled") ? flt["hpf_enabled"].toBool(false)
-                                      : flt["hpfEnabled"].toBool(false),
-          flt.contains("hpf_slope") ? flt["hpf_slope"].toInt(0)
-                                    : flt["hpfSlope"].toInt(0),
-          flt.contains("lpf_frequency") ? flt["lpf_frequency"].toDouble(20000.0)
-                                        : flt["lpfFrequency"].toDouble(20000.0),
-          flt.contains("lpf_enabled") ? flt["lpf_enabled"].toBool(false)
-                                      : flt["lpfEnabled"].toBool(false),
-          flt.contains("lpf_slope") ? flt["lpf_slope"].toInt(0)
-                                    : flt["lpfSlope"].toInt(0),
-          flt.contains("hpf_q") ? flt["hpf_q"].toDouble(0.70710678)
-                                : flt["hpfQ"].toDouble(0.70710678),
-          flt.contains("lpf_q") ? flt["lpf_q"].toDouble(0.70710678)
-                                : flt["lpfQ"].toDouble(0.70710678));
-      if (flt.contains("enabled")) {
-        setDspNodeBypass("Filter", !flt["enabled"].toBool(false));
-      } else if (flt.contains("bypassed")) {
-        setDspNodeBypass("Filter", flt["bypassed"].toBool(true));
-      }
-    }
+    applyMasterDspJson(obj);
     QJsonObject snapDet;
     snapDet.insert(QStringLiteral("preset_id"), presetName);
     snapDet.insert(QStringLiteral("category"), category);
@@ -3363,21 +4019,30 @@ QVariantMap
 EngineController::captureCurrentStateAsPreset(const QString &category) {
   QJsonObject obj;
   obj["category"] = category;
+  obj["format_version"] = 1;
 
   if (category == engine::preset::PresetCategories::ListeningCorrection) {
-    QJsonArray bands;
-    for (size_t i = 0; i < ParametricEQ::BANDS_PER_CHANNEL; ++i) {
-      const auto &b = m_uiListeningCorrection.leftBand(i);
-      QJsonObject bo;
-      bo["index"] = static_cast<int>(i);
-      bo["frequency"] = b.frequency;
-      bo["gain_db"] = b.gainDb;
-      bo["q"] = b.Q;
-      bo["type"] = static_cast<int>(b.type);
-      bo["enabled"] = b.enabled;
-      bands.append(bo);
-    }
-    obj["bands"] = bands;
+    auto serializeListening = [&](bool isRight) {
+      QJsonArray arr;
+      for (size_t i = 0; i < ParametricEQ::BANDS_PER_CHANNEL; ++i) {
+        const auto &b = isRight ? m_uiListeningCorrection.rightBand(i)
+                                : m_uiListeningCorrection.leftBand(i);
+        QJsonObject bo;
+        bo["index"] = static_cast<int>(i);
+        bo["frequency"] = b.frequency;
+        bo["gain_db"] = b.gainDb;
+        bo["q"] = b.Q;
+        bo["type"] = static_cast<int>(b.type);
+        bo["enabled"] = b.enabled;
+        arr.append(bo);
+      }
+      return arr;
+    };
+    const QJsonArray leftArr = serializeListening(false);
+    obj["left_bands"] = leftArr;
+    obj["right_bands"] = serializeListening(true);
+    obj["bands"] = leftArr;
+    obj["preset_name"] = m_listeningPresetName;
   } else if (category == engine::preset::PresetCategories::ExternalInsert) {
     if (m_insertNode) {
       const auto &cfg = m_insertNode->bridge().config();
@@ -3390,18 +4055,45 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
       obj["buffer_size"] = static_cast<int>(cfg.bufferSize);
       obj["reported_latency_frames"] =
           static_cast<int>(m_insertNode->bridge().reportedLatencyFrames());
+      obj["latency_reported"] = m_insertNode->bridge().hasReportedLatency();
       obj["delay_compensation_frames"] =
           static_cast<int>(m_insertNode->delayBuffer().delayFrames());
+      obj["plugin_name"] = QString::fromStdString(cfg.pluginName);
+      obj["plugin_uri"] = QString::fromStdString(cfg.pluginUri);
+      obj["host_preset_reference"] =
+          QString::fromStdString(cfg.hostPresetReference);
+      obj["insert_position"] =
+          m_externalInsertPosition.load(std::memory_order_relaxed);
+      obj["disconnect_policy"] =
+          static_cast<int>(m_insertNode->bridge().disconnectPolicy());
     }
+  } else if (category == engine::preset::PresetCategories::AudioDevice) {
+    obj["backend"] = QStringLiteral("PipeWire");
+    obj["sample_rate"] = graphSampleRate();
+    obj["graph_sample_rate"] = graphSampleRate();
+    obj["fixed_graph_sample_rate"] =
+        m_fixedGraphSampleRate.load(std::memory_order_relaxed);
+    obj["buffer_size"] =
+        m_audioOutput ? static_cast<int>(m_audioOutput->diagnostics().bufferFrames)
+                      : 256;
+    obj["direct_mode"] =
+        m_directModeEnabled.load(std::memory_order_relaxed);
+    obj["output_routing_mode"] =
+        m_outputRoutingMode.load(std::memory_order_relaxed);
+    obj["listening_volume"] = listeningVolume();
+    obj["render_monitor_volume"] = renderMonitorVolume();
   } else if (category == engine::preset::PresetCategories::MasterDsp) {
     {
       QJsonObject geq;
       geq["enabled"] = !m_geqBypassed.load(std::memory_order_relaxed);
       QJsonArray gains;
+      QJsonArray bandEnabled;
       for (int b = 0; b < 32; ++b) {
         gains.append(m_uiGeq.bandGain(static_cast<size_t>(b)));
+        bandEnabled.append(m_uiGeq.isBandEnabled(static_cast<size_t>(b)));
       }
       geq["gains"] = gains;
+      geq["band_enabled"] = bandEnabled;
       obj["geq"] = geq;
     }
     {
@@ -3484,6 +4176,130 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
 // Phase 4: Export & Render Operations (Section 5.11 & 20.1)
 // =========================================================================
 
+std::atomic<bool> *EngineController::renderNodeFlagPtr(const QString &nodeName) noexcept {
+  if (nodeName == "PEQ" || nodeName == "Master PEQ") return &m_renderIncludePeq;
+  if (nodeName == "GEQ" || nodeName == "Graphic EQ") return &m_renderIncludeGeq;
+  if (nodeName == "Filter" || nodeName == "HPF / LPF") return &m_renderIncludeFilter;
+  if (nodeName == "Compressor") return &m_renderIncludeCompressor;
+  if (nodeName == "Reverb") return &m_renderIncludeReverb;
+  if (nodeName == "Limiter" || nodeName == "Peak Limiter") return &m_renderIncludeLimiter;
+  return nullptr;
+}
+
+const std::atomic<bool> *EngineController::renderNodeFlagPtr(const QString &nodeName) const noexcept {
+  if (nodeName == "PEQ" || nodeName == "Master PEQ") return &m_renderIncludePeq;
+  if (nodeName == "GEQ" || nodeName == "Graphic EQ") return &m_renderIncludeGeq;
+  if (nodeName == "Filter" || nodeName == "HPF / LPF") return &m_renderIncludeFilter;
+  if (nodeName == "Compressor") return &m_renderIncludeCompressor;
+  if (nodeName == "Reverb") return &m_renderIncludeReverb;
+  if (nodeName == "Limiter" || nodeName == "Peak Limiter") return &m_renderIncludeLimiter;
+  return nullptr;
+}
+
+void EngineController::setRenderNodeEnabled(const QString &nodeName, bool enabled) {
+  if (auto *ptr = renderNodeFlagPtr(nodeName)) {
+    ptr->store(enabled, std::memory_order_relaxed);
+    emit renderStateChanged();
+  }
+}
+
+bool EngineController::isRenderNodeEnabled(const QString &nodeName) const {
+  if (const auto *ptr = renderNodeFlagPtr(nodeName)) {
+    return ptr->load(std::memory_order_relaxed);
+  }
+  return false;
+}
+
+void EngineController::setSyncMasterDspToRender(bool sync) {
+  m_syncMasterDspToRender.store(sync, std::memory_order_relaxed);
+  if (sync) {
+    syncMasterDspToRenderEngine();
+  }
+  emit renderStateChanged();
+}
+
+bool EngineController::syncMasterDspToRenderEnabled() const noexcept {
+  return m_syncMasterDspToRender.load(std::memory_order_relaxed);
+}
+
+QVariantMap EngineController::verifyRenderTapConsistency() {
+  syncMasterDspToRenderEngine();
+  const double sr = graphSampleRate() > 0.0 ? graphSampleRate() : 48000.0;
+  constexpr size_t N = 512;
+  std::vector<double> srcL(N), srcR(N);
+  for (size_t i = 0; i < N; ++i) {
+    const double t = static_cast<double>(i) / sr;
+    srcL[i] = 0.25 * std::sin(2.0 * std::numbers::pi * 440.0 * t);
+    srcR[i] = 0.25 * std::cos(2.0 * std::numbers::pi * 440.0 * t);
+  }
+
+  // 1. Offline RenderChain baseline
+  engine::render::RenderDspSnapshot snap;
+  {
+    auto lock = m_renderEngine.lockTemplateChain();
+    snap = m_renderEngine.templateChain().createSnapshot();
+  }
+  engine::render::RenderChain renderChain;
+  renderChain.applySnapshot(snap, sr);
+  std::vector<double> rndL = srcL, rndR = srcR;
+  renderChain.process(rndL.data(), rndR.data(), N);
+
+  // 2. Live Master Chain clone equivalent (with global bypass honored & RenderMonitorPath isolation)
+  auto liveChain = std::make_unique<engine::pipeline::AudioChain>(
+      "ConsistencyCheck", engine::pipeline::ChainPurpose::MasteringChain);
+  engine::render::RenderChain mirrorChain;
+  mirrorChain.configure(sr);
+  mirrorChain.setEnabled(!m_globalDspBypass.load(std::memory_order_relaxed));
+  mirrorChain.copyParametersFrom(m_uiPeq, m_uiGeq, m_uiFilter, m_uiComp,
+                                 m_uiReverb, m_uiLimiter);
+  mirrorChain.peq().setEnabled(!m_peqBypassed.load(std::memory_order_relaxed));
+  mirrorChain.geq().setEnabled(!m_geqBypassed.load(std::memory_order_relaxed));
+  const bool fltOn = !m_filterBypassed.load(std::memory_order_relaxed);
+  mirrorChain.filter().setHpfEnabled(fltOn && m_uiFilter.isHpfEnabled());
+  mirrorChain.filter().setLpfEnabled(fltOn && m_uiFilter.isLpfEnabled());
+  mirrorChain.compressor().setEnabled(!m_compBypassed.load(std::memory_order_relaxed));
+  mirrorChain.reverb().setEnabled(!m_reverbBypassed.load(std::memory_order_relaxed));
+  mirrorChain.limiter().setEnabled(!m_limiterBypassed.load(std::memory_order_relaxed));
+
+  std::vector<double> liveL = srcL, liveR = srcR;
+  mirrorChain.process(liveL.data(), liveR.data(), N);
+
+  double maxDiff = 0.0;
+  if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
+    for (size_t i = 0; i < N; ++i) {
+      maxDiff = std::max(maxDiff, std::abs(rndL[i] - liveL[i]));
+      maxDiff = std::max(maxDiff, std::abs(rndR[i] - liveR[i]));
+    }
+  }
+
+  // Verify Listening Correction has zero leakage through RenderMonitorPath
+  engine::routing::OutputPathRouter router;
+  router.setSampleRate(sr);
+  for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+    router.listeningCorrection().setLeftBand(b, m_uiListeningCorrection.leftBand(b));
+    router.listeningCorrection().setRightBand(b, m_uiListeningCorrection.rightBand(b));
+  }
+  router.setRenderMonitorVolume(1.0);
+  router.setMode(engine::routing::OutputPathMode::RenderMonitorPath);
+  std::vector<double> interleavedIn(N * 2), interleavedOut(N * 2);
+  for (size_t i = 0; i < N; ++i) {
+    interleavedIn[i * 2] = rndL[i];
+    interleavedIn[i * 2 + 1] = rndR[i];
+  }
+  router.routeBlock(interleavedIn.data(), interleavedOut.data(), N);
+  double leakage = 0.0;
+  for (size_t i = 0; i < N * 2; ++i) {
+    leakage = std::max(leakage, std::abs(interleavedIn[i] - interleavedOut[i]));
+  }
+
+  QVariantMap res;
+  res["consistent"] = (maxDiff <= 1e-12 && leakage == 0.0);
+  res["maxAbsDiff"] = maxDiff;
+  res["listeningLeakage"] = leakage;
+  res["globalDspBypass"] = m_globalDspBypass.load(std::memory_order_relaxed);
+  return res;
+}
+
 void EngineController::syncMasterDspToRenderEngine() {
   auto lock = m_renderEngine.lockTemplateChain();
   auto &tc = m_renderEngine.templateChain();
@@ -3544,7 +4360,9 @@ QString EngineController::startTrackRender(const QString &deckId, int bitDepth,
   }
 
   m_renderEngine.setWorkspacePath(wsMgr.openWorkspacePath());
-  syncMasterDspToRenderEngine();
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
 
   engine::render::RenderSettings settings;
   settings.bitDepth =
@@ -3558,6 +4376,12 @@ QString EngineController::startTrackRender(const QString &deckId, int bitDepth,
   settings.targetSampleRate = customRate > 0 ? customRate : 48000.0;
   settings.applyDither = applyDither;
   settings.enableMasterDsp = enableDsp;
+  settings.includePeq = m_renderIncludePeq.load(std::memory_order_relaxed);
+  settings.includeGeq = m_renderIncludeGeq.load(std::memory_order_relaxed);
+  settings.includeFilter = m_renderIncludeFilter.load(std::memory_order_relaxed);
+  settings.includeCompressor = m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  settings.includeReverb = m_renderIncludeReverb.load(std::memory_order_relaxed);
+  settings.includeLimiter = m_renderIncludeLimiter.load(std::memory_order_relaxed);
 
   QString taskId = m_renderEngine.enqueueTrackRender(trackPath, settings);
 
@@ -3602,7 +4426,9 @@ QString EngineController::startAlbumRender(const QString &folderPath,
   }
 
   m_renderEngine.setWorkspacePath(wsMgr.openWorkspacePath());
-  syncMasterDspToRenderEngine();
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
 
   engine::render::RenderSettings settings;
   settings.bitDepth =
@@ -3616,6 +4442,12 @@ QString EngineController::startAlbumRender(const QString &folderPath,
   settings.targetSampleRate = customRate > 0 ? customRate : 48000.0;
   settings.applyDither = applyDither;
   settings.enableMasterDsp = enableDsp;
+  settings.includePeq = m_renderIncludePeq.load(std::memory_order_relaxed);
+  settings.includeGeq = m_renderIncludeGeq.load(std::memory_order_relaxed);
+  settings.includeFilter = m_renderIncludeFilter.load(std::memory_order_relaxed);
+  settings.includeCompressor = m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  settings.includeReverb = m_renderIncludeReverb.load(std::memory_order_relaxed);
+  settings.includeLimiter = m_renderIncludeLimiter.load(std::memory_order_relaxed);
 
   QString taskId = m_renderEngine.enqueueAlbumRender(folderPath, settings);
 
@@ -3766,6 +4598,165 @@ QVariantMap EngineController::getRenderStatus() const {
   map["rollbackSucceeded"] = task.rollbackSucceeded;
 
   return map;
+}
+
+QString EngineController::defaultSessionStatePath() const {
+  QString xdgState = qEnvironmentVariable("XDG_STATE_HOME");
+  if (xdgState.isEmpty()) {
+    xdgState = QDir::homePath() + QStringLiteral("/.local/state");
+  }
+  return xdgState + QStringLiteral("/desk32/session_state.json");
+}
+
+bool EngineController::saveSessionState(const QString &filePath) const {
+  const QString targetPath = filePath.isEmpty() ? defaultSessionStatePath() : filePath;
+  QDir().mkpath(QFileInfo(targetPath).absolutePath());
+
+  QJsonObject root;
+  root["format_version"] = 1;
+  root["saved_utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+  root["workspace_path"] =
+      engine::workspace::WorkspaceManager::instance().openWorkspacePath();
+  root["active_deck"] = activeDeckId();
+  root["switching_mode"] = switchingMode();
+  root["global_dsp_bypass"] = globalDspBypass();
+  root["master_gain_l"] = masterGainL();
+  root["master_gain_r"] = masterGainR();
+  root["master_mute"] = isMasterMute();
+
+  auto *nonConstThis = const_cast<EngineController *>(this);
+  root["master_dsp"] = QJsonObject::fromVariantMap(
+      nonConstThis->captureCurrentStateAsPreset(
+          engine::preset::PresetCategories::MasterDsp));
+  root["listening_correction"] = QJsonObject::fromVariantMap(
+      nonConstThis->captureCurrentStateAsPreset(
+          engine::preset::PresetCategories::ListeningCorrection));
+  root["external_insert"] = QJsonObject::fromVariantMap(
+      nonConstThis->captureCurrentStateAsPreset(
+          engine::preset::PresetCategories::ExternalInsert));
+  root["audio_device"] = QJsonObject::fromVariantMap(
+      nonConstThis->captureCurrentStateAsPreset(
+          engine::preset::PresetCategories::AudioDevice));
+
+  QJsonObject renderNodes;
+  renderNodes["sync_master_dsp"] = m_syncMasterDspToRender.load(std::memory_order_relaxed);
+  renderNodes["PEQ"] = m_renderIncludePeq.load(std::memory_order_relaxed);
+  renderNodes["GEQ"] = m_renderIncludeGeq.load(std::memory_order_relaxed);
+  renderNodes["Filter"] = m_renderIncludeFilter.load(std::memory_order_relaxed);
+  renderNodes["Compressor"] = m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  renderNodes["Reverb"] = m_renderIncludeReverb.load(std::memory_order_relaxed);
+  renderNodes["Limiter"] = m_renderIncludeLimiter.load(std::memory_order_relaxed);
+  root["render_nodes"] = renderNodes;
+
+  QJsonArray decksArr;
+  if (m_deckManager) {
+    for (char cid : {'A', 'B', 'C', 'D'}) {
+      if (const auto *d = m_deckManager->deck(cid)) {
+        if (!d->isOpen() || d->trackInfo().path.empty()) continue;
+        QJsonObject dobj;
+        dobj["deck"] = QString(cid);
+        dobj["path"] = QString::fromStdString(d->trackInfo().path);
+        dobj["frame"] = static_cast<qint64>(d->playhead());
+        dobj["level_match_db"] = d->levelMatchGainDb();
+        dobj["offset_frames"] = static_cast<qint64>(d->offsetFrames());
+        dobj["locked"] = d->isLocked();
+        dobj["folder_mode"] = d->folderSession().isActive();
+        dobj["folder_path"] = QString::fromStdString(d->folderSession().folderPath());
+        decksArr.append(dobj);
+      }
+    }
+  }
+  root["decks"] = decksArr;
+
+  QSaveFile save(targetPath);
+  if (!save.open(QIODevice::WriteOnly)) {
+    return false;
+  }
+  save.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  return save.commit();
+}
+
+bool EngineController::restoreSessionState(const QString &filePath) {
+  const QString targetPath = filePath.isEmpty() ? defaultSessionStatePath() : filePath;
+  QFile f(targetPath);
+  if (!f.exists() || !f.open(QIODevice::ReadOnly)) {
+    return false;
+  }
+  QJsonParseError err{};
+  const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+  f.close();
+  if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+    return false;
+  }
+
+  const QJsonObject root = doc.object();
+  if (root.contains("audio_device")) {
+    applyAudioDeviceJson(root["audio_device"].toObject());
+  }
+  if (root.contains("master_dsp")) {
+    applyMasterDspJson(root["master_dsp"].toObject());
+  }
+  if (root.contains("listening_correction")) {
+    const QJsonObject lc = root["listening_correction"].toObject();
+    applyListeningCorrectionJson(lc, lc["preset_name"].toString());
+  }
+  if (root.contains("external_insert")) {
+    applyExternalInsertJson(root["external_insert"].toObject());
+  }
+  if (root.contains("render_nodes")) {
+    const QJsonObject rn = root["render_nodes"].toObject();
+    setSyncMasterDspToRender(rn["sync_master_dsp"].toBool(true));
+    setRenderNodeEnabled("PEQ", rn["PEQ"].toBool(true));
+    setRenderNodeEnabled("GEQ", rn["GEQ"].toBool(true));
+    setRenderNodeEnabled("Filter", rn["Filter"].toBool(true));
+    setRenderNodeEnabled("Compressor", rn["Compressor"].toBool(true));
+    setRenderNodeEnabled("Reverb", rn["Reverb"].toBool(true));
+    setRenderNodeEnabled("Limiter", rn["Limiter"].toBool(true));
+  }
+  if (root.contains("global_dsp_bypass")) {
+    setGlobalDspBypass(root["global_dsp_bypass"].toBool(false));
+  }
+  if (root.contains("switching_mode")) {
+    setSwitchingMode(root["switching_mode"].toInt(0));
+  }
+  if (root.contains("master_gain_l")) {
+    setMasterGainL(root["master_gain_l"].toDouble(1.0));
+  }
+  if (root.contains("master_gain_r")) {
+    setMasterGainR(root["master_gain_r"].toDouble(1.0));
+  }
+  if (root.contains("master_mute")) {
+    setMasterMute(root["master_mute"].toBool(false));
+  }
+
+  const QJsonArray decksArr = root["decks"].toArray();
+  for (const QJsonValue &dv : decksArr) {
+    if (!dv.isObject()) continue;
+    const QJsonObject dobj = dv.toObject();
+    const QString dId = dobj["deck"].toString();
+    const QString path = dobj["path"].toString();
+    if (!dId.isEmpty() && !path.isEmpty() && QFileInfo::exists(path)) {
+      if (loadTrack(dId, path)) {
+        if (dobj["folder_mode"].toBool(false)) {
+          startFolderSessionFromDeck(dId);
+        }
+        const qint64 frame = dobj["frame"].toInteger(0);
+        if (frame > 0) {
+          seek(dId, frame);
+        }
+        setDeckLevelMatchDb(dId, dobj["level_match_db"].toDouble(0.0));
+        setDeckOffsetFrames(dId, dobj["offset_frames"].toInteger(0));
+        setDeckLocked(dId, dobj["locked"].toBool(false));
+      }
+    }
+  }
+  const QString activeD = root["active_deck"].toString();
+  if (!activeD.isEmpty()) {
+    switchDeck(activeD, switchingMode());
+  }
+
+  emit diagnosticsChanged();
+  return true;
 }
 
 } // namespace desk32::core

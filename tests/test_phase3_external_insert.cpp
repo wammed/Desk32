@@ -110,6 +110,9 @@ private slots:
     // 12. P1-2: Individual DSP Node Bypass Queue Push Failure, Consistency, and Parameter Preservation
     void testDspNodeBypassQueueFailureAndConsistency();
 
+    // 13. Phase 3 Gap Fixes: pw-dump discovery, verified recovery, chain position, disconnect policies, auto impulse, metadata & session state
+    void testPhase3GapFixesInsertPoliciesDiscoveryAndSessionState();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
 };
@@ -922,6 +925,127 @@ void TestPhase3ExternalInsert::testDspNodeBypassQueueFailureAndConsistency() {
 
     controller.setDspNodeBypass("Compressor", false);
     while (pipe->paramQueue().pop(dummy)) {}
+}
+
+void TestPhase3ExternalInsert::testPhase3GapFixesInsertPoliciesDiscoveryAndSessionState() {
+    using namespace desk32::engine::insert;
+    using namespace desk32::engine::preset;
+    using desk32::core::EngineController;
+
+    // 1. Item 16: pw-dump JSON port discovery & verified port recovery
+    const std::string fakePwDump = R"([
+      {"id": 10, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "CarlaRack", "node.latency": "256/48000", "latency.internal.rate": 128}}},
+      {"id": 11, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_in_1"}}},
+      {"id": 12, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_in_2"}}},
+      {"id": 13, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_out_1"}}},
+      {"id": 14, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_out_2"}}}
+    ])";
+    const auto discovered = ExternalInsertBridge::parsePwDumpPorts(fakePwDump, 48000.0, 256);
+    QCOMPARE(discovered.size(), size_t(1));
+    QCOMPARE(discovered[0].clientName, std::string("CarlaRack"));
+    QCOMPARE(discovered[0].sendPortL, std::string("CarlaRack:audio_in_1"));
+    QCOMPARE(discovered[0].returnPortR, std::string("CarlaRack:audio_out_2"));
+    QCOMPARE(discovered[0].reportedLatencyFrames, uint32_t(128));
+    QVERIFY(discovered[0].latencyReported);
+
+    ExternalInsertBridge recBridge;
+    QVERIFY(recBridge.configure(discovered[0], 48000.0, 256));
+    recBridge.handleDisconnect();
+    QVERIFY(!recBridge.handleRecoveryWithVerification({})); // Missing ports -> Error
+    QCOMPARE(recBridge.state(), InsertState::Error);
+    QVERIFY(recBridge.handleRecoveryWithVerification(discovered)); // Matching ports -> Connected
+    QCOMPARE(recBridge.state(), InsertState::Connected);
+
+    // 2. Item 18 & 19: DisconnectPolicy (AutoBypass/Mute/Stop), Not Reported vs 0 frames, auto impulse return detection
+    ExternalInsertBridge bridge;
+    ExternalPortInfo unrep{"NoLatHost", "n:in1", "n:in2", "n:out1", "n:out2", 48000.0, 256, 0, false, "MyPlugin", "lv2://my/plugin", "WarmPreset"};
+    QVERIFY(bridge.configure(unrep, 48000.0, 256));
+    QCOMPARE(bridge.hasReportedLatency(), false);
+    QCOMPARE(bridge.reportedLatencyText(), std::string("Not Reported"));
+
+    // Ring buffer loopback mock with 48-frame delay
+    constexpr size_t DELAY = 48;
+    std::vector<double> ringL(512, 0.0), ringR(512, 0.0);
+    size_t writePos = 0;
+    bridge.setMockProcessor([&ringL, &ringR, &writePos](double* l, double* r, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            ringL[(writePos + DELAY) % 512] = l[i];
+            ringR[(writePos + DELAY) % 512] = r[i];
+            l[i] = ringL[writePos % 512];
+            r[i] = ringR[writePos % 512];
+            ringL[writePos % 512] = 0.0;
+            ringR[writePos % 512] = 0.0;
+            ++writePos;
+        }
+    });
+    bridge.triggerLatencyMeasurement();
+    std::vector<double> bL(256, 0.0), bR(256, 0.0);
+    bridge.process(bL.data(), bR.data(), 256); // Send at frame 64, detected automatically at frame 64+48
+    QCOMPARE(bridge.measuredLatencyFrames(), int64_t(DELAY));
+
+    bridge.setDisconnectPolicy(DisconnectPolicy::MuteOutput);
+    bridge.handleDisconnect();
+    std::fill(bL.begin(), bL.end(), 0.7);
+    std::fill(bR.begin(), bR.end(), 0.7);
+    bridge.process(bL.data(), bR.data(), 256);
+    QCOMPARE(bL[0], 0.0);
+
+    bridge.handleRecovery();
+    bridge.setDisconnectPolicy(DisconnectPolicy::StopPlayback);
+    bridge.handleDisconnect();
+    bridge.process(bL.data(), bR.data(), 256);
+    QVERIFY(bridge.stopPlaybackRequested());
+
+    // 3. Item 17 & 20: Preset format_version, Insert position reordering, AudioDevice preset, session state save/restore
+    PresetManager& pm = PresetManager::instance();
+    pm.setCustomRootPath(m_tempDir->path() + "/p3_gap_presets");
+    // Write future format_version preset directly -> loadPreset must reject it
+    {
+        QString badPath = pm.categoryDirectory(PresetCategories::ListeningCorrection) + "/future_ver.json";
+        QFile bf(badPath);
+        QVERIFY(bf.open(QIODevice::WriteOnly));
+        bf.write("{\"category\":\"listening_correction\",\"name\":\"future_ver\",\"format_version\":999,\"bands\":[]}");
+        bf.close();
+        QVERIFY(pm.loadPreset(PresetCategories::ListeningCorrection, "future_ver").isEmpty());
+    }
+
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    QVERIFY(ctrl.configureExternalInsertWithMetadata(
+        "Carla", "c:in1", "c:in2", "c:out1", "c:out2", 48000.0, 256, 0, false,
+        "LSP Comp", "http://lsp-plug.in/comp", "StudioPreset1"));
+    ctrl.setExternalInsertPosition(0); // Move ExternalInsert before PEQ!
+    QCOMPARE(ctrl.externalInsertPosition(), 0);
+    // Reverb bypass still resolves properly via dynamic node mapping
+    ctrl.setDspNodeBypass("Reverb", false);
+    QCOMPARE(ctrl.isDspNodeBypassed("Reverb"), false);
+    ctrl.setExternalInsertDisconnectPolicy(static_cast<int>(DisconnectPolicy::AutoBypass));
+
+    // AudioDevice preset save & apply
+    ctrl.setFixedGraphSampleRate(96000.0);
+    ctrl.setListeningVolume(0.75);
+    QVERIFY(ctrl.savePreset(PresetCategories::AudioDevice, "Rig96k",
+                            ctrl.captureCurrentStateAsPreset(PresetCategories::AudioDevice)));
+    ctrl.setFixedGraphSampleRate(48000.0);
+    ctrl.setListeningVolume(1.0);
+    QVERIFY(ctrl.applyPresetProfile(PresetCategories::AudioDevice, "Rig96k"));
+    QCOMPARE(ctrl.graphSampleRate(), 96000.0);
+    QVERIFY(std::abs(ctrl.listeningVolume() - 0.75) < 1e-6);
+
+    // Session state save & restore
+    const QString sessPath = m_tempDir->path() + "/session_state.json";
+    QVERIFY(ctrl.saveSessionState(sessPath));
+    ctrl.setFixedGraphSampleRate(48000.0);
+    ctrl.setDspNodeBypass("Reverb", true);
+    QVERIFY(ctrl.restoreSessionState(sessPath));
+    QCOMPARE(ctrl.graphSampleRate(), 96000.0);
+    QCOMPARE(ctrl.isDspNodeBypassed("Reverb"), false);
+    QCOMPARE(ctrl.externalInsertPosition(), 0);
+    const QVariantMap st = ctrl.getExternalInsertStatus();
+    QCOMPARE(st["latencyReported"].toBool(), false);
+    QCOMPARE(st["reportedLatencyText"].toString(), QString("Not Reported"));
+    QCOMPARE(st["pluginName"].toString(), QString("LSP Comp"));
+    QCOMPARE(st["hostPresetReference"].toString(), QString("StudioPreset1"));
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

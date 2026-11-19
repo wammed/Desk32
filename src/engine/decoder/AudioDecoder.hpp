@@ -28,7 +28,9 @@ public:
     virtual void close() = 0;
 
     [[nodiscard]] virtual bool isOpen() const noexcept = 0;
+    [[nodiscard]] virtual bool hasDecodeError() const noexcept { return false; }
     [[nodiscard]] virtual std::string lastError() const { return ""; }
+    [[nodiscard]] virtual std::string lastErrorMessage() const { return lastError(); }
 
     [[nodiscard]] virtual const AudioFormatInfo& formatInfo() const noexcept = 0;
     [[nodiscard]] virtual const metadata::TrackMetadata& metadata() const noexcept = 0;

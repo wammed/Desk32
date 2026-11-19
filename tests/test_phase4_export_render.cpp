@@ -260,6 +260,9 @@ private slots:
     // 28. v3.8.1 §19 D-2: Fail-closed render without workspace & workspace-scoped output + serials
     void testFailClosedWithoutWorkspaceAndWorkspaceSerial();
 
+    // 29. Phase 4 Gap Fixes: .WAV preservation, per-node render toggle, tap consistency, post-render workspace index refresh
+    void testPhase4GapFixesFilenamePerNodeRenderTapAndIndexRefresh();
+
 private:
     struct CleanupEvaluation {
         bool passed = true;
@@ -2437,6 +2440,88 @@ void TestPhase4ExportRender::testFailClosedWithoutWorkspaceAndWorkspaceSerial()
         QString rerr;
         wsMgr.openWorkspace(prevWs, rerr);
     }
+}
+
+void TestPhase4ExportRender::testPhase4GapFixesFilenamePerNodeRenderTapAndIndexRefresh()
+{
+    using namespace desk32::engine::render;
+    auto& wsMgr = desk32::engine::workspace::WorkspaceManager::instance();
+    EngineController& controller = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+
+    wsMgr.simulateAppRestartForTesting();
+    const QString wsDir = m_tempDir->filePath("p4_gap_ws");
+    QDir().mkpath(wsDir);
+    QString err;
+    QVERIFY2(wsMgr.registerAndOpenWorkspace(wsDir, err), qPrintable(err));
+    QVERIFY(controller.initialize(true));
+
+    // Item 21: Preserve .WAV filename casing and detect case-insensitive stem collisions
+    QCOMPARE(RenderSettings::resolveOutputWavFilename("01_Track.WAV"), QString("01_Track.WAV"));
+    QCOMPARE(RenderSettings::resolveOutputWavFilename("01_Track.flac"), QString("01_Track.wav"));
+
+    const QString dupDir = wsDir + "/dup_case";
+    QDir().mkpath(dupDir);
+    QVERIFY(createTestWav(dupDir + "/Song.wav", 48000.0, 2400));
+    QVERIFY(createTestWav(dupDir + "/Song.WAV", 48000.0, 2400));
+    wsMgr.refreshIndexAfterInternalWrite();
+
+    const QString dupTid = controller.startAlbumRender(dupDir, 1, 0, 48000.0, false, false);
+    if (!dupTid.isEmpty()) {
+        QSignalSpy failSpy(&engine, &RenderEngine::renderTaskFinished);
+        QVERIFY(failSpy.wait(10000));
+        QCOMPARE(controller.renderStatus(), static_cast<int>(RenderStatus::Failed));
+        controller.resetRenderStatus();
+    }
+
+    // Item 23: Verify Render Tap Consistency (0.0 Listening Correction leakage + live/render match <= 1e-12)
+    controller.setListeningPreset("Harman Target");
+    controller.setDspNodeBypass("PEQ", false);
+    controller.setPeqBand(false, 2, 1000.0, 3.0, 1.0, 0, true);
+    const QVariantMap consistency = controller.verifyRenderTapConsistency();
+    QVERIFY(consistency["consistent"].toBool());
+    QCOMPARE(consistency["listeningLeakage"].toDouble(), 0.0);
+    QVERIFY(consistency["maxAbsDiff"].toDouble() <= 1e-12);
+
+    // Item 22 & Item 24: Per-node render toggle (Reverb off for render while live Reverb stays ON) + post-render workspace index refresh
+    const QString srcDir = wsDir + "/album_src";
+    QDir().mkpath(srcDir);
+    const QString wavUpper = srcDir + "/TakeOne.WAV";
+    QVERIFY(createTestWav(wavUpper, 48000.0, 4800));
+    wsMgr.refreshIndexAfterInternalWrite();
+
+    controller.setReverbParams(0.85, 0.25, 0.6, 0.0, true);
+    controller.setDspNodeBypass("Reverb", false); // Live Reverb ON!
+    controller.setRenderNodeEnabled("PEQ", true);
+    controller.setRenderNodeEnabled("Reverb", false); // Exclude Reverb in offline render
+    QVERIFY(!controller.isRenderNodeEnabled("Reverb"));
+
+    QVERIFY(controller.loadTrack("A", wavUpper));
+    QSignalSpy doneSpy(&engine, &RenderEngine::renderTaskFinished);
+    QVERIFY(!controller.startTrackRender("A", 2 /*Float32*/, 0, 48000.0, false, true).isEmpty());
+    QVERIFY(doneSpy.wait(10000));
+    QCOMPARE(controller.renderStatus(), static_cast<int>(RenderStatus::Completed));
+    QCOMPARE(controller.isDspNodeBypassed("Reverb"), false); // Live console unchanged
+
+    const QStringList renderedFiles = controller.renderOutputFiles();
+    QCOMPARE(renderedFiles.size(), 1);
+    QCOMPARE(QFileInfo(renderedFiles[0]).fileName(), QString("TakeOne.WAV")); // Case preserved!
+
+    // Item 24: Verify rendered file is already reflected cleanly in workspace index (externallyModified == false)
+    QCOMPARE(wsMgr.externalModificationCount(), 0);
+    const auto wsFiles = wsMgr.listWorkspaceFiles();
+    bool foundRendered = false;
+    for (const auto& wf : wsFiles) {
+        if (wf.absolutePath == renderedFiles[0]) {
+            foundRendered = true;
+            QVERIFY(!wf.externallyModified);
+        }
+    }
+    QVERIFY(foundRendered);
+
+    // Reset render toggles cleanly
+    controller.setRenderNodeEnabled("Reverb", true);
+    controller.resetRenderStatus();
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

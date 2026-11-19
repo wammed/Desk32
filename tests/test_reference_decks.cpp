@@ -11,6 +11,8 @@
 #include <cstring>
 #include <execinfo.h>
 #include <latch>
+#include <thread>
+#include <chrono>
 #include "engine/deck/DeckManager.hpp"
 
 static std::atomic<bool> s_trackAllocations{false};
@@ -147,6 +149,7 @@ private slots:
     void testAutoAdvanceOverflowContinuousWithControlDelay();
     void testAutoAdvanceSpscCapacityOverflowNoOverwrite();
     void testComparativeSwitchTerminatesFolderSession();
+    void testPhase1GapFixesFolderAndTransport();
     void cleanupTestCase();
 
 private:
@@ -2389,6 +2392,119 @@ void TestReferenceDecks::testComparativeSwitchTerminatesFolderSession()
     QVERIFY(manager.deck('B')->isOpen());
     QCOMPARE(manager.deck('A')->state(), TransportState::Paused);
     QCOMPARE(manager.deck('B')->state(), TransportState::Playing);
+}
+
+void TestReferenceDecks::testPhase1GapFixesFolderAndTransport()
+{
+    using namespace desk32::engine::deck;
+    using namespace desk32::engine::session;
+
+    // 1. Item 7: RMS measurement on real synthetic WAV (amplitude 0.3 -> ~ -13.47 dBFS)
+    double measuredRmsDb = 0.0;
+    QVERIFY(ReferenceDeck::measureTrackRmsDb(m_wav1.toStdString(), 0.0, 2.0, measuredRmsDb));
+    QVERIFY2(std::abs(measuredRmsDb - (-13.47)) < 0.6, qPrintable(QString("rms=%1").arg(measuredRmsDb)));
+
+    // 2. Item 1 & Item 4: .aiff scan + single-track ReadAhead probe failure stops Folder Session without skipping
+    const QString gapDir = m_testDir + "/phase1_gaps";
+    QDir().mkpath(gapDir);
+    const QString goodWav1 = createSyntheticWav("phase1_gaps/01_good.wav", 48000.0, 2400);
+    // Write minimal corrupt audio file as track 02
+    const QString corruptWav = gapDir + "/02_corrupt.wav";
+    {
+        QFile cf(corruptWav);
+        QVERIFY(cf.open(QIODevice::WriteOnly));
+        cf.write("NOT_A_VALID_AUDIO_FILE_0123456789");
+        cf.close();
+    }
+    const QString goodAiff = createSyntheticWav("phase1_gaps/03_good.aiff", 48000.0, 2400);
+    QVERIFY(!goodWav1.isEmpty());
+    QVERIFY(!goodAiff.isEmpty());
+
+    QVERIFY(FolderSession::isSupportedAudioExtension(QFileInfo(goodAiff).suffix().toLower()));
+    const auto scanned = FolderSession::scanSupportedAudioFiles(gapDir.toStdString());
+    QCOMPARE(scanned.size(), size_t(3));
+
+    DeckManager mgr(48000.0);
+    auto* deckA = mgr.deck('A');
+    QVERIFY(deckA != nullptr);
+    int errorCallbacks = 0;
+    deckA->setErrorLogCallback([&](const std::string&, int32_t, const std::string&, const std::string&) {
+        ++errorCallbacks;
+    });
+
+    // Item 4: startFolderSessionFromCurrentTrack after single-track load
+    const QString subDir = m_testDir + "/from_track_dir";
+    QDir().mkpath(subDir);
+    QVERIFY(!createSyntheticWav("from_track_dir/t1.wav", 48000.0, 4800).isEmpty());
+    const QString subT2 = createSyntheticWav("from_track_dir/t2.wav", 48000.0, 4800 * 60); // 6s for 3s test
+    QVERIFY(deckA->loadTrack(subT2.toStdString(), 48000.0));
+    QVERIFY(deckA->startFolderSessionFromCurrentTrack(48000.0));
+    QVERIFY(deckA->folderSession().isActive());
+    QCOMPARE(deckA->folderSession().tracks().size(), size_t(2));
+    QCOMPARE(deckA->folderSession().currentIndex(), size_t(0)); // Spec 2.7.2 starts from index 0
+
+    // Item 2: Advance to track 1 (6s), then test retreatFolderPrevious() 3s threshold
+    QVERIFY(deckA->advanceFolderNext());
+    QCOMPARE(deckA->folderSession().currentIndex(), size_t(1));
+    deckA->seek(48000 * 4); // 4.0s >= 3.0s threshold
+    QVERIFY(deckA->retreatFolderPrevious());
+    QCOMPARE(deckA->folderSession().currentIndex(), size_t(1)); // Restarted current track
+    QCOMPARE(deckA->playhead(), int64_t(0));
+    // Now playhead < 3.0s -> retreats to Track 0
+    QVERIFY(deckA->retreatFolderPrevious());
+    QCOMPARE(deckA->folderSession().currentIndex(), size_t(0));
+
+    // Item 1: Corrupt read-ahead next track stops session after current track ends (no skipping to 03)
+    QVERIFY(deckA->startFolderSession(gapDir.toStdString(), {"01_good.wav", "02_corrupt.wav", "03_good.aiff"}, 48000.0));
+    QCOMPARE(deckA->folderSession().readAheadStatus(), ReadAheadStatus::Failed);
+    deckA->play();
+    std::vector<double> tmpL(1024), tmpR(1024);
+    for (int b = 0; b < 50 && deckA->folderSession().isActive(); ++b) {
+        deckA->renderBlock(tmpL.data(), tmpR.data(), 1024);
+        deckA->processPendingEof();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    QVERIFY(!deckA->folderSession().isActive());
+    QCOMPARE(deckA->state(), TransportState::Stopped);
+    QVERIFY(errorCallbacks >= 1);
+
+    // Item 3: Mid-stream decode error stops immediately and prevents FolderSession advance
+    errorCallbacks = 0;
+    QVERIFY(deckA->startFolderSession(subDir.toStdString(), {"t1.wav", "t2.wav"}, 48000.0));
+    deckA->play();
+    deckA->worker().simulateMidStreamDecodeErrorForTesting("corrupt frame header");
+    deckA->renderBlock(tmpL.data(), tmpR.data(), 256);
+    QCOMPARE(deckA->state(), TransportState::Stopped);
+    deckA->processPendingEof();
+    QVERIFY(!deckA->folderSession().isActive());
+    QVERIFY(errorCallbacks >= 1);
+
+    // Item 5 & Item 6: Normal switch auto-pauses/resumes Folder Session + RT-safe 5ms de-click fade-in ramp
+    QVERIFY(deckA->startFolderSession(subDir.toStdString(), {"t1.wav", "t2.wav"}, 48000.0));
+    auto* deckB = mgr.deck('B');
+    QVERIFY(deckB != nullptr);
+    QVERIFY(deckB->loadTrack(m_wav1.toStdString(), 48000.0));
+    deckA->play();
+    QCOMPARE(deckA->state(), TransportState::Playing);
+
+    auto swB = mgr.switchDeck('B', SwitchingMode::Normal);
+    QVERIFY(swB.success);
+    QCOMPARE(deckA->state(), TransportState::Paused);
+    QVERIFY(deckA->wasPausedByNormalSwitch());
+
+    // Verify 5ms fade-in ramp starts near 0 on frame 0 and allocates zero heap memory
+    std::vector<double> rampL(256, 0.0), rampR(256, 0.0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    s_allocationCount.store(0, std::memory_order_release);
+    s_trackAllocations.store(true, std::memory_order_release);
+    mgr.renderActiveBlock(rampL.data(), rampR.data(), 256);
+    s_trackAllocations.store(false, std::memory_order_release);
+    QCOMPARE(s_allocationCount.load(std::memory_order_acquire), size_t(0));
+    QVERIFY(std::abs(rampL[0]) < 1e-6);
+
+    auto swA = mgr.switchDeck('A', SwitchingMode::Normal);
+    QVERIFY(swA.success);
+    QCOMPARE(deckA->state(), TransportState::Playing);
 }
 
 void TestReferenceDecks::cleanupTestCase()

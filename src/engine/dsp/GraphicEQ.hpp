@@ -30,6 +30,7 @@ public:
             m_enabled.store(other.m_enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             m_frequencies = other.m_frequencies;
             m_gainsDb = other.m_gainsDb;
+            m_bandEnabled = other.m_bandEnabled;
             m_leftFilters = other.m_leftFilters;
             m_rightFilters = other.m_rightFilters;
         }
@@ -49,6 +50,7 @@ public:
         for (size_t i = 0; i < NUM_BANDS; ++i) {
             m_frequencies[i] = isoFreqs[i];
             m_gainsDb[i] = 0.0;
+            m_bandEnabled[i] = true;
         }
     }
 
@@ -59,13 +61,18 @@ public:
         for (size_t i = 0; i < NUM_BANDS; ++i) {
             // Guard frequencies higher than Nyquist
             double freq = std::min(m_frequencies[i], sampleRate * 0.48);
-            m_leftFilters[i].configure(BiquadFilterType::Peak, sampleRate, freq, Q, m_gainsDb[i]);
-            m_rightFilters[i].configure(BiquadFilterType::Peak, sampleRate, freq, Q, m_gainsDb[i]);
+            double effectiveGain = m_bandEnabled[i] ? m_gainsDb[i] : 0.0;
+            m_leftFilters[i].configure(BiquadFilterType::Peak, sampleRate, freq, Q, effectiveGain);
+            m_rightFilters[i].configure(BiquadFilterType::Peak, sampleRate, freq, Q, effectiveGain);
         }
     }
 
     [[nodiscard]] double bandGain(size_t index) const noexcept {
         return (index < NUM_BANDS) ? m_gainsDb[index] : 0.0;
+    }
+
+    [[nodiscard]] bool isBandEnabled(size_t index) const noexcept {
+        return (index < NUM_BANDS) ? m_bandEnabled[index] : false;
     }
 
     [[nodiscard]] double bandFrequency(size_t index) const noexcept {
@@ -79,16 +86,35 @@ public:
             m_gainsDb[index] = clamped;
             const double Q = 4.318;
             double freq = std::min(m_frequencies[index], m_sampleRate * 0.48);
-            m_leftFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, clamped);
-            m_rightFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, clamped);
+            double effectiveGain = m_bandEnabled[index] ? clamped : 0.0;
+            m_leftFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, effectiveGain);
+            m_rightFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, effectiveGain);
+        }
+    }
+
+    void setBandEnabled(size_t index, bool enabled)
+    {
+        if (index < NUM_BANDS) {
+            m_bandEnabled[index] = enabled;
+            const double Q = 4.318;
+            double freq = std::min(m_frequencies[index], m_sampleRate * 0.48);
+            double effectiveGain = enabled ? m_gainsDb[index] : 0.0;
+            m_leftFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, effectiveGain);
+            m_rightFilters[index].configure(BiquadFilterType::Peak, m_sampleRate, freq, Q, effectiveGain);
         }
     }
 
     void resetAllBands()
     {
         for (size_t i = 0; i < NUM_BANDS; ++i) {
+            m_bandEnabled[i] = true;
             setBandGain(i, 0.0);
         }
+    }
+
+    inline void applyBandEnabled(const std::array<bool, NUM_BANDS>& enabled) noexcept
+    {
+        m_bandEnabled = enabled;
     }
 
     /// Fast, real-time safe assignment of precalculated coefficients (Audio Thread, P0-27)
@@ -121,7 +147,7 @@ public:
             double sumDb = 0.0;
             const double freq = frequencies[f];
             for (size_t b = 0; b < NUM_BANDS; ++b) {
-                if (std::abs(m_gainsDb[b]) > 0.01) {
+                if (m_bandEnabled[b] && std::abs(m_gainsDb[b]) > 0.01) {
                     sumDb += m_leftFilters[b].magnitudeResponseDb(freq);
                 }
             }
@@ -140,6 +166,7 @@ public:
         if (!m_enabled.load(std::memory_order_relaxed)) return;
 
         for (size_t i = 0; i < NUM_BANDS; ++i) {
+            if (!m_bandEnabled[i]) continue;
             left = m_leftFilters[i].process(left);
             right = m_rightFilters[i].process(right);
         }
@@ -153,6 +180,7 @@ private:
     std::atomic<bool> m_enabled{false};
     std::array<double, NUM_BANDS> m_frequencies;
     std::array<double, NUM_BANDS> m_gainsDb;
+    std::array<bool, NUM_BANDS> m_bandEnabled{};
     std::array<BiquadFilter, NUM_BANDS> m_leftFilters;
     std::array<BiquadFilter, NUM_BANDS> m_rightFilters;
 };

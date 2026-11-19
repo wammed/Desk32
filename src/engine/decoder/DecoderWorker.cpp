@@ -710,6 +710,8 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_syntheticPos = 0;
 
           m_workerOpenTelem.eofBefore = m_isEof.load(std::memory_order_relaxed);
+          m_hasDecodeError.store(false, std::memory_order_release);
+          m_lastDecodeErrorMessage.clear();
           m_isEof.store(false, std::memory_order_release);
           m_workerOpenTelem.eofAfter = false;
           m_workerOpenTelem.eofClearedNs = steadyNowNs();
@@ -888,6 +890,8 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_syntheticPos = 0;
 
         m_workerOpenTelem.eofBefore = m_isEof.load(std::memory_order_relaxed);
+        m_hasDecodeError.store(false, std::memory_order_release);
+        m_lastDecodeErrorMessage.clear();
         m_isEof.store(false, std::memory_order_release);
         m_workerOpenTelem.eofAfter = false;
         m_workerOpenTelem.eofClearedNs = steadyNowNs();
@@ -975,6 +979,8 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
       } else {
         m_isOpen.store(false, std::memory_order_release);
         m_isPlaying.store(false, std::memory_order_release);
+        m_hasDecodeError.store(false, std::memory_order_release);
+        m_lastDecodeErrorMessage.clear();
         m_isEof.store(true, std::memory_order_release);
         m_eofDelivered.store(false, std::memory_order_release);
         m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
@@ -1007,6 +1013,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
     m_pendingOutOffset = 0;
     m_pendingOutCount = 0;
+    m_hasDecodeError.store(false, std::memory_order_release);
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
@@ -1040,6 +1047,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
     m_pendingOutOffset = 0;
     m_pendingOutCount = 0;
+    m_hasDecodeError.store(false, std::memory_order_release);
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
@@ -1060,6 +1068,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_pendingOutOffset = 0;
         m_pendingOutCount = 0;
         if (m_isOpen.load(std::memory_order_acquire)) {
+          m_hasDecodeError.store(false, std::memory_order_release);
           m_isEof.store(false, std::memory_order_release);
           m_eofDelivered.store(false, std::memory_order_release);
           m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
@@ -1182,6 +1191,13 @@ void DecoderWorker::doDecodeChunk() {
   }
 
   if (read == 0) {
+    if (m_decoder && m_decoder->hasDecodeError()) {
+      {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        m_lastDecodeErrorMessage = m_decoder->lastError();
+      }
+      m_hasDecodeError.store(true, std::memory_order_release);
+    }
     m_isEof.store(true, std::memory_order_release);
     recordChunkEnd();
     return;
@@ -1241,6 +1257,47 @@ void DecoderWorker::doDecodeChunk() {
     }
   }
   recordChunkEnd();
+}
+
+void DecoderWorker::simulateMidStreamDecodeErrorForTesting(const std::string& msg) {
+  {
+    std::lock_guard<std::mutex> lock(m_trackMutex);
+    m_lastDecodeErrorMessage = msg;
+  }
+  m_hasDecodeError.store(true, std::memory_order_release);
+  m_isEof.store(true, std::memory_order_release);
+}
+
+std::string DecoderWorker::lastDecodeErrorMessage() const {
+  std::lock_guard<std::mutex> lock(m_trackMutex);
+  return m_lastDecodeErrorMessage;
+}
+
+void DecoderWorker::reloadMetadata() {
+  std::lock_guard<std::mutex> lock(m_trackMutex);
+  if (m_trackInfo.path.empty() || m_isSynthetic.load(std::memory_order_acquire)) {
+    return;
+  }
+  metadata::TrackMetadata updated = metadata::MetadataReader::parseTags(m_trackInfo.path);
+  if (updated.sampleRate <= 0.0 && m_trackInfo.sampleRate > 0.0) {
+    updated.sampleRate = m_trackInfo.sampleRate;
+  }
+  if (updated.channels == 0 && m_trackInfo.channels > 0) {
+    updated.channels = m_trackInfo.channels;
+  }
+  if (updated.totalFrames == 0 && m_trackInfo.totalFrames > 0) {
+    updated.totalFrames = m_trackInfo.totalFrames;
+  }
+  if (updated.durationSeconds <= 0.0 && m_trackInfo.sampleRate > 0.0 && m_trackInfo.totalFrames > 0) {
+    updated.durationSeconds = static_cast<double>(m_trackInfo.totalFrames) / m_trackInfo.sampleRate;
+  }
+  if (updated.codecName.empty() && m_metadata) {
+    updated.codecName = m_metadata->codecName;
+  }
+  if (updated.bitDepth == 0 && m_metadata) {
+    updated.bitDepth = m_metadata->bitDepth;
+  }
+  m_metadata = std::make_shared<metadata::TrackMetadata>(std::move(updated));
 }
 
 } // namespace desk32::engine::decoder

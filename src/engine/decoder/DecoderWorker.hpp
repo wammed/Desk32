@@ -176,8 +176,12 @@ public:
     [[nodiscard]] bool isOpen() const noexcept { return m_isOpen.load(std::memory_order_acquire); }
     [[nodiscard]] bool isPlaying() const noexcept { return m_isPlaying.load(std::memory_order_acquire); }
     [[nodiscard]] bool isEof() const noexcept { return m_isEof.load(std::memory_order_acquire); }
+    [[nodiscard]] bool hasDecodeError() const noexcept { return m_hasDecodeError.load(std::memory_order_acquire); }
     [[nodiscard]] bool isEofDelivered() const noexcept { return m_eofDelivered.load(std::memory_order_acquire); }
     void clearEofDelivered() noexcept { m_eofDelivered.store(false, std::memory_order_release); }
+    void simulateMidStreamDecodeErrorForTesting(const std::string& msg = "Simulated mid-stream decode error");
+    void reloadMetadata();
+    [[nodiscard]] std::string lastDecodeErrorMessage() const;
     [[nodiscard]] uint64_t eofEpoch() const noexcept { return m_eofEpoch.load(std::memory_order_acquire); }
     [[nodiscard]] uint64_t eofRequestId() const noexcept { return m_eofRequestId.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t eofEmittedTimestampMs() const noexcept { return m_eofEmittedTimestampMs.load(std::memory_order_acquire); }
@@ -245,6 +249,7 @@ private:
     std::atomic<bool> m_isOpen{false};
     std::atomic<bool> m_isPlaying{false};
     std::atomic<bool> m_isEof{false};
+    std::atomic<bool> m_hasDecodeError{false};
     std::atomic<bool> m_eofDelivered{false};
     std::atomic<uint64_t> m_eofEpoch{1};
     std::atomic<uint64_t> m_eofDeliveredEpoch{0};
@@ -267,6 +272,7 @@ private:
     mutable std::mutex m_trackMutex;
     WorkerTrackInfo m_trackInfo;
     std::shared_ptr<const metadata::TrackMetadata> m_metadata;
+    std::string m_lastDecodeErrorMessage;
 
     // Lock-free Ring Buffer between Worker Thread (Producer) and Audio Thread (Consumer)
     buffer::PcmRingBuffer m_ringBuffer{buffer::PcmRingBuffer::DEFAULT_CAPACITY_FRAMES};

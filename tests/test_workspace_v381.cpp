@@ -97,6 +97,7 @@ private slots:
     void testDirectModeSampleRateFollowAndBypass();
     void testDeckLevelMatchPostTapAndOffsetFrames();
     void testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory();
+    void testPhase4GapFixesRenameRollbackExternalReloadTargetedStopHardlink();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -755,6 +756,93 @@ void TestWorkspaceV381::testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory()
         }
     }
     QVERIFY(foundHist);
+}
+
+void TestWorkspaceV381::testPhase4GapFixesRenameRollbackExternalReloadTargetedStopHardlink()
+{
+    auto& ws = WorkspaceManager::instance();
+    auto& ctrl = desk32::core::EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+
+    const QString wsDir = m_tempDir->filePath("ws_gap_fixes");
+    QDir().mkpath(wsDir);
+    QString err;
+    QVERIFY2(ws.registerAndOpenWorkspace(wsDir, err), qPrintable(err));
+
+    const QString extSrc1 = m_tempDir->filePath("track_one.wav");
+    const QString extSrc2 = m_tempDir->filePath("track_two.wav");
+    QVERIFY(createTestWav(extSrc1, 48000.0, 24000));
+    QVERIFY(createTestWav(extSrc2, 48000.0, 24000));
+
+    QCOMPARE(ws.importFile(extSrc1).status, ImportResultStatus::Imported);
+    QCOMPARE(ws.importFile(extSrc2).status, ImportResultStatus::Imported);
+
+    // Item 25: adoptSave rollback succeeds even after renameWorkspaceFile + moveWorkspaceFile
+    QString baseSaveId;
+    QVERIFY2(ws.createSave("Baseline before rename/move", baseSaveId, err), qPrintable(err));
+    QVERIFY2(ws.renameWorkspaceFile("track_one.wav", "renamed_one.wav", err), qPrintable(err));
+    QVERIFY2(ws.moveWorkspaceFile("renamed_one.wav", "Disc1", err), qPrintable(err));
+    QVERIFY(QFile::exists(wsDir + "/Disc1/renamed_one.wav"));
+    QVERIFY(!QFile::exists(wsDir + "/track_one.wav"));
+
+    const RollbackResult rb = ws.adoptSave(baseSaveId);
+    QVERIFY2(rb.success, qPrintable(rb.errorMessage));
+    QVERIFY(QFile::exists(wsDir + "/track_one.wav"));
+    QVERIFY(!QFile::exists(wsDir + "/Disc1/renamed_one.wav"));
+
+    // Item 26: External modification persists externallyModified badge + refreshes Deck metadata
+    QVERIFY(ctrl.loadTrack("A", wsDir + "/track_one.wav"));
+    {
+        TrackMetadata extMeta;
+        extMeta.title = "Externally Edited Title";
+        extMeta.artist = "External Artist";
+        std::string tagErr;
+        QVERIFY(MetadataReader::writeUserTags((wsDir + "/track_one.wav").toStdString(), extMeta, tagErr) == TagWriteStatus::Success);
+    }
+    const QStringList modMsgs = ws.verifyWorkspaceIntegrity();
+    QVERIFY(!modMsgs.isEmpty());
+    // Badge persists across verifyWorkspaceIntegrity -> listWorkspaceFiles!
+    const auto entriesAfterVerify = ws.listWorkspaceFiles();
+    bool flagged = false;
+    for (const auto& e : entriesAfterVerify) {
+        if (e.relativePath == "track_one.wav") {
+            flagged = e.externallyModified;
+        }
+    }
+    QVERIFY(flagged);
+    const auto metaPtr = ctrl.deckManager()->deck('A')->metadata();
+    QVERIFY(metaPtr != nullptr);
+    QCOMPARE(QString::fromStdString(metaPtr->title), QString("Externally Edited Title"));
+
+    ws.acknowledgeExternalModifications();
+    for (const auto& e : ws.listWorkspaceFiles()) {
+        if (e.relativePath == "track_one.wav") {
+            QVERIFY(!e.externallyModified);
+        }
+    }
+
+    // Item 27: Targeted playback stop only stops the deck holding the modified file
+    QVERIFY(ctrl.loadTrack("A", wsDir + "/track_one.wav"));
+    QVERIFY(ctrl.loadTrack("B", wsDir + "/track_two.wav"));
+    ctrl.play("A");
+    ctrl.play("B");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Playing);
+
+    QVERIFY2(ws.renameWorkspaceFile("track_one.wav", "renamed_targeted.wav", err), qPrintable(err));
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Stopped);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Playing);
+    ctrl.stop("B");
+
+    // Item 28: Hard-link rejection on rename, move, and delete
+    const QString hlTarget = wsDir + "/hardlink_target.wav";
+    QVERIFY(::link((wsDir + "/track_two.wav").toUtf8().constData(), hlTarget.toUtf8().constData()) == 0);
+    ws.refreshIndexAfterInternalWrite();
+    QString hlErr;
+    QVERIFY(!ws.renameWorkspaceFile("hardlink_target.wav", "hl_renamed.wav", hlErr));
+    QVERIFY(!ws.moveWorkspaceFile("hardlink_target.wav", "Sub", hlErr));
+    QVERIFY(!ws.deleteWorkspaceFile("hardlink_target.wav", hlErr));
+    ::unlink(hlTarget.toUtf8().constData());
 }
 
 QTEST_GUILESS_MAIN(TestWorkspaceV381)

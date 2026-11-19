@@ -24,6 +24,7 @@ private slots:
     void testStructuredJsonlExport();
     void testQueryFilterAndSearch();
     void testSys05OperationRetentionAndCascadePurge();
+    void testXdgStatePathJsonlFilterParityAndOrphanPurge();
     void cleanupTestCase();
 
 private:
@@ -501,6 +502,103 @@ void TestLogService::testSys05OperationRetentionAndCascadePurge()
         fParent.parentOperationId = albumOpId;
         QCOMPARE(repo.queryEvents(fParent).size(), 0u);
     }
+
+    repo.close();
+}
+
+void TestLogService::testXdgStatePathJsonlFilterParityAndOrphanPurge()
+{
+    // 1. Default database path uses XDG_STATE_HOME/desk32/operation_logs.db (Item 10)
+    const QByteArray prevXdg = qgetenv("XDG_STATE_HOME");
+    const QString customStateDir = m_tempDir.path() + "/xdg_state_test";
+    qputenv("XDG_STATE_HOME", customStateDir.toUtf8());
+    const QString expectedDb = customStateDir + "/desk32/operation_logs.db";
+    QCOMPARE(LogService::defaultDatabasePath(), expectedDb);
+
+    LogService::instance().stop();
+    QVERIFY(LogService::instance().start(""));
+    QVERIFY(QFile::exists(expectedDb));
+    LogService::instance().stop();
+
+    if (prevXdg.isEmpty()) {
+        qunsetenv("XDG_STATE_HOME");
+    } else {
+        qputenv("XDG_STATE_HOME", prevXdg);
+    }
+
+    // 2. JSONL RFC-8259 escaping + full LogFilter parity + orphan child purge (Item 11)
+    LogRepository repo("TestJsonlFilterOrphanConn");
+    const QString repoDb = m_tempDir.path() + "/test_jsonl_filter_orphan.db";
+    QVERIFY(repo.open(repoDb));
+
+    QDateTime now = QDateTime::currentDateTimeUtc();
+    std::vector<LogEvent> events;
+
+    LogEvent specialEv;
+    specialEv.operationId = "op-special-1";
+    specialEv.parentOperationId = "parent-1";
+    specialEv.timestampUtc = now.addSecs(-5).toString(Qt::ISODateWithMs).toStdString();
+    specialEv.localUtcOffset = "+09:00";
+    specialEv.category = "Render";
+    specialEv.operation = "TrackWrite";
+    specialEv.status = "Failed";
+    specialEv.targetType = "AudioFile";
+    specialEv.target = "dir/song \"quoted\"\\slash.wav";
+    specialEv.message = "Line1\nLine2\t\"quoted\"\\backslash";
+    specialEv.errorCode = 4001;
+    specialEv.detailsJson = "{\"detail\":\"ok\"}";
+    specialEv.durationMs = 12.5;
+    events.push_back(specialEv);
+
+    LogEvent orphanOld;
+    orphanOld.operationId = "op-orphan-child";
+    orphanOld.parentOperationId = "nonexistent-root-999";
+    orphanOld.timestampUtc = now.addDays(-60).toString(Qt::ISODateWithMs).toStdString();
+    orphanOld.localUtcOffset = "+00:00";
+    orphanOld.category = "Workspace";
+    orphanOld.operation = "ChildStep";
+    orphanOld.status = "Success";
+    orphanOld.targetType = "WorkspaceFile";
+    orphanOld.target = "old.wav";
+    orphanOld.message = "Old orphan child";
+    orphanOld.errorCode = 0;
+    orphanOld.detailsJson = "{}";
+    events.push_back(orphanOld);
+
+    QVERIFY(repo.insertBatch(events));
+
+    // Verify all 8 filter fields work identically in exportToJsonl()
+    LogFilter f;
+    f.category = "Render";
+    f.status = "Failed";
+    f.operationId = "op-special-1";
+    f.parentOperationId = "parent-1";
+    f.target = "quoted";
+    f.searchText = "Line2";
+    const QString jsonlPath = m_tempDir.path() + "/filtered_special.jsonl";
+    QVERIFY(repo.exportToJsonl(jsonlPath, f));
+
+    QFile jf(jsonlPath);
+    QVERIFY(jf.open(QIODevice::ReadOnly));
+    const QByteArray rawLine = jf.readAll().trimmed();
+    QVERIFY(!rawLine.contains('\n')); // Properly escaped single-line JSONL
+    QJsonParseError perr{};
+    const QJsonDocument parsed = QJsonDocument::fromJson(rawLine, &perr);
+    QCOMPARE(perr.error, QJsonParseError::NoError);
+    QVERIFY(parsed.isObject());
+    const QJsonObject ro = parsed.object();
+    QCOMPARE(ro["operation_id"].toString(), QString("op-special-1"));
+    QCOMPARE(ro["parent_operation_id"].toString(), QString("parent-1"));
+    QCOMPARE(ro["error_code"].toInt(), 4001);
+    QCOMPARE(ro["message"].toString(), QString("Line1\nLine2\t\"quoted\"\\backslash"));
+
+    // Purge >30 days removes the orphan child event while keeping the recent special event
+    const int purged = repo.purgeOldOperations(30, 100000);
+    QVERIFY(purged >= 1);
+    QCOMPARE(repo.countEvents(), 1);
+    LogFilter remF;
+    remF.operationId = "op-special-1";
+    QCOMPARE(repo.queryEvents(remF).size(), 1u);
 
     repo.close();
 }

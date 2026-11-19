@@ -239,8 +239,10 @@ void WorkspaceManager::resetForTesting() {
         m_openWorkspacePath.clear();
         m_lastError.clear();
         m_externalModificationCount = 0;
+        m_externalChangeDetails.clear();
         m_faultCallback = nullptr;
         m_stopPlaybackCallback = nullptr;
+        m_metadataReloadCallback = nullptr;
         if (!m_customConfigPath.isEmpty()) {
             QFile::remove(m_customConfigPath);
         }
@@ -257,6 +259,7 @@ void WorkspaceManager::simulateAppRestartForTesting() {
         m_openWorkspacePath.clear();
         m_lastError.clear();
         m_externalModificationCount = 0;
+        m_externalChangeDetails.clear();
     }
     emit workspaceStateChanged();
 }
@@ -269,6 +272,31 @@ void WorkspaceManager::setTestFaultCallback(FaultCallback cb) {
 void WorkspaceManager::setStopPlaybackCallback(StopPlaybackCallback cb) {
     std::lock_guard<std::mutex> lock(m_stateMutex);
     m_stopPlaybackCallback = std::move(cb);
+}
+
+void WorkspaceManager::setMetadataReloadCallback(MetadataReloadCallback cb) {
+    std::lock_guard<std::mutex> lock(m_stateMutex);
+    m_metadataReloadCallback = std::move(cb);
+}
+
+void WorkspaceManager::refreshIndexAfterInternalWrite() {
+    if (!hasOpenWorkspace()) return;
+    runOnWorkerThread([this]() {
+        std::vector<WorkspaceFileEntry> current;
+        scanCurrentWorkspaceLocked(current, false);
+        saveStateIndexLocked(current);
+        refreshWatcherLocked();
+    });
+    emit workspaceContentsChanged();
+}
+
+void WorkspaceManager::acknowledgeExternalModifications() {
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_externalChangeDetails.clear();
+        m_externalModificationCount = 0;
+    }
+    emit workspaceContentsChanged();
 }
 
 bool WorkspaceManager::triggerFaultIfSet(WorkspaceFaultPoint point, const QString& detailPath) const {
@@ -816,6 +844,8 @@ bool WorkspaceManager::openWorkspace(const QString& dirPath, QString& outError) 
         m_lockFd = acquiredFd;
         m_selectionFinalized = true;
         m_readOnlyMode = false;
+        m_externalChangeDetails.clear();
+        m_externalModificationCount = 0;
 
         regIt->lastUsedUtc = utcIsoNow();
         saveRegisteredWorkspacesLocked(registered);
@@ -900,6 +930,7 @@ void WorkspaceManager::closeWorkspaceForShutdown() {
         }
         m_openWorkspacePath.clear();
         m_readOnlyMode = true;
+        m_externalChangeDetails.clear();
     }
 
     if (m_watcher) {
@@ -1283,6 +1314,7 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
         curMap[e.relativePath] = &e;
     }
 
+    QStringList modifiedAbsPaths;
     for (const auto& [relPath, expected] : prevIndex) {
         auto it = curMap.find(relPath);
         if (it == curMap.end()) {
@@ -1291,6 +1323,7 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
             {
                 std::lock_guard<std::mutex> lock(m_stateMutex);
                 ++m_externalModificationCount;
+                m_externalChangeDetails[relPath] = msg;
             }
             core::log::LogService::instance().log(
                 "Workspace", "ExternalModification", "Warning", msg, "WorkspaceFile", relPath,
@@ -1300,9 +1333,11 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
         } else if (it->second->sha256 != expected.first) {
             const QString msg = QString("External modification detected (SHA-256 changed) for workspace file: %1").arg(relPath);
             outMessages.append(msg);
+            modifiedAbsPaths.append(it->second->absolutePath);
             {
                 std::lock_guard<std::mutex> lock(m_stateMutex);
                 ++m_externalModificationCount;
+                m_externalChangeDetails[relPath] = msg;
             }
             core::log::LogService::instance().log(
                 "Workspace", "ExternalModification", "Warning", msg, "WorkspaceFile", relPath,
@@ -1310,6 +1345,17 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
                     .arg(expected.first, it->second->sha256),
                 "", "", core::log::ErrorCode::WorkspaceExternalModification, 0.0);
             emit externalModificationDetected(relPath, msg);
+        }
+    }
+
+    if (!modifiedAbsPaths.isEmpty()) {
+        MetadataReloadCallback reloadCb;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            reloadCb = m_metadataReloadCallback;
+        }
+        if (reloadCb) {
+            reloadCb(modifiedAbsPaths);
         }
     }
 
@@ -1375,6 +1421,12 @@ std::vector<WorkspaceFileEntry> WorkspaceManager::listWorkspaceFiles(const QStri
         std::map<QString, std::pair<QString, qint64>> prevIndex;
         loadStateIndexLocked(prevIndex);
 
+        std::map<QString, QString> persistedExtChanges;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            persistedExtChanges = m_externalChangeDetails;
+        }
+
         std::vector<WorkspaceFileEntry> filtered;
         const QString cleanSub = QDir::cleanPath(relativeSubDir);
         const bool filterBySub = !cleanSub.isEmpty() && cleanSub != QStringLiteral(".");
@@ -1387,6 +1439,12 @@ std::vector<WorkspaceFileEntry> WorkspaceManager::listWorkspaceFiles(const QStri
             if (it != prevIndex.end() && it->second.first != e.sha256) {
                 e.externallyModified = true;
                 e.externalChangeDetail = QStringLiteral("SHA-256 differs from last known Desk32 state");
+            } else {
+                auto extIt = persistedExtChanges.find(e.relativePath);
+                if (extIt != persistedExtChanges.end()) {
+                    e.externallyModified = true;
+                    e.externalChangeDetail = extIt->second;
+                }
             }
             filtered.push_back(std::move(e));
         }
@@ -1430,6 +1488,17 @@ QVariantMap WorkspaceManager::getFileDetails(const QString& relativePath) const 
     out["absolutePath"] = absP;
     out["sha256"] = sha;
     out["size"] = sz;
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        auto it = m_externalChangeDetails.find(relP);
+        if (it != m_externalChangeDetails.end()) {
+            out["externallyModified"] = true;
+            out["externalChangeDetail"] = it->second;
+        } else {
+            out["externallyModified"] = false;
+            out["externalChangeDetail"] = QString();
+        }
+    }
     out["metadata"] = metadataToVariantMap(meta);
     return out;
 }
@@ -1896,9 +1965,15 @@ bool WorkspaceManager::editFileTags(const QString& relativePath, const metadata:
         }
 
         QString wsRoot;
+        StopPlaybackCallback stopCb;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             wsRoot = m_openWorkspacePath;
+            stopCb = m_stopPlaybackCallback;
+        }
+
+        if (stopCb) {
+            stopCb(QStringList{absPath});
         }
 
         const QString fileName = QFileInfo(absPath).fileName();
@@ -1938,6 +2013,11 @@ bool WorkspaceManager::editFileTags(const QString& relativePath, const metadata:
                            .arg(relPath, QString::fromStdString(ec.message()));
             setLastError(outError);
             return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_externalChangeDetails.erase(relPath);
         }
 
         std::vector<WorkspaceFileEntry> current;
@@ -2009,6 +2089,17 @@ bool WorkspaceManager::renameWorkspaceFile(const QString& relativePath, const QS
             return false;
         }
 
+        if (!checkRegularNoHardlink(srcAbs, outError)) {
+            setLastError(outError);
+            const int32_t code = outError.contains(QStringLiteral("Hard-linked"))
+                                     ? core::log::ErrorCode::WorkspaceHardLinkRejected
+                                     : core::log::ErrorCode::WorkspaceContainmentViolation;
+            core::log::LogService::instance().log(
+                "Workspace", "RenameFile", "Failed", outError, "WorkspaceFile", srcRel,
+                "{}", "", "", code, 0.0);
+            return false;
+        }
+
         const QFileInfo srcFi(srcRel);
         const QString parentRel = srcFi.path();
         const QString dstRelCandidate = (parentRel == QStringLiteral(".") || parentRel.isEmpty())
@@ -2026,12 +2117,27 @@ bool WorkspaceManager::renameWorkspaceFile(const QString& relativePath, const QS
             return false;
         }
 
+        StopPlaybackCallback stopCb;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            stopCb = m_stopPlaybackCallback;
+        }
+        if (stopCb) {
+            stopCb(QStringList{srcAbs});
+        }
+
         std::error_code ec;
         std::filesystem::rename(srcAbs.toStdString(), dstAbs.toStdString(), ec);
         if (ec) {
             outError = QString("Rename failed: %1").arg(QString::fromStdString(ec.message()));
             setLastError(outError);
             return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_externalChangeDetails.erase(srcRel);
+            m_externalChangeDetails.erase(dstRel);
         }
 
         std::vector<WorkspaceFileEntry> current;
@@ -2062,6 +2168,17 @@ bool WorkspaceManager::moveWorkspaceFile(const QString& relativePath, const QStr
             return false;
         }
 
+        if (!checkRegularNoHardlink(srcAbs, outError)) {
+            setLastError(outError);
+            const int32_t code = outError.contains(QStringLiteral("Hard-linked"))
+                                     ? core::log::ErrorCode::WorkspaceHardLinkRejected
+                                     : core::log::ErrorCode::WorkspaceContainmentViolation;
+            core::log::LogService::instance().log(
+                "Workspace", "MoveFile", "Failed", outError, "WorkspaceFile", srcRel,
+                "{}", "", "", code, 0.0);
+            return false;
+        }
+
         QString cleanDir = targetRelativeDir.trimmed();
         while (cleanDir.startsWith('/')) cleanDir.remove(0, 1);
         while (cleanDir.endsWith('/')) cleanDir.chop(1);
@@ -2085,12 +2202,27 @@ bool WorkspaceManager::moveWorkspaceFile(const QString& relativePath, const QStr
             return false;
         }
 
+        StopPlaybackCallback stopCb;
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            stopCb = m_stopPlaybackCallback;
+        }
+        if (stopCb) {
+            stopCb(QStringList{srcAbs});
+        }
+
         std::error_code ec;
         std::filesystem::rename(srcAbs.toStdString(), dstAbs.toStdString(), ec);
         if (ec) {
             outError = QString("Move failed: %1").arg(QString::fromStdString(ec.message()));
             setLastError(outError);
             return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_externalChangeDetails.erase(srcRel);
+            m_externalChangeDetails.erase(dstRel);
         }
 
         std::vector<WorkspaceFileEntry> current;
@@ -2122,17 +2254,26 @@ bool WorkspaceManager::deleteWorkspaceFile(const QString& relativePath, QString&
         }
 
         QString wsRoot;
+        StopPlaybackCallback stopCb;
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             wsRoot = m_openWorkspacePath;
+            stopCb = m_stopPlaybackCallback;
         }
 
-        const QByteArray enc = QFile::encodeName(absPath);
-        struct stat st{};
-        if (::lstat(enc.constData(), &st) != 0 || S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) {
-            outError = QString("Only non-symlink regular workspace files may be deleted: %1").arg(relPath);
+        if (!checkRegularNoHardlink(absPath, outError)) {
             setLastError(outError);
+            const int32_t code = outError.contains(QStringLiteral("Hard-linked"))
+                                     ? core::log::ErrorCode::WorkspaceHardLinkRejected
+                                     : core::log::ErrorCode::WorkspaceContainmentViolation;
+            core::log::LogService::instance().log(
+                "Workspace", "DeleteFile", "Failed", outError, "WorkspaceFile", relPath,
+                "{}", "", "", code, 0.0);
             return false;
+        }
+
+        if (stopCb) {
+            stopCb(QStringList{absPath});
         }
 
         // Mandatory copy-on-write evacuation PRIOR to deletion
@@ -2150,6 +2291,11 @@ bool WorkspaceManager::deleteWorkspaceFile(const QString& relativePath, QString&
             return false;
         }
         removeEmptyParentDirsUpTo(wsRoot, QFileInfo(absPath).absolutePath());
+
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_externalChangeDetails.erase(relPath);
+        }
 
         std::vector<WorkspaceFileEntry> current;
         scanCurrentWorkspaceLocked(current, false);
@@ -2695,13 +2841,17 @@ RollbackResult WorkspaceManager::adoptSave(const QString& saveId) {
         std::vector<WorkspaceFileEntry> currentEntries;
         scanCurrentWorkspaceLocked(currentEntries, false);
         std::map<QString, WorkspaceFileEntry> currentMap;
+        std::map<QString, QString> currentBySha256;
         for (const auto& e : currentEntries) {
             currentMap[e.relativePath] = e;
+            if (!e.sha256.isEmpty() && !currentBySha256.count(e.sha256)) {
+                currentBySha256[e.sha256] = e.absolutePath;
+            }
         }
 
         struct RestoreSource {
             SaveManifestFile entry;
-            QString sourceFile; // either live file or .desk32/objects/<sha>
+            QString sourceFile; // either live file (even if renamed/moved) or .desk32/objects/<sha>
         };
         std::vector<RestoreSource> restorePlan;
         qint64 neededStagingBytes = 0;
@@ -2715,6 +2865,7 @@ RollbackResult WorkspaceManager::adoptSave(const QString& saveId) {
             }
             const QString objPath = wsRoot + QStringLiteral("/.desk32/objects/") + f.sha256;
             auto curIt = currentMap.find(f.relativePath);
+            auto curShaIt = currentBySha256.find(f.sha256);
             if (QFileInfo::exists(objPath)) {
                 QString objSha;
                 qint64 objSize = 0;
@@ -2732,6 +2883,10 @@ RollbackResult WorkspaceManager::adoptSave(const QString& saveId) {
                 }
             } else if (curIt != currentMap.end() && curIt->second.sha256 == f.sha256) {
                 restorePlan.push_back({f, curIt->second.absolutePath});
+            } else if (curShaIt != currentBySha256.end()) {
+                // File was moved or renamed in-place without content change
+                restorePlan.push_back({f, curShaIt->second});
+                neededStagingBytes += f.size;
             } else {
                 res.errorMessage = QString("Cannot rollback: saved version of '%1' (SHA-256 %2) is missing or externally altered.")
                                        .arg(f.relativePath, f.sha256);
@@ -2926,6 +3081,11 @@ RollbackResult WorkspaceManager::adoptSave(const QString& saveId) {
 
         if (!applyFailed) {
             cleanupStaging();
+            {
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                m_externalChangeDetails.clear();
+                m_externalModificationCount = 0;
+            }
             std::vector<WorkspaceFileEntry> finalEntries;
             scanCurrentWorkspaceLocked(finalEntries, false);
             saveStateIndexLocked(finalEntries);

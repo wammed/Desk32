@@ -9,7 +9,11 @@
 #include "engine/format/FormatConverter.hpp"
 #include "engine/memory/EpochReclaimer.hpp"
 #include "engine/routing/OutputPathRouter.hpp"
+#include <array>
 #include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 #include <algorithm>
@@ -31,6 +35,10 @@ struct DspTelemetry {
     bool reverbEnabled = false;
     double graphSampleRate = 48000.0;
     uint64_t processedFrameCount = 0;
+    double preDspPeakL = 0.0;
+    double preDspPeakR = 0.0;
+    double preDspRmsL = 0.0;
+    double preDspRmsR = 0.0;
     double masterPeakL = 0.0;
     double masterPeakR = 0.0;
     double renderTapPeakL = 0.0;
@@ -38,11 +46,17 @@ struct DspTelemetry {
     double masterRmsL = 0.0;
     double masterRmsR = 0.0;
     bool masterClipped = false;
+    bool level1SamplesIdentical = false;
+    double level1MaxAbsDiff = 0.0;
+    uint64_t level1InputHash = 0;
+    uint64_t level1OutputHash = 0;
+    uint64_t level1VerifiedBlocks = 0;
 };
 
 class AudioPipeline {
 public:
     static constexpr size_t MAX_COMMANDS_PER_BLOCK = 64; ///< Upper bound on discrete commands drained per Audio Thread block (P0-29)
+    static constexpr size_t MAX_LEVEL1_FRAMES = 4096;
 
     explicit AudioPipeline(double graphSampleRate = 48000.0)
         : m_graphSampleRate(graphSampleRate)
@@ -50,6 +64,9 @@ public:
         if (graphSampleRate != 48000.0) {
             m_paramMailbox.setSampleRate(graphSampleRate);
         }
+        m_listeningVolSmoother.configure(graphSampleRate, 10.0);
+        m_renderMonVolSmoother.configure(graphSampleRate, 10.0);
+        m_levelMatchSmoother.configure(graphSampleRate, 10.0);
         m_cachedTelemetry.graphSampleRate = graphSampleRate;
         for (auto& buf : m_telemetryBuffers) {
             buf.graphSampleRate = graphSampleRate;
@@ -77,6 +94,9 @@ public:
     void setGraphSampleRate(double sampleRate) {
         m_graphSampleRate.store(sampleRate, std::memory_order_relaxed);
         m_paramMailbox.setSampleRate(sampleRate);
+        m_listeningVolSmoother.configure(sampleRate, 10.0);
+        m_renderMonVolSmoother.configure(sampleRate, 10.0);
+        m_levelMatchSmoother.configure(sampleRate, 10.0);
 
         // Safely deep-clone Master Chain under ReadGuard protection, then configure and swap
         std::unique_ptr<AudioChain> newMaster;
@@ -149,6 +169,22 @@ public:
         return currentTelemetry().masterPeakR;
     }
 
+    [[nodiscard]] double preDspPeakL() const noexcept {
+        return currentTelemetry().preDspPeakL;
+    }
+
+    [[nodiscard]] double preDspPeakR() const noexcept {
+        return currentTelemetry().preDspPeakR;
+    }
+
+    [[nodiscard]] double preDspRmsL() const noexcept {
+        return currentTelemetry().preDspRmsL;
+    }
+
+    [[nodiscard]] double preDspRmsR() const noexcept {
+        return currentTelemetry().preDspRmsR;
+    }
+
     [[nodiscard]] double masterRmsL() const noexcept {
         return currentTelemetry().masterRmsL;
     }
@@ -159,6 +195,18 @@ public:
 
     [[nodiscard]] bool masterClipped() const noexcept {
         return currentTelemetry().masterClipped;
+    }
+
+    [[nodiscard]] bool level1SamplesIdentical() const noexcept {
+        return currentTelemetry().level1SamplesIdentical;
+    }
+
+    [[nodiscard]] double level1MaxAbsDiff() const noexcept {
+        return currentTelemetry().level1MaxAbsDiff;
+    }
+
+    [[nodiscard]] uint64_t level1VerifiedBlocks() const noexcept {
+        return m_level1VerifiedBlocks.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] uint64_t readerExhaustionDrops() const noexcept {
@@ -227,6 +275,64 @@ public:
         if (!newChain || newChain->purpose() != ChainPurpose::ListeningCorrectionChain) return;
         newChain->configure(m_graphSampleRate.load(std::memory_order_relaxed));
         m_listeningReclaimer.swapChain(std::move(newChain));
+    }
+
+    /// Atomically reposition External Insert within Master Chain while preserving live node parameters and bypass states
+    bool repositionExternalInsert(size_t targetSlot, std::array<uint8_t, 7>& outNodeIndices) {
+        std::shared_ptr<AudioNode> insertClone;
+        struct TaggedNode {
+            int canonicalSlot;
+            std::shared_ptr<AudioNode> node;
+        };
+        std::vector<TaggedNode> others;
+        bool chainBypassed = false;
+        {
+            auto guard = m_masterReclaimer.enterRead();
+            if (!guard) return false;
+            chainBypassed = guard->isBypassed();
+            others.reserve(guard->nodeCount());
+            for (size_t i = 0; i < guard->nodeCount(); ++i) {
+                auto* n = guard->node(i);
+                if (!n) continue;
+                auto cloned = n->clone();
+                if (!cloned) continue;
+                const std::string& nm = n->name();
+                if (nm == "External Insert") {
+                    insertClone = std::move(cloned);
+                } else {
+                    int cs = -1;
+                    if (nm == "Master PEQ") cs = 0;
+                    else if (nm == "Graphic EQ") cs = 1;
+                    else if (nm == "HPF / LPF") cs = 2;
+                    else if (nm == "Compressor") cs = 3;
+                    else if (nm == "Reverb") cs = 5;
+                    else if (nm == "Peak Limiter") cs = 6;
+                    others.push_back({cs, std::move(cloned)});
+                }
+            }
+        }
+        if (!insertClone) return false;
+
+        auto newChain = std::make_unique<AudioChain>("Master Chain", ChainPurpose::MasteringChain);
+        newChain->setBypassed(chainBypassed);
+        const size_t clampedSlot = std::min(targetSlot, others.size());
+        uint8_t outIdx = 0;
+        outNodeIndices.fill(0xFF);
+        for (size_t i = 0; i <= others.size(); ++i) {
+            if (i == clampedSlot) {
+                newChain->appendNode(insertClone);
+                outNodeIndices[4] = outIdx++;
+            }
+            if (i < others.size()) {
+                if (others[i].canonicalSlot >= 0 && others[i].canonicalSlot < 7) {
+                    outNodeIndices[static_cast<size_t>(others[i].canonicalSlot)] = outIdx;
+                }
+                newChain->appendNode(std::move(others[i].node));
+                ++outIdx;
+            }
+        }
+        m_masterReclaimer.swapChain(std::move(newChain));
+        return true;
     }
 
     /// Control Thread DSP configuration methods (P0-14, P0-21):
@@ -320,19 +426,52 @@ public:
         drainParameterCommands(masterGuard.chain, listeningGuard.chain);
         drainParameterMailbox(masterGuard.chain, listeningGuard.chain);
 
+        // Pre-DSP Metering & Level 1 Input Snapshot (Strictly zero heap allocation)
+        double prePeakL = 0.0;
+        double prePeakR = 0.0;
+        double preSumSqL = 0.0;
+        double preSumSqR = 0.0;
+        uint64_t inputHash = 14695981039346656037ULL;
+        const size_t refFrames = std::min(frameCount, MAX_LEVEL1_FRAMES);
+        for (size_t i = 0; i < frameCount; ++i) {
+            const double lVal = left[i];
+            const double rVal = right[i];
+            prePeakL = std::max(prePeakL, std::abs(lVal));
+            prePeakR = std::max(prePeakR, std::abs(rVal));
+            preSumSqL += lVal * lVal;
+            preSumSqR += rVal * rVal;
+            uint64_t bitsL = 0;
+            uint64_t bitsR = 0;
+            std::memcpy(&bitsL, &lVal, sizeof(bitsL));
+            std::memcpy(&bitsR, &rVal, sizeof(bitsR));
+            inputHash ^= bitsL;
+            inputHash *= 1099511628211ULL;
+            inputHash ^= bitsR;
+            inputHash *= 1099511628211ULL;
+            if (i < refFrames) {
+                m_level1RefL[i] = lVal;
+                m_level1RefR[i] = rVal;
+            }
+        }
+        const double preRmsL = frameCount > 0 ? std::sqrt(preSumSqL / static_cast<double>(frameCount)) : 0.0;
+        const double preRmsR = frameCount > 0 ? std::sqrt(preSumSqR / static_cast<double>(frameCount)) : 0.0;
+
         double tapPeakL = 0.0;
         double tapPeakR = 0.0;
 
         if (directModeBypass) {
-            // Spec §2.6 Direct Mode: Bypass all DSP, External Insert, Listening Correction, and software gain/mute
+            // Spec §2.6 Direct Mode: Bypass all DSP, External Insert, Listening Correction, dither, and software gain/mute
             for (size_t i = 0; i < frameCount; ++i) {
                 tapPeakL = std::max(tapPeakL, std::abs(left[i]));
                 tapPeakR = std::max(tapPeakR, std::abs(right[i]));
             }
+            const bool effectiveDither = false;
             FormatConverter::convertPlanarFloat64ToPcm(
-                left, right, frameCount, outPcmBuffer, targetFormat, applyDither
+                left, right, frameCount, outPcmBuffer, targetFormat, effectiveDither
             );
-            publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR);
+            publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
+                             prePeakL, prePeakR, preRmsL, preRmsR,
+                             inputHash, refFrames, true);
             return;
         }
 
@@ -351,14 +490,27 @@ public:
         const OutputPathMode currentMode = m_outputMode.load(std::memory_order_relaxed);
         const double listenVol = m_listeningVolume.load(std::memory_order_relaxed);
         const double renderMonVol = m_renderMonitorVolume.load(std::memory_order_relaxed);
+        if (!m_smoothersInitialized.load(std::memory_order_relaxed)) {
+            m_listeningVolSmoother.reset(listenVol);
+            m_renderMonVolSmoother.reset(renderMonVol);
+            m_levelMatchSmoother.reset(monitorLevelMatchGain);
+            m_smoothersInitialized.store(true, std::memory_order_relaxed);
+        } else {
+            m_listeningVolSmoother.setTarget(listenVol);
+            m_renderMonVolSmoother.setTarget(renderMonVol);
+            m_levelMatchSmoother.setTarget(monitorLevelMatchGain);
+        }
 
         if (currentMode == OutputPathMode::RenderMonitorPath) {
             // Render Monitor Path: Strictly NO Listening Correction.
             for (size_t i = 0; i < frameCount; ++i) {
                 const double masterGainL = postTapSmootherL ? postTapSmootherL->next() : 1.0;
                 const double masterGainR = postTapSmootherR ? postTapSmootherR->next() : 1.0;
-                left[i]  *= masterGainL * monitorLevelMatchGain * renderMonVol;
-                right[i] *= masterGainR * monitorLevelMatchGain * renderMonVol;
+                (void)m_listeningVolSmoother.next();
+                const double smoothedRenderMon = m_renderMonVolSmoother.next();
+                const double smoothedLevelMatch = m_levelMatchSmoother.next();
+                left[i]  *= masterGainL * smoothedLevelMatch * smoothedRenderMon;
+                right[i] *= masterGainR * smoothedLevelMatch * smoothedRenderMon;
             }
         } else {
             // Listening Path: Route through Listening Correction (PEQ headphone/speaker correction)
@@ -369,8 +521,11 @@ public:
             for (size_t i = 0; i < frameCount; ++i) {
                 const double masterGainL = postTapSmootherL ? postTapSmootherL->next() : 1.0;
                 const double masterGainR = postTapSmootherR ? postTapSmootherR->next() : 1.0;
-                left[i]  *= masterGainL * monitorLevelMatchGain * listenVol;
-                right[i] *= masterGainR * monitorLevelMatchGain * listenVol;
+                const double smoothedListen = m_listeningVolSmoother.next();
+                (void)m_renderMonVolSmoother.next();
+                const double smoothedLevelMatch = m_levelMatchSmoother.next();
+                left[i]  *= masterGainL * smoothedLevelMatch * smoothedListen;
+                right[i] *= masterGainR * smoothedLevelMatch * smoothedListen;
             }
         }
 
@@ -380,7 +535,9 @@ public:
         );
 
         // 5. Publish Telemetry Snapshot to UI Thread (P0-26)
-        publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR);
+        publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
+                         prePeakL, prePeakR, preRmsL, preRmsR,
+                         inputHash, refFrames, false);
     }
 
 private:
@@ -489,6 +646,7 @@ private:
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
                         geqNode->applyAllCoefficients(params.geqCoefficients);
+                        geqNode->applyBandEnabled(params.geqBandEnabled);
                         appliedAny = true;
                         break;
                     }
@@ -550,25 +708,50 @@ private:
     /// Inspects up to AudioChain::MAX_NODES (strictly bounded O(N) where N <= 16, zero dynamic allocation, zero locks)
     /// and publishes the snapshot buffer via a single O(1) atomic exchange.
     void publishTelemetry(AudioChain* master, size_t frames, const double* left = nullptr, const double* right = nullptr,
-                          double renderTapPeakL = 0.0, double renderTapPeakR = 0.0) noexcept {
+                          double renderTapPeakL = 0.0, double renderTapPeakR = 0.0,
+                          double prePeakL = 0.0, double prePeakR = 0.0,
+                          double preRmsL = 0.0, double preRmsR = 0.0,
+                          uint64_t inputHash = 0, size_t refFrames = 0,
+                          bool directBypass = false) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
         t.processedFrameCount += frames;
         t.renderTapPeakL = renderTapPeakL;
         t.renderTapPeakR = renderTapPeakR;
+        t.preDspPeakL = prePeakL;
+        t.preDspPeakR = prePeakR;
+        t.preDspRmsL = preRmsL;
+        t.preDspRmsR = preRmsR;
 
         double peakL = 0.0;
         double peakR = 0.0;
         double sumSqL = 0.0;
         double sumSqR = 0.0;
+        double maxAbsDiff = 0.0;
+        uint64_t outputHash = 14695981039346656037ULL;
         if (left && right && frames > 0) {
             for (size_t i = 0; i < frames; ++i) {
-                double al = std::abs(left[i]);
-                double ar = std::abs(right[i]);
+                const double lVal = left[i];
+                const double rVal = right[i];
+                double al = std::abs(lVal);
+                double ar = std::abs(rVal);
                 if (al > peakL) peakL = al;
                 if (ar > peakR) peakR = ar;
-                sumSqL += left[i] * left[i];
-                sumSqR += right[i] * right[i];
+                sumSqL += lVal * lVal;
+                sumSqR += rVal * rVal;
+
+                uint64_t bitsL = 0;
+                uint64_t bitsR = 0;
+                std::memcpy(&bitsL, &lVal, sizeof(bitsL));
+                std::memcpy(&bitsR, &rVal, sizeof(bitsR));
+                outputHash ^= bitsL;
+                outputHash *= 1099511628211ULL;
+                outputHash ^= bitsR;
+                outputHash *= 1099511628211ULL;
+                if (i < refFrames) {
+                    maxAbsDiff = std::max(maxAbsDiff, std::abs(lVal - m_level1RefL[i]));
+                    maxAbsDiff = std::max(maxAbsDiff, std::abs(rVal - m_level1RefR[i]));
+                }
             }
         }
         t.masterPeakL = peakL;
@@ -576,6 +759,16 @@ private:
         t.masterRmsL = frames > 0 ? std::sqrt(sumSqL / static_cast<double>(frames)) : 0.0;
         t.masterRmsR = frames > 0 ? std::sqrt(sumSqR / static_cast<double>(frames)) : 0.0;
         t.masterClipped = (peakL >= 1.0 || peakR >= 1.0);
+        t.level1InputHash = inputHash;
+        t.level1OutputHash = outputHash;
+        t.level1MaxAbsDiff = maxAbsDiff;
+        const bool identical = (frames > 0) && (inputHash == outputHash) && (maxAbsDiff == 0.0);
+        t.level1SamplesIdentical = identical;
+        if (directBypass && identical) {
+            t.level1VerifiedBlocks = m_level1VerifiedBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
+        } else {
+            t.level1VerifiedBlocks = m_level1VerifiedBlocks.load(std::memory_order_relaxed);
+        }
 
         if (master && !master->isBypassed()) {
             for (size_t i = 0; i < master->nodeCount(); ++i) {
@@ -629,6 +822,14 @@ private:
     alignas(64) std::atomic<uint64_t> m_mailboxConsumed{0};
     alignas(64) std::atomic<uint64_t> m_mailboxApplied{0};
     alignas(64) std::atomic<uint64_t> m_lastConsumedSequence{0};
+
+    dsp::ParameterSmoother m_listeningVolSmoother{1.0, 10.0, 48000.0};
+    dsp::ParameterSmoother m_renderMonVolSmoother{1.0, 10.0, 48000.0};
+    dsp::ParameterSmoother m_levelMatchSmoother{1.0, 10.0, 48000.0};
+    std::atomic<bool> m_smoothersInitialized{false};
+    alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefL{};
+    alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefR{};
+    alignas(64) std::atomic<uint64_t> m_level1VerifiedBlocks{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;

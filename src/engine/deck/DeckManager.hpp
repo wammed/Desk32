@@ -114,10 +114,24 @@ public:
             hadSeek = true;
             tgt->play();
         } else {
-            // Normal mode (Section 2.3):
-            // Strictly maintains each deck's independent transport state and position.
-            // Do NOT forcefully trigger play() on target deck.
+            // Normal mode (Section 2.3 & §2.7.5):
+            // Non-Folder-Session decks maintain each deck's independent transport state and position.
+            // Folder Session decks pause and retain session state/position when deselected, and resume when reselected (§2.7.5).
+            if (src->folderSession().isActive() && src->isPlaying()) {
+                src->pause();
+                src->setPausedByNormalSwitch(true);
+            }
+            if (tgt->folderSession().isActive() && tgt->wasPausedByNormalSwitch()) {
+                tgt->setPausedByNormalSwitch(false);
+                tgt->play();
+            }
         }
+
+        // Arm short 5 ms RT-safe de-click ramp on active deck transition (§2.3 / Plan §6)
+        const double rate = m_graphRate.load(std::memory_order_relaxed);
+        const size_t rampFrames = static_cast<size_t>(std::clamp(rate * 0.005, 32.0, 1024.0));
+        m_switchRampTotalFrames.store(rampFrames, std::memory_order_release);
+        m_switchRampRemainingFrames.store(rampFrames, std::memory_order_release);
 
         m_previousDeckId.store(sourceId, std::memory_order_relaxed);
         m_activeDeckId.store(targetId, std::memory_order_relaxed);
@@ -174,6 +188,20 @@ public:
             std::fill_n(outRight, frames, 0.0);
         }
 
+        // Apply short RT-safe de-click ramp across active deck transition (0 dynamic allocations)
+        size_t remRamp = m_switchRampRemainingFrames.load(std::memory_order_acquire);
+        if (remRamp > 0 && frames > 0) {
+            const size_t totalRamp = std::max<size_t>(1, m_switchRampTotalFrames.load(std::memory_order_acquire));
+            const size_t toRamp = std::min(frames, remRamp);
+            const size_t elapsedBefore = (totalRamp >= remRamp) ? (totalRamp - remRamp) : 0;
+            for (size_t i = 0; i < toRamp; ++i) {
+                const double gain = static_cast<double>(elapsedBefore + i + 1) / static_cast<double>(totalRamp);
+                outLeft[i] *= gain;
+                outRight[i] *= gain;
+            }
+            m_switchRampRemainingFrames.store(remRamp - toRamp, std::memory_order_release);
+        }
+
         // Advance any playing background decks without heap allocation
         for (auto& d : m_decks) {
             if (d.get() != active && d->state() == TransportState::Playing) {
@@ -203,6 +231,8 @@ private:
     std::atomic<double> m_graphRate{48000.0};
     std::atomic<char> m_activeDeckId{'A'};
     std::atomic<char> m_previousDeckId{'B'};
+    std::atomic<size_t> m_switchRampRemainingFrames{0};
+    std::atomic<size_t> m_switchRampTotalFrames{240};
     std::array<std::unique_ptr<ReferenceDeck>, 4> m_decks;
 
     // Pre-allocated Audio Thread scratch buffers for background deck advancement (zero RT heap allocation)

@@ -10,6 +10,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswresample/swresample.h>
 #include <libavutil/opt.h>
+#include <libavutil/error.h>
 #include <libavutil/channel_layout.h>
 }
 
@@ -50,6 +51,7 @@ void FFmpegAudioDecoder::cleanup()
     m_audioStreamIndex = -1;
     m_currentFrame = 0;
     m_isOpen = false;
+    m_hasDecodeError = false;
 }
 
 void FFmpegAudioDecoder::close()
@@ -290,6 +292,13 @@ bool FFmpegAudioDecoder::decodeNextPacket()
                 inSamples
             );
 
+            if (convertedFrames < 0) {
+                av_frame_unref(m_decodedFrame);
+                m_hasDecodeError = true;
+                m_lastError = "Sample conversion error during mid-stream decode";
+                return false;
+            }
+
             av_frame_unref(m_decodedFrame);
 
             if (convertedFrames > 0) {
@@ -300,7 +309,7 @@ bool FFmpegAudioDecoder::decodeNextPacket()
         }
 
         if (ret == AVERROR_EOF) {
-            return false; // End of stream
+            return false; // Normal end of stream
         }
 
         if (ret == AVERROR(EAGAIN)) {
@@ -316,20 +325,41 @@ bool FFmpegAudioDecoder::decodeNextPacket()
             }
             m_totalReadPacketNs += readNs;
 
-            if (readRet < 0) {
-                // Flush decoder on EOF
+            if (readRet == AVERROR_EOF) {
+                // Flush decoder on normal EOF
                 avcodec_send_packet(m_codecCtx, nullptr);
                 continue;
             }
+            if (readRet < 0) {
+                char errBuf[AV_ERROR_MAX_STRING_SIZE]{};
+                av_strerror(readRet, errBuf, sizeof(errBuf));
+                m_hasDecodeError = true;
+                m_lastError = std::string("Unrecoverable mid-stream read error: ") + errBuf;
+                return false;
+            }
 
             if (m_packet->stream_index == m_audioStreamIndex) {
-                avcodec_send_packet(m_codecCtx, m_packet);
+                int sendRet = avcodec_send_packet(m_codecCtx, m_packet);
+                if (sendRet < 0 && sendRet != AVERROR(EAGAIN) && sendRet != AVERROR_EOF) {
+                    char errBuf[AV_ERROR_MAX_STRING_SIZE]{};
+                    av_strerror(sendRet, errBuf, sizeof(errBuf));
+                    av_packet_unref(m_packet);
+                    m_hasDecodeError = true;
+                    m_lastError = std::string("Unrecoverable mid-stream packet decode error: ") + errBuf;
+                    return false;
+                }
             }
             av_packet_unref(m_packet);
             continue;
         }
 
         // Unrecoverable decode error
+        {
+            char errBuf[AV_ERROR_MAX_STRING_SIZE]{};
+            av_strerror(ret, errBuf, sizeof(errBuf));
+            m_hasDecodeError = true;
+            m_lastError = std::string("Unrecoverable mid-stream decode error: ") + errBuf;
+        }
         return false;
     }
 }
@@ -380,6 +410,7 @@ bool FFmpegAudioDecoder::seek(int64_t targetFrame)
     }
 
     avcodec_flush_buffers(m_codecCtx);
+    m_hasDecodeError = false;
     m_fifoReadPos = 0;
     m_fifoWritePos = 0;
     m_currentFrame = targetFrame;

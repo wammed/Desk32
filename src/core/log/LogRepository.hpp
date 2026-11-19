@@ -7,6 +7,10 @@
 #include <QFile>
 #include <QTextStream>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
 #include <vector>
 #include <string>
 #include <memory>
@@ -224,6 +228,7 @@ public:
         }
 
         std::vector<QString> rootsToPurge;
+        qint64 purgedRows = 0;
 
         // 1. Collect root operations older than maxRetentionDays
         QDateTime cutoff = QDateTime::currentDateTimeUtc().addDays(-maxRetentionDays);
@@ -283,36 +288,51 @@ public:
             return 0;
         }
 
-        if (rootsToPurge.empty()) {
-            m_db.commit();
+        if (!rootsToPurge.empty()) {
+            // 3. Atomically delete all events belonging to the root operations and all child operations via recursive CTE
+            QSqlQuery qDelete(m_db);
+            qDelete.prepare(R"(
+                WITH RECURSIVE op_tree(op) AS (
+                    SELECT ? AS op
+                    UNION
+                    SELECT l.operation_id
+                    FROM operation_logs l
+                    JOIN op_tree t ON l.parent_operation_id = t.op
+                )
+                DELETE FROM operation_logs
+                WHERE operation_id IN (SELECT op FROM op_tree)
+                   OR parent_operation_id IN (SELECT op FROM op_tree)
+            )");
+
+            for (const auto& rootOp : rootsToPurge) {
+                qDelete.bindValue(0, rootOp);
+                if (!qDelete.exec()) {
+                    m_lastError = qDelete.lastError().text().toStdString();
+                    m_db.rollback();
+                    return 0;
+                }
+                purgedRows += qDelete.numRowsAffected();
+            }
+        }
+
+        // 4. Purge orphan child events older than retention cutoff whose parent operation is absent
+        QSqlQuery qOrphans(m_db);
+        qOrphans.prepare(R"(
+            DELETE FROM operation_logs
+            WHERE parent_operation_id IS NOT NULL
+              AND parent_operation_id != ''
+              AND timestamp_utc < ?
+              AND parent_operation_id NOT IN (
+                  SELECT operation_id FROM operation_logs
+              )
+        )");
+        qOrphans.addBindValue(cutoffStr);
+        if (!qOrphans.exec()) {
+            m_lastError = qOrphans.lastError().text().toStdString();
+            m_db.rollback();
             return 0;
         }
-
-        // 3. Atomically delete all events belonging to the root operations and all child operations via recursive CTE
-        int purgedRows = 0;
-        QSqlQuery qDelete(m_db);
-        qDelete.prepare(R"(
-            WITH RECURSIVE op_tree(op) AS (
-                SELECT ? AS op
-                UNION
-                SELECT l.operation_id
-                FROM operation_logs l
-                JOIN op_tree t ON l.parent_operation_id = t.op
-            )
-            DELETE FROM operation_logs
-            WHERE operation_id IN (SELECT op FROM op_tree)
-               OR parent_operation_id IN (SELECT op FROM op_tree)
-        )");
-
-        for (const auto& rootOp : rootsToPurge) {
-            qDelete.bindValue(0, rootOp);
-            if (!qDelete.exec()) {
-                m_lastError = qDelete.lastError().text().toStdString();
-                m_db.rollback();
-                return 0;
-            }
-            purgedRows += qDelete.numRowsAffected();
-        }
+        purgedRows += qOrphans.numRowsAffected();
 
         if (!m_db.commit()) {
             m_lastError = m_db.lastError().text().toStdString();
@@ -320,7 +340,7 @@ public:
             return 0;
         }
 
-        return purgedRows;
+        return static_cast<int>(purgedRows);
     }
 
     /// Enforce retention policy per Decision D-1 and SYS-05.
@@ -339,41 +359,7 @@ public:
                       "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
                       "FROM operation_logs WHERE 1=1";
         QList<QVariant> binds;
-
-        if (!filter.fromUtc.empty()) {
-            sql += " AND timestamp_utc >= ?";
-            binds.append(QString::fromStdString(filter.fromUtc));
-        }
-        if (!filter.toUtc.empty()) {
-            sql += " AND timestamp_utc <= ?";
-            binds.append(QString::fromStdString(filter.toUtc));
-        }
-        if (!filter.category.empty()) {
-            sql += " AND category = ?";
-            binds.append(QString::fromStdString(filter.category));
-        }
-        if (!filter.status.empty()) {
-            sql += " AND status = ?";
-            binds.append(QString::fromStdString(filter.status));
-        }
-        if (!filter.operationId.empty()) {
-            sql += " AND operation_id = ?";
-            binds.append(QString::fromStdString(filter.operationId));
-        }
-        if (!filter.parentOperationId.empty()) {
-            sql += " AND parent_operation_id = ?";
-            binds.append(QString::fromStdString(filter.parentOperationId));
-        }
-        if (!filter.target.empty()) {
-            sql += " AND target LIKE ?";
-            binds.append("%" + QString::fromStdString(filter.target) + "%");
-        }
-        if (!filter.searchText.empty()) {
-            sql += " AND (message LIKE ? OR details_json LIKE ?)";
-            QString pat = "%" + QString::fromStdString(filter.searchText) + "%";
-            binds.append(pat);
-            binds.append(pat);
-        }
+        appendFilterConditions(filter, sql, binds);
 
         sql += " ORDER BY event_id DESC";
         if (filter.limit > 0) {
@@ -470,24 +456,19 @@ public:
             return false;
         }
 
-        QTextStream out(&file);
-
         QString sql = "SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset, "
                       "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
                       "FROM operation_logs WHERE 1=1";
         QList<QVariant> binds;
+        appendFilterConditions(filter, sql, binds);
 
-        if (!filter.category.empty()) {
-            sql += " AND category = ?";
-            binds.append(QString::fromStdString(filter.category));
-        }
-        if (!filter.status.empty()) {
-            sql += " AND status = ?";
-            binds.append(QString::fromStdString(filter.status));
-        }
-
+        const int effectiveLimit = (filter.limit > 0 && filter.limit < limit) ? filter.limit : limit;
         sql += " ORDER BY event_id ASC LIMIT ?";
-        binds.append(limit);
+        binds.append(effectiveLimit);
+        if (filter.offset > 0) {
+            sql += " OFFSET ?";
+            binds.append(filter.offset);
+        }
 
         QSqlQuery q(m_db);
         q.prepare(sql);
@@ -501,41 +482,61 @@ public:
         }
 
         while (q.next()) {
-            int64_t eid = q.value(0).toLongLong();
-            QString opId = q.value(1).toString();
-            QString pOpId = q.value(2).isNull() ? "null" : ("\"" + q.value(2).toString() + "\"");
-            QString ts = q.value(3).toString();
-            QString off = q.value(4).toString();
-            QString cat = q.value(5).toString();
-            QString op = q.value(6).toString();
-            QString status = q.value(7).toString();
-            // Backward compatibility level: if status is Failed, level is Error
-            QString level = (status == "Failed") ? "Error" : status;
-            QString tgtType = q.value(8).toString();
-            QString tgt = q.value(9).isNull() ? "" : q.value(9).toString().replace("\"", "\\\"");
-            QString msg = q.value(10).toString().replace("\"", "\\\"").replace("\n", " ");
-            int errCode = q.value(11).toInt();
-            QString json = q.value(12).toString();
-            if (json.isEmpty() || json == "{}") json = "{}";
-            double durMs = q.value(13).toDouble();
+            const qint64 eid = q.value(0).toLongLong();
+            const QString opId = q.value(1).toString();
+            const bool hasParentOp = !q.value(2).isNull() && !q.value(2).toString().isEmpty();
+            const QString pOpId = q.value(2).toString();
+            const QString ts = q.value(3).toString();
+            const QString off = q.value(4).toString();
+            const QString cat = q.value(5).toString();
+            const QString op = q.value(6).toString();
+            const QString status = q.value(7).toString();
+            const QString level = (status == QStringLiteral("Failed")) ? QStringLiteral("Error") : status;
+            const QString tgtType = q.value(8).toString();
+            const QString tgt = q.value(9).isNull() ? QString() : q.value(9).toString();
+            const QString msg = q.value(10).toString();
+            const int errCode = q.value(11).toInt();
+            const QString rawDetails = q.value(12).toString();
+            const double durMs = q.value(13).toDouble();
 
-            out << "{\"event_id\":" << eid
-                << ",\"id\":" << eid
-                << ",\"operation_id\":\"" << opId << "\""
-                << ",\"parent_operation_id\":" << pOpId
-                << ",\"timestamp_utc\":\"" << ts << "\""
-                << ",\"local_utc_offset\":\"" << off << "\""
-                << ",\"category\":\"" << cat << "\""
-                << ",\"operation\":\"" << op << "\""
-                << ",\"status\":\"" << status << "\""
-                << ",\"level\":\"" << level << "\""
-                << ",\"target_type\":\"" << tgtType << "\""
-                << ",\"target\":\"" << tgt << "\""
-                << ",\"message\":\"" << msg << "\""
-                << ",\"error_code\":" << errCode
-                << ",\"details\":" << json
-                << ",\"details_json\":" << json
-                << ",\"duration_ms\":" << durMs << "}\n";
+            QJsonValue detailsVal = QJsonObject();
+            if (!rawDetails.isEmpty()) {
+                QJsonParseError parseErr{};
+                const QJsonDocument detailsDoc = QJsonDocument::fromJson(rawDetails.toUtf8(), &parseErr);
+                if (parseErr.error == QJsonParseError::NoError && !detailsDoc.isNull()) {
+                    detailsVal = detailsDoc.isObject() ? QJsonValue(detailsDoc.object())
+                                                       : QJsonValue(detailsDoc.array());
+                } else {
+                    detailsVal = QJsonValue(rawDetails);
+                }
+            }
+
+            QJsonObject rowObj;
+            rowObj.insert(QStringLiteral("event_id"), eid);
+            rowObj.insert(QStringLiteral("id"), eid);
+            rowObj.insert(QStringLiteral("operation_id"), opId);
+            rowObj.insert(QStringLiteral("parent_operation_id"), hasParentOp ? QJsonValue(pOpId) : QJsonValue(QJsonValue::Null));
+            rowObj.insert(QStringLiteral("timestamp_utc"), ts);
+            rowObj.insert(QStringLiteral("local_utc_offset"), off);
+            rowObj.insert(QStringLiteral("category"), cat);
+            rowObj.insert(QStringLiteral("operation"), op);
+            rowObj.insert(QStringLiteral("status"), status);
+            rowObj.insert(QStringLiteral("level"), level);
+            rowObj.insert(QStringLiteral("target_type"), tgtType);
+            rowObj.insert(QStringLiteral("target"), tgt);
+            rowObj.insert(QStringLiteral("message"), msg);
+            rowObj.insert(QStringLiteral("error_code"), errCode);
+            rowObj.insert(QStringLiteral("details"), detailsVal);
+            rowObj.insert(QStringLiteral("details_json"), detailsVal);
+            rowObj.insert(QStringLiteral("duration_ms"), durMs);
+
+            QByteArray line = QJsonDocument(rowObj).toJson(QJsonDocument::Compact);
+            line.append('\n');
+            if (file.write(line) != line.size()) {
+                m_lastError = file.errorString().toStdString();
+                file.close();
+                return false;
+            }
         }
 
         file.close();
@@ -545,6 +546,43 @@ public:
     [[nodiscard]] std::string lastError() const { return m_lastError; }
 
 private:
+    static void appendFilterConditions(const LogFilter& filter, QString& sql, QList<QVariant>& binds) {
+        if (!filter.fromUtc.empty()) {
+            sql += " AND timestamp_utc >= ?";
+            binds.append(QString::fromStdString(filter.fromUtc));
+        }
+        if (!filter.toUtc.empty()) {
+            sql += " AND timestamp_utc <= ?";
+            binds.append(QString::fromStdString(filter.toUtc));
+        }
+        if (!filter.category.empty()) {
+            sql += " AND category = ?";
+            binds.append(QString::fromStdString(filter.category));
+        }
+        if (!filter.status.empty()) {
+            sql += " AND status = ?";
+            binds.append(QString::fromStdString(filter.status));
+        }
+        if (!filter.operationId.empty()) {
+            sql += " AND operation_id = ?";
+            binds.append(QString::fromStdString(filter.operationId));
+        }
+        if (!filter.parentOperationId.empty()) {
+            sql += " AND parent_operation_id = ?";
+            binds.append(QString::fromStdString(filter.parentOperationId));
+        }
+        if (!filter.target.empty()) {
+            sql += " AND target LIKE ?";
+            binds.append("%" + QString::fromStdString(filter.target) + "%");
+        }
+        if (!filter.searchText.empty()) {
+            sql += " AND (message LIKE ? OR details_json LIKE ? OR target LIKE ? OR category LIKE ? OR CAST(error_code AS TEXT) LIKE ? OR operation_id LIKE ?)";
+            const QString pat = "%" + QString::fromStdString(filter.searchText) + "%";
+            for (int i = 0; i < 6; ++i) {
+                binds.append(pat);
+            }
+        }
+    }
     static LogEvent readEventFromQuery(const QSqlQuery& q) {
         LogEvent ev;
         ev.eventId = q.value(0).toLongLong();

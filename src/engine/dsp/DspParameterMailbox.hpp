@@ -22,8 +22,9 @@ static_assert(std::atomic<uint64_t>::is_always_lock_free, "std::atomic<uint64_t>
 /// All heavy mathematical coefficient calculations (trigonometry, exp, sqrt) are performed strictly
 /// on the Control Thread prior to publishing. Audio Thread applies precomputed coefficients in O(1).
 struct ContinuousDspParameters {
-    // 32-band Graphic EQ band gains (dB) and precomputed coefficients
+    // 32-band Graphic EQ band gains (dB), per-band enable flags, and precomputed coefficients
     std::array<float, 32> geqGains{};
+    std::array<bool, 32> geqBandEnabled{};
     uint32_t geqModifiedMask = 0; // bitmask of modified bands
     std::array<BiquadCoefficients, 32> geqCoefficients{};
 
@@ -156,19 +157,45 @@ public:
         m_staging.geqModifiedMask |= (1u << band);
 
         const double clampedGain = std::clamp(static_cast<double>(gainDb), -12.0, 12.0);
+        const double effectiveGain = m_staging.geqBandEnabled[band] ? clampedGain : 0.0;
         const double freq = std::min(GEQ_ISO_FREQS[band], m_sampleRate * 0.48);
         m_staging.geqCoefficients[band] = BiquadFilter::calculateCoefficients(
-            BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, clampedGain
+            BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, effectiveGain
         );
 
         publishStaging();
     }
 
-    // Reset all 32 GEQ bands to 0 dB (Thread-safe, P0-27 precomputed)
+    // Enable or disable an individual GEQ band without losing its gain setting
+    void setGeqBandEnabled(size_t band, bool enabled) {
+        if (band >= 32) return;
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        m_staging.geqBandEnabled[band] = enabled;
+        m_staging.geqModifiedMask |= (1u << band);
+
+        const double clampedGain = std::clamp(static_cast<double>(m_staging.geqGains[band]), -12.0, 12.0);
+        const double effectiveGain = enabled ? clampedGain : 0.0;
+        const double freq = std::min(GEQ_ISO_FREQS[band], m_sampleRate * 0.48);
+        m_staging.geqCoefficients[band] = BiquadFilter::calculateCoefficients(
+            BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, effectiveGain
+        );
+
+        publishStaging();
+    }
+
+    [[nodiscard]] bool isGeqBandEnabled(size_t band) const {
+        if (band >= 32) return false;
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        return m_staging.geqBandEnabled[band];
+    }
+
+    // Reset all 32 GEQ bands to 0 dB and re-enable (Thread-safe, P0-27 precomputed)
     void resetAllGeqBands() {
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
         m_staging.geqGains.fill(0.0f);
+        m_staging.geqBandEnabled.fill(true);
         m_staging.geqModifiedMask = 0xFFFFFFFF;
         for (size_t b = 0; b < 32; ++b) {
             const double freq = std::min(GEQ_ISO_FREQS[b], m_sampleRate * 0.48);
@@ -187,9 +214,10 @@ public:
         m_staging.geqModifiedMask = 0xFFFFFFFF;
         for (size_t b = 0; b < 32; ++b) {
             const double clampedGain = std::clamp(static_cast<double>(gains[b]), -12.0, 12.0);
+            const double effectiveGain = m_staging.geqBandEnabled[b] ? clampedGain : 0.0;
             const double freq = std::min(GEQ_ISO_FREQS[b], m_sampleRate * 0.48);
             m_staging.geqCoefficients[b] = BiquadFilter::calculateCoefficients(
-                BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, clampedGain
+                BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, effectiveGain
             );
         }
         publishStaging();
@@ -332,6 +360,9 @@ public:
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
 
+        m_listeningLeftConfigs = lBands;
+        m_listeningRightConfigs = rBands;
+
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             const auto& l = lBands[b];
             const double lFreq = std::clamp(l.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
@@ -358,6 +389,8 @@ public:
         if (index >= ParametricEQ::BANDS_PER_CHANNEL) return;
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
+        m_listeningLeftConfigs[index] = config;
+        m_listeningRightConfigs[index] = config;
         const double freq = std::clamp(config.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
         const double gain = std::clamp(config.gainDb, -24.0, 24.0);
         const double q = std::clamp(config.Q, 0.1, 20.0);
@@ -366,8 +399,68 @@ public:
         m_staging.listeningLeftEnabled[index] = config.enabled;
         m_staging.listeningRightCoefficients[index] = coeff;
         m_staging.listeningRightEnabled[index] = config.enabled;
+        m_listeningPresetConfigured = true;
         m_staging.listeningModified = true;
         publishStaging();
+    }
+
+    void setListeningBand(bool isRight, size_t index, const ParametricEQ::BandConfig& config) {
+        if (index >= ParametricEQ::BANDS_PER_CHANNEL) return;
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        const double freq = std::clamp(config.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
+        const double gain = std::clamp(config.gainDb, -24.0, 24.0);
+        const double q = std::clamp(config.Q, 0.1, 20.0);
+        auto coeff = BiquadFilter::calculateCoefficients(config.type, m_sampleRate, freq, q, gain);
+        if (isRight) {
+            m_listeningRightConfigs[index] = config;
+            m_staging.listeningRightCoefficients[index] = coeff;
+            m_staging.listeningRightEnabled[index] = config.enabled;
+        } else {
+            m_listeningLeftConfigs[index] = config;
+            m_staging.listeningLeftCoefficients[index] = coeff;
+            m_staging.listeningLeftEnabled[index] = config.enabled;
+        }
+        m_listeningPresetConfigured = true;
+        m_staging.listeningModified = true;
+        publishStaging();
+    }
+
+    void applyListeningBands(
+        const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& leftBands,
+        const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& rightBands)
+    {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        m_listeningLeftConfigs = leftBands;
+        m_listeningRightConfigs = rightBands;
+        for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+            const auto& l = leftBands[b];
+            const double lFreq = std::clamp(l.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
+            const double lGain = std::clamp(l.gainDb, -24.0, 24.0);
+            const double lQ = std::clamp(l.Q, 0.1, 20.0);
+            m_staging.listeningLeftCoefficients[b] = BiquadFilter::calculateCoefficients(l.type, m_sampleRate, lFreq, lQ, lGain);
+            m_staging.listeningLeftEnabled[b] = l.enabled;
+
+            const auto& r = rightBands[b];
+            const double rFreq = std::clamp(r.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
+            const double rGain = std::clamp(r.gainDb, -24.0, 24.0);
+            const double rQ = std::clamp(r.Q, 0.1, 20.0);
+            m_staging.listeningRightCoefficients[b] = BiquadFilter::calculateCoefficients(r.type, m_sampleRate, rFreq, rQ, rGain);
+            m_staging.listeningRightEnabled[b] = r.enabled;
+        }
+        m_listeningPresetConfigured = true;
+        m_staging.listeningModified = true;
+        publishStaging();
+    }
+
+    void currentListeningBands(
+        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& outLeft,
+        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& outRight) const
+    {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        outLeft = m_listeningLeftConfigs;
+        outRight = m_listeningRightConfigs;
     }
 
     /// Audio Thread: Mutex-free, non-blocking lock-free retrieval of published parameters (P0-29).
@@ -418,6 +511,8 @@ public:
 private:
     void initDefaultStaging() {
         m_staging = ContinuousDspParameters{};
+        m_staging.geqBandEnabled.fill(true);
+        ParametricEQ::getPresetBandConfigs("Monitor Flat", m_listeningLeftConfigs, m_listeningRightConfigs);
         m_sampleRate = 48000.0;
         recalculateAllCoefficients();
     }
@@ -426,9 +521,10 @@ private:
         // GEQ
         for (size_t b = 0; b < 32; ++b) {
             const double clampedGain = std::clamp(static_cast<double>(m_staging.geqGains[b]), -12.0, 12.0);
+            const double effectiveGain = m_staging.geqBandEnabled[b] ? clampedGain : 0.0;
             const double freq = std::min(GEQ_ISO_FREQS[b], m_sampleRate * 0.48);
             m_staging.geqCoefficients[b] = BiquadFilter::calculateCoefficients(
-                BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, clampedGain
+                BiquadFilterType::Peak, m_sampleRate, freq, GEQ_Q, effectiveGain
             );
         }
 
@@ -468,18 +564,15 @@ private:
         );
 
         // Listening
-        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> lBands{};
-        std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> rBands{};
-        ParametricEQ::getPresetBandConfigs("Monitor Flat", lBands, rBands);
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
-            const auto& l = lBands[b];
+            const auto& l = m_listeningLeftConfigs[b];
             const double lFreq = std::clamp(l.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
             const double lGain = std::clamp(l.gainDb, -24.0, 24.0);
             const double lQ = std::clamp(l.Q, 0.1, 20.0);
             m_staging.listeningLeftCoefficients[b] = BiquadFilter::calculateCoefficients(l.type, m_sampleRate, lFreq, lQ, lGain);
             m_staging.listeningLeftEnabled[b] = l.enabled;
 
-            const auto& r = rBands[b];
+            const auto& r = m_listeningRightConfigs[b];
             const double rFreq = std::clamp(r.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
             const double rGain = std::clamp(r.gainDb, -24.0, 24.0);
             const double rQ = std::clamp(r.Q, 0.1, 20.0);
@@ -520,6 +613,8 @@ private:
     mutable std::mutex m_producerMutex;
     double m_sampleRate{48000.0};
     bool m_listeningPresetConfigured{false};
+    std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> m_listeningLeftConfigs{};
+    std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> m_listeningRightConfigs{};
     ContinuousDspParameters m_staging{};
     std::array<ContinuousDspParameters, 3> m_buffers{};
 

@@ -93,6 +93,10 @@ public:
         m_geq.applyAllCoefficients(coeffs);
     }
 
+    void applyBandEnabled(const std::array<bool, GraphicEQ::NUM_BANDS>& enabled) noexcept {
+        m_geq.applyBandEnabled(enabled);
+    }
+
     [[nodiscard]] const GraphicEQ& dsp() const noexcept { return m_geq; }
 
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {

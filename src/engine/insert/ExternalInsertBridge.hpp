@@ -9,6 +9,11 @@
 #include <mutex>
 #include <functional>
 #include <memory>
+#include <QProcess>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QString>
 
 namespace desk32::engine::insert {
 
@@ -33,6 +38,12 @@ enum class LatencySource {
     HardwareMeasured
 };
 
+enum class DisconnectPolicy : uint8_t {
+    AutoBypass = 0,
+    MuteOutput = 1,
+    StopPlayback = 2
+};
+
 struct ExternalPortInfo {
     std::string clientName;
     std::string sendPortL;
@@ -42,6 +53,10 @@ struct ExternalPortInfo {
     double sampleRate = 48000.0;
     size_t bufferSize = 256;
     uint32_t reportedLatencyFrames = 0;
+    bool latencyReported = true;
+    std::string pluginName{};
+    std::string pluginUri{};
+    std::string hostPresetReference{};
 };
 
 class ExternalInsertBridge {
@@ -67,6 +82,25 @@ public:
     [[nodiscard]] InsertState state() const noexcept { return m_state.load(std::memory_order_acquire); }
     [[nodiscard]] bool isBypassed() const noexcept { return m_isBypassed.load(std::memory_order_acquire); }
     [[nodiscard]] uint32_t reportedLatencyFrames() const noexcept { return m_reportedLatencyFrames.load(std::memory_order_acquire); }
+    [[nodiscard]] bool hasReportedLatency() const noexcept { return m_latencyReported.load(std::memory_order_acquire); }
+    [[nodiscard]] std::string reportedLatencyText() const {
+        if (!m_latencyReported.load(std::memory_order_acquire)) {
+            return "Not Reported";
+        }
+        return std::to_string(m_reportedLatencyFrames.load(std::memory_order_acquire)) + " frames";
+    }
+    [[nodiscard]] DisconnectPolicy disconnectPolicy() const noexcept {
+        return m_disconnectPolicy.load(std::memory_order_acquire);
+    }
+    void setDisconnectPolicy(DisconnectPolicy policy) noexcept {
+        m_disconnectPolicy.store(policy, std::memory_order_release);
+    }
+    [[nodiscard]] bool stopPlaybackRequested() const noexcept {
+        return m_stopPlaybackRequested.load(std::memory_order_acquire);
+    }
+    void clearStopPlaybackRequested() noexcept {
+        m_stopPlaybackRequested.store(false, std::memory_order_release);
+    }
     [[nodiscard]] double measuredLatencyMs() const noexcept { return m_measuredLatencyMs.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t measuredLatencyFrames() const noexcept { return m_measuredLatencyFrames.load(std::memory_order_acquire); }
     [[nodiscard]] LatencySource latencySource() const noexcept { return m_latencySource.load(std::memory_order_acquire); }
@@ -162,6 +196,11 @@ public:
         m_engineSampleRate.store(engineSampleRate, std::memory_order_release);
         m_engineBufferSize.store(engineBufferSize, std::memory_order_release);
         m_reportedLatencyFrames.store(config.reportedLatencyFrames, std::memory_order_release);
+        m_latencyReported.store(config.latencyReported, std::memory_order_release);
+        m_stopPlaybackRequested.store(false, std::memory_order_release);
+        if (config.latencyReported && config.reportedLatencyFrames > 0) {
+            m_latencySource.store(LatencySource::ReportedStatic, std::memory_order_release);
+        }
 
         if (m_config.clientName.empty()) {
             m_state.store(InsertState::NotConfigured, std::memory_order_release);
@@ -198,6 +237,139 @@ public:
         return true;
     }
 
+    /// Control-thread PipeWire port discovery (queries `pw-dump` and merges registered test hosts).
+    /// Also parses raw `pw-dump` JSON via parsePwDumpPorts for deterministic testing.
+    static std::vector<ExternalPortInfo> parsePwDumpPorts(const std::string& pwDumpJson,
+                                                          double defaultSampleRate = 48000.0,
+                                                          size_t defaultBufferSize = 256)
+    {
+        std::vector<ExternalPortInfo> result;
+        QJsonParseError err{};
+        QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(pwDumpJson), &err);
+        if (err.error != QJsonParseError::NoError || !doc.isArray()) {
+            return result;
+        }
+
+        struct NodeBucket {
+            std::string name;
+            std::vector<std::string> inPorts;
+            std::vector<std::string> outPorts;
+            double rate = 0.0;
+            size_t quantum = 0;
+            uint32_t latency = 0;
+            bool hasLatency = false;
+        };
+        std::vector<NodeBucket> nodes;
+        auto findOrCreateNode = [&](int nodeId, const std::string& nodeName) -> NodeBucket& {
+            for (auto& nb : nodes) {
+                if (!nodeName.empty() && nb.name == nodeName) return nb;
+            }
+            NodeBucket b;
+            b.name = nodeName.empty() ? ("node_" + std::to_string(nodeId)) : nodeName;
+            nodes.push_back(std::move(b));
+            return nodes.back();
+        };
+
+        std::vector<std::pair<int, std::string>> nodeNamesById;
+        const QJsonArray arr = doc.array();
+        for (const auto& val : arr) {
+            if (!val.isObject()) continue;
+            const QJsonObject obj = val.toObject();
+            const QString type = obj["type"].toString();
+            const int objId = obj["id"].toInt(-1);
+            const QJsonObject info = obj["info"].toObject();
+            const QJsonObject props = info["props"].toObject();
+
+            if (type.contains("Node")) {
+                std::string nName = props["node.name"].toString().toStdString();
+                if (nName.empty()) nName = props["application.name"].toString().toStdString();
+                if (!nName.empty() && objId >= 0) {
+                    nodeNamesById.emplace_back(objId, nName);
+                    auto& bucket = findOrCreateNode(objId, nName);
+                    const QString lat = props["node.latency"].toString();
+                    if (lat.contains('/')) {
+                        const auto parts = lat.split('/');
+                        bool okQ = false, okR = false;
+                        size_t q = parts[0].toULongLong(&okQ);
+                        double r = parts[1].toDouble(&okR);
+                        if (okQ && q > 0) bucket.quantum = q;
+                        if (okR && r > 0.0) bucket.rate = r;
+                    }
+                    if (props.contains("latency.internal.rate")) {
+                        bucket.latency = static_cast<uint32_t>(std::max(0, props["latency.internal.rate"].toInt()));
+                        bucket.hasLatency = true;
+                    }
+                }
+            }
+        }
+
+        for (const auto& val : arr) {
+            if (!val.isObject()) continue;
+            const QJsonObject obj = val.toObject();
+            const QString type = obj["type"].toString();
+            if (!type.contains("Port")) continue;
+            const QJsonObject info = obj["info"].toObject();
+            const QJsonObject props = info["props"].toObject();
+            const QString mediaType = props["media.type"].toString();
+            if (!mediaType.isEmpty() && mediaType != "Audio") continue;
+
+            const int nodeId = props["node.id"].toInt(-1);
+            std::string nodeName;
+            for (const auto& kv : nodeNamesById) {
+                if (kv.first == nodeId) {
+                    nodeName = kv.second;
+                    break;
+                }
+            }
+            QString portName = props["port.name"].toString();
+            if (portName.isEmpty()) portName = props["port.alias"].toString();
+            if (nodeName.empty() && portName.contains(':')) {
+                nodeName = portName.section(':', 0, 0).toStdString();
+            }
+            if (nodeName.empty() || portName.isEmpty()) continue;
+
+            const std::string fullPort = portName.contains(':')
+                                             ? portName.toStdString()
+                                             : (nodeName + ":" + portName.toStdString());
+            auto& bucket = findOrCreateNode(nodeId, nodeName);
+            const QString dir = info["direction"].toString().toLower();
+            if (dir == "input" || dir == "in") {
+                bucket.inPorts.push_back(fullPort);
+            } else if (dir == "output" || dir == "out") {
+                bucket.outPorts.push_back(fullPort);
+            }
+        }
+
+        for (const auto& b : nodes) {
+            if (b.inPorts.size() >= 2 && b.outPorts.size() >= 2) {
+                ExternalPortInfo ep;
+                ep.clientName = b.name;
+                ep.sendPortL = b.inPorts[0];
+                ep.sendPortR = b.inPorts[1];
+                ep.returnPortL = b.outPorts[0];
+                ep.returnPortR = b.outPorts[1];
+                ep.sampleRate = b.rate > 0.0 ? b.rate : defaultSampleRate;
+                ep.bufferSize = b.quantum > 0 ? b.quantum : defaultBufferSize;
+                ep.reportedLatencyFrames = b.latency;
+                ep.latencyReported = b.hasLatency;
+                result.push_back(std::move(ep));
+            }
+        }
+        return result;
+    }
+
+    static std::vector<ExternalPortInfo> discoverPorts(double currentSampleRate = 48000.0,
+                                                       size_t currentBufferSize = 256)
+    {
+        QProcess proc;
+        proc.start(QStringLiteral("pw-dump"), QStringList());
+        if (!proc.waitForFinished(1000) || proc.exitCode() != 0) {
+            return {};
+        }
+        const std::string out = proc.readAllStandardOutput().toStdString();
+        return parsePwDumpPorts(out, currentSampleRate, currentBufferSize);
+    }
+
     /// Simulate disconnect event (e.g. external host crashed or port closed)
     void handleDisconnect() {
         {
@@ -205,8 +377,38 @@ public:
             m_lastError = "External host disconnected or port lost";
         }
         m_state.store(InsertState::Disconnected, std::memory_order_release);
-        // Smoothly activate hardware bypass to protect playback
+        // Activate hardware bypass (or mute/stop depending on DisconnectPolicy in process())
         m_isBypassed.store(true, std::memory_order_release);
+    }
+
+    /// Simulate or verify port recovery against live discovered ports
+    bool handleRecoveryWithVerification(const std::vector<ExternalPortInfo>& discoveredPorts) {
+        m_state.store(InsertState::Recovering, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        const double sr = m_engineSampleRate.load(std::memory_order_acquire);
+        const size_t bs = m_engineBufferSize.load(std::memory_order_acquire);
+        for (const auto& candidate : discoveredPorts) {
+            if (candidate.clientName == m_config.clientName &&
+                candidate.sendPortL == m_config.sendPortL &&
+                candidate.sendPortR == m_config.sendPortR &&
+                candidate.returnPortL == m_config.returnPortL &&
+                candidate.returnPortR == m_config.returnPortR &&
+                std::abs(candidate.sampleRate - sr) < 0.01 &&
+                candidate.bufferSize == bs) {
+                m_config.reportedLatencyFrames = candidate.reportedLatencyFrames;
+                m_config.latencyReported = candidate.latencyReported;
+                m_reportedLatencyFrames.store(candidate.reportedLatencyFrames, std::memory_order_release);
+                m_latencyReported.store(candidate.latencyReported, std::memory_order_release);
+                m_state.store(InsertState::Connected, std::memory_order_release);
+                m_isBypassed.store(false, std::memory_order_release);
+                m_stopPlaybackRequested.store(false, std::memory_order_release);
+                m_lastError.clear();
+                return true;
+            }
+        }
+        m_state.store(InsertState::Error, std::memory_order_release);
+        m_lastError = "Recovery failed: matching external ports not found or sample rate/buffer mismatch";
+        return false;
     }
 
     /// Simulate port recovery event
@@ -220,6 +422,7 @@ public:
             m_config.bufferSize == bs) {
             m_state.store(InsertState::Connected, std::memory_order_release);
             m_isBypassed.store(false, std::memory_order_release);
+            m_stopPlaybackRequested.store(false, std::memory_order_release);
             m_lastError.clear();
         } else {
             m_state.store(InsertState::Error, std::memory_order_release);
@@ -228,7 +431,7 @@ public:
     }
 
     /// Audio block processing through insert
-    /// If bypassed or disconnected, performs dry pass-through with no clicks.
+    /// If bypassed or disconnected, applies DisconnectPolicy (AutoBypass dry pass-through, MuteOutput silence, StopPlayback flag + silence).
     /// Audio Thread execution: strictly zero dynamic allocations, zero deallocations, zero blocking locks (P0-21/P0-23/P0-27).
     void process(double* inOutLeft, double* inOutRight, size_t frames) noexcept {
         // 1. Activate prepared mock processor at block boundary if present
@@ -240,6 +443,23 @@ public:
         }
 
         const InsertState curState = m_state.load(std::memory_order_acquire);
+        if (curState == InsertState::Disconnected || curState == InsertState::Error) {
+            const DisconnectPolicy policy = m_disconnectPolicy.load(std::memory_order_acquire);
+            if (policy == DisconnectPolicy::MuteOutput) {
+                std::fill_n(inOutLeft, frames, 0.0);
+                std::fill_n(inOutRight, frames, 0.0);
+                return;
+            }
+            if (policy == DisconnectPolicy::StopPlayback) {
+                m_stopPlaybackRequested.store(true, std::memory_order_release);
+                std::fill_n(inOutLeft, frames, 0.0);
+                std::fill_n(inOutRight, frames, 0.0);
+                return;
+            }
+            // AutoBypass: dry pass-through
+            return;
+        }
+
         if (m_isBypassed.load(std::memory_order_acquire) ||
             (curState != InsertState::Connected && curState != InsertState::Active)) {
             // Passthrough (dry)
@@ -251,15 +471,36 @@ public:
             m_state.store(InsertState::Active, std::memory_order_release);
         }
 
-        // Execute active mock processor without any locks or refcounting on Audio Thread
-        if (m_activeMock && m_activeMock->func) {
-            m_activeMock->func(inOutLeft, inOutRight, frames);
+        const uint64_t baseFrame = m_totalFramesProcessed.load(std::memory_order_relaxed);
+        const bool measuring = m_measuringLatency.load(std::memory_order_acquire);
+        const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
+        const bool hasMock = (m_activeMock && m_activeMock->func);
+
+        if (measuring && hasMock) {
+            // Inject impulse before external loopback processor so loopback sees it
+            for (size_t i = 0; i < frames; ++i) {
+                if (baseFrame + i == targetFrame) {
+                    inOutLeft[i] += 1.0;
+                    inOutRight[i] += 1.0;
+                }
+            }
         }
 
-        // In active send/return, check for impulse detection during latency measurement
-        const uint64_t baseFrame = m_totalFramesProcessed.load(std::memory_order_relaxed);
-        if (m_measuringLatency.load(std::memory_order_acquire)) {
-            const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
+        // Execute active mock processor without any locks or refcounting on Audio Thread
+        if (hasMock) {
+            m_activeMock->func(inOutLeft, inOutRight, frames);
+            if (measuring) {
+                // Automatic peak detection on returned buffer after send frame
+                for (size_t i = 0; i < frames; ++i) {
+                    if (baseFrame + i > targetFrame &&
+                        (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
+                        recordImpulseReturn(baseFrame + i, LatencySource::SimulatedMock);
+                        break;
+                    }
+                }
+            }
+        } else if (measuring) {
+            // Legacy manual mode (no active processor attached): inject after dry check
             for (size_t i = 0; i < frames; ++i) {
                 if (baseFrame + i == targetFrame) {
                     inOutLeft[i] += 1.0;
@@ -320,6 +561,9 @@ private:
     std::atomic<int64_t> m_measuredLatencyFrames{-1};
     std::atomic<double> m_measuredLatencyMs{-1.0};
     std::atomic<uint32_t> m_reportedLatencyFrames{0};
+    std::atomic<bool> m_latencyReported{true};
+    std::atomic<DisconnectPolicy> m_disconnectPolicy{DisconnectPolicy::AutoBypass};
+    std::atomic<bool> m_stopPlaybackRequested{false};
     std::atomic<int64_t> m_delayCompensationFrames{-1};
     std::atomic<LatencySource> m_latencySource{LatencySource::Uncalibrated};
 };

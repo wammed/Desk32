@@ -19,6 +19,12 @@ struct SessionTrack {
     size_t index = 0;
 };
 
+enum class ReadAheadStatus : uint8_t {
+    None = 0,
+    Validated = 1,
+    Failed = 2
+};
+
 class NaturalSortComparator {
 public:
     /// Strictly deterministic natural sort comparison (Phase 0 Specification):
@@ -129,6 +135,42 @@ public:
     [[nodiscard]] const std::vector<SessionTrack>& tracks() const noexcept { return m_tracks; }
     [[nodiscard]] size_t currentIndex() const noexcept { return m_currentIndex.load(std::memory_order_acquire); }
     [[nodiscard]] size_t totalTracks() const noexcept { return m_tracks.size(); }
+    [[nodiscard]] ReadAheadStatus readAheadStatus() const noexcept { return m_readAheadStatus.load(std::memory_order_acquire); }
+    [[nodiscard]] size_t readAheadValidatedIndex() const noexcept { return m_readAheadValidatedIndex.load(std::memory_order_acquire); }
+    [[nodiscard]] const std::string& readAheadError() const noexcept { return m_readAheadErrorMsg; }
+
+    void setReadAheadStatus(ReadAheadStatus status, size_t targetIndex = 0, const std::string& errMsg = {}) {
+        m_readAheadStatus.store(status, std::memory_order_release);
+        m_readAheadValidatedIndex.store(targetIndex, std::memory_order_release);
+        m_readAheadErrorMsg = errMsg;
+    }
+
+    static bool isSupportedAudioExtension(const QString& suffixLower) {
+        return suffixLower == QStringLiteral("wav") ||
+               suffixLower == QStringLiteral("flac") ||
+               suffixLower == QStringLiteral("mp3") ||
+               suffixLower == QStringLiteral("ogg") ||
+               suffixLower == QStringLiteral("opus") ||
+               suffixLower == QStringLiteral("m4a") ||
+               suffixLower == QStringLiteral("aac") ||
+               suffixLower == QStringLiteral("wma") ||
+               suffixLower == QStringLiteral("aif") ||
+               suffixLower == QStringLiteral("aiff");
+    }
+
+    static std::vector<std::string> scanSupportedAudioFiles(const std::string& folderPath) {
+        std::vector<std::string> files;
+        QDir dir(QString::fromStdString(folderPath));
+        if (!dir.exists()) return files;
+        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::Readable, QDir::NoSort);
+        for (const QFileInfo& fi : entries) {
+            if (isSupportedAudioExtension(fi.suffix().toLower())) {
+                files.push_back(fi.fileName().toStdString());
+            }
+        }
+        std::sort(files.begin(), files.end(), NaturalSortComparator{});
+        return files;
+    }
 
     /// Deterministic FNV-1a 64-bit hash for RT-safe track identity comparison
     [[nodiscard]] static uint64_t hashTrackPath(std::string_view path) noexcept {
@@ -161,6 +203,9 @@ public:
 
         // Specification 2.7.2: Continuous playback strictly starts from index 0
         m_currentIndex.store(0, std::memory_order_release);
+        m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+        m_readAheadValidatedIndex.store(0, std::memory_order_release);
+        m_readAheadErrorMsg.clear();
         const bool active = !m_tracks.empty();
         if (active) {
             m_sessionId.store(s_nextSessionId.fetch_add(1, std::memory_order_relaxed), std::memory_order_release);
@@ -192,9 +237,15 @@ public:
         const size_t idx = m_currentIndex.load(std::memory_order_acquire);
         if (idx + 1 < m_tracks.size()) {
             m_currentIndex.store(idx + 1, std::memory_order_release);
+            m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+            m_readAheadValidatedIndex.store(0, std::memory_order_release);
+            m_readAheadErrorMsg.clear();
             return true;
         }
         m_isActive.store(false, std::memory_order_release); // Reached end of folder session
+        m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+        m_readAheadValidatedIndex.store(0, std::memory_order_release);
+        m_readAheadErrorMsg.clear();
         return false;
     }
 
@@ -202,6 +253,9 @@ public:
         const size_t idx = m_currentIndex.load(std::memory_order_acquire);
         if (idx > 0) {
             m_currentIndex.store(idx - 1, std::memory_order_release);
+            m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+            m_readAheadValidatedIndex.store(0, std::memory_order_release);
+            m_readAheadErrorMsg.clear();
             return true;
         }
         return false;
@@ -211,6 +265,9 @@ public:
         if (index < m_tracks.size()) {
             m_currentIndex.store(index, std::memory_order_release);
             m_isActive.store(true, std::memory_order_release);
+            m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+            m_readAheadValidatedIndex.store(0, std::memory_order_release);
+            m_readAheadErrorMsg.clear();
             return true;
         }
         return false;
@@ -221,6 +278,9 @@ public:
         m_sessionId.store(0, std::memory_order_release);
         m_tracks.clear();
         m_currentIndex.store(0, std::memory_order_release);
+        m_readAheadStatus.store(ReadAheadStatus::None, std::memory_order_release);
+        m_readAheadValidatedIndex.store(0, std::memory_order_release);
+        m_readAheadErrorMsg.clear();
     }
 
 private:
@@ -230,6 +290,9 @@ private:
     std::string m_folderPath;
     std::vector<SessionTrack> m_tracks;
     std::atomic<size_t> m_currentIndex{0};
+    std::atomic<ReadAheadStatus> m_readAheadStatus{ReadAheadStatus::None};
+    std::atomic<size_t> m_readAheadValidatedIndex{0};
+    std::string m_readAheadErrorMsg;
 };
 
 } // namespace desk32::engine::session

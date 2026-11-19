@@ -43,6 +43,17 @@ LogService& LogService::instance() {
     return s_instance;
 }
 
+QString LogService::defaultDatabasePath() {
+    // Section 11.1: XDG Base Directory specification ($XDG_STATE_HOME/desk32/)
+    QString stateHome = qEnvironmentVariable("XDG_STATE_HOME");
+    if (stateHome.isEmpty()) {
+        stateHome = QDir::homePath() + QStringLiteral("/.local/state");
+    }
+    const QString stateDir = QDir(stateHome).filePath(QStringLiteral("desk32"));
+    QDir().mkpath(stateDir);
+    return QDir(stateDir).filePath(QStringLiteral("operation_logs.db"));
+}
+
 LogService::LogService(QObject* parent)
     : QObject(parent)
     , m_sessionId(generateSessionId())
@@ -60,10 +71,7 @@ bool LogService::start(const QString& dbPath) {
     m_sessionId = generateSessionId();
 
     if (dbPath.isEmpty()) {
-        // Section 11.1: XDG Base Directory specification ($XDG_STATE_HOME/desk32/)
-        QString stateDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-        QDir().mkpath(stateDir);
-        m_dbPath = stateDir + "/operation_logs.db";
+        m_dbPath = defaultDatabasePath();
     } else {
         m_dbPath = dbPath;
     }
