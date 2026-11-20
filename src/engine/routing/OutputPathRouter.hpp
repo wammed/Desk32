@@ -37,20 +37,44 @@ public:
     [[nodiscard]] double listeningVolume() const noexcept { return m_listeningVolume; }
     void setListeningVolume(double volLinear) noexcept {
         m_listeningVolume = std::clamp(volLinear, 0.0, 2.0);
+        const double target = m_listeningMuted ? 0.0 : m_listeningVolume;
         if (!m_smootherPrimed) {
-            m_listeningVolSmoother.reset(m_listeningVolume);
+            m_listeningVolSmoother.reset(target);
         } else {
-            m_listeningVolSmoother.setTarget(m_listeningVolume);
+            m_listeningVolSmoother.setTarget(target);
+        }
+    }
+
+    [[nodiscard]] bool listeningMuted() const noexcept { return m_listeningMuted; }
+    void setListeningMuted(bool muted) noexcept {
+        m_listeningMuted = muted;
+        const double target = m_listeningMuted ? 0.0 : m_listeningVolume;
+        if (!m_smootherPrimed) {
+            m_listeningVolSmoother.reset(target);
+        } else {
+            m_listeningVolSmoother.setTarget(target);
         }
     }
 
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume; }
     void setRenderMonitorVolume(double volLinear) noexcept {
         m_renderMonitorVolume = std::clamp(volLinear, 0.0, 2.0);
+        const double target = m_renderMonitorMuted ? 0.0 : m_renderMonitorVolume;
         if (!m_smootherPrimed) {
-            m_renderMonVolSmoother.reset(m_renderMonitorVolume);
+            m_renderMonVolSmoother.reset(target);
         } else {
-            m_renderMonVolSmoother.setTarget(m_renderMonitorVolume);
+            m_renderMonVolSmoother.setTarget(target);
+        }
+    }
+
+    [[nodiscard]] bool renderMonitorMuted() const noexcept { return m_renderMonitorMuted; }
+    void setRenderMonitorMuted(bool muted) noexcept {
+        m_renderMonitorMuted = muted;
+        const double target = m_renderMonitorMuted ? 0.0 : m_renderMonitorVolume;
+        if (!m_smootherPrimed) {
+            m_renderMonVolSmoother.reset(target);
+        } else {
+            m_renderMonVolSmoother.setTarget(target);
         }
     }
 
@@ -95,6 +119,8 @@ private:
     double m_sampleRate = 48000.0;
     double m_listeningVolume = 1.0;
     double m_renderMonitorVolume = 1.0;
+    bool m_listeningMuted = false;
+    bool m_renderMonitorMuted = false;
     bool m_smootherPrimed = false;
     dsp::ParameterSmoother m_listeningVolSmoother{1.0, 10.0, 48000.0};
     dsp::ParameterSmoother m_renderMonVolSmoother{1.0, 10.0, 48000.0};

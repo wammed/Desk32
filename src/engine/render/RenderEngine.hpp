@@ -94,6 +94,7 @@ struct RenderTaskInfo {
     QString stagingDir;
     QString serial;
     QString errorMessage;
+    QString warningMessage;
     QVariantList trackResults;
     QStringList renderedFiles;
     bool rollbackPerformed = false;

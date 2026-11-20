@@ -212,6 +212,7 @@ set_tests_properties(test_audio_pipeline PROPERTIES TIMEOUT 300)
 add_executable(test_pipewire_output
     test_pipewire_output.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
 )
 
 target_link_libraries(test_pipewire_output PRIVATE
@@ -331,6 +332,8 @@ add_executable(test_phase2_dsp
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -383,6 +386,8 @@ add_executable(test_phase3_external_insert
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -435,6 +440,8 @@ add_executable(test_phase4_export_render
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -531,6 +538,8 @@ add_executable(test_workspace_v381
     ../src/engine/decoder/DecoderWorker.cpp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp

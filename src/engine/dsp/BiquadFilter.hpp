@@ -118,11 +118,44 @@ public:
     /// Zero allocations, zero trigonometric functions, zero locks, bounded O(1) execution.
     inline void setCoefficients(const BiquadCoefficients& c) noexcept
     {
+        m_smoothRemaining = 0;
         m_b0 = c.b0;
         m_b1 = c.b1;
         m_b2 = c.b2;
         m_a1 = c.a1;
         m_a2 = c.a2;
+        m_targetB0 = c.b0;
+        m_targetB1 = c.b1;
+        m_targetB2 = c.b2;
+        m_targetA1 = c.a1;
+        m_targetA2 = c.a2;
+    }
+
+    /// Spec §5.9 smooth coefficient interpolation across `rampSamples` on EQ / Filter switches.
+    /// Zero allocations, zero trigonometric functions, bounded O(1).
+    inline void setCoefficientsSmooth(const BiquadCoefficients& c, size_t rampSamples) noexcept
+    {
+        if (rampSamples <= 1) {
+            setCoefficients(c);
+            return;
+        }
+        m_targetB0 = c.b0;
+        m_targetB1 = c.b1;
+        m_targetB2 = c.b2;
+        m_targetA1 = c.a1;
+        m_targetA2 = c.a2;
+        const double invN = 1.0 / static_cast<double>(rampSamples);
+        m_stepB0 = (c.b0 - m_b0) * invN;
+        m_stepB1 = (c.b1 - m_b1) * invN;
+        m_stepB2 = (c.b2 - m_b2) * invN;
+        m_stepA1 = (c.a1 - m_a1) * invN;
+        m_stepA2 = (c.a2 - m_a2) * invN;
+        m_smoothRemaining = rampSamples;
+    }
+
+    [[nodiscard]] bool isSmoothingCoefficients() const noexcept
+    {
+        return m_smoothRemaining > 0;
     }
 
     [[nodiscard]] BiquadCoefficients coefficients() const noexcept
@@ -147,6 +180,21 @@ public:
 
     inline double process(double input)
     {
+        if (m_smoothRemaining > 0) {
+            m_b0 += m_stepB0;
+            m_b1 += m_stepB1;
+            m_b2 += m_stepB2;
+            m_a1 += m_stepA1;
+            m_a2 += m_stepA2;
+            --m_smoothRemaining;
+            if (m_smoothRemaining == 0) {
+                m_b0 = m_targetB0;
+                m_b1 = m_targetB1;
+                m_b2 = m_targetB2;
+                m_a1 = m_targetA1;
+                m_a2 = m_targetA2;
+            }
+        }
         // Direct Form II Transposed
         double output = m_b0 * input + m_z1;
         m_z1 = m_b1 * input - m_a1 * output + m_z2;
@@ -190,6 +238,19 @@ private:
     double m_b2 = 0.0;
     double m_a1 = 0.0;
     double m_a2 = 0.0;
+
+    double m_targetB0 = 1.0;
+    double m_targetB1 = 0.0;
+    double m_targetB2 = 0.0;
+    double m_targetA1 = 0.0;
+    double m_targetA2 = 0.0;
+
+    double m_stepB0 = 0.0;
+    double m_stepB1 = 0.0;
+    double m_stepB2 = 0.0;
+    double m_stepA1 = 0.0;
+    double m_stepA2 = 0.0;
+    size_t m_smoothRemaining = 0;
 
     double m_z1 = 0.0;
     double m_z2 = 0.0;

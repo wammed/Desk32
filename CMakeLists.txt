@@ -98,8 +98,12 @@ qt_add_executable(desk32
     src/core/log/LogRepository.hpp
     src/core/log/LogService.hpp
     src/core/log/LogService.cpp
+    src/engine/backend/AudioControlTypes.hpp
+    src/engine/backend/AudioControlManager.hpp
     src/engine/backend/PipeWireAudioOutput.hpp
     src/engine/backend/PipeWireAudioOutput.cpp
+    src/engine/backend/PipeWireControlAdapter.hpp
+    src/engine/backend/PipeWireControlAdapter.cpp
     src/engine/decoder/AudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.cpp
@@ -114,6 +118,8 @@ qt_add_executable(desk32
     src/engine/insert/DelayCompensationBuffer.hpp
     src/engine/insert/ExternalInsertBridge.hpp
     src/engine/insert/ExternalInsertNode.hpp
+    src/engine/insert/PipeWireInsertTransport.hpp
+    src/engine/insert/PipeWireInsertTransport.cpp
     src/engine/preset/PresetManager.hpp
     src/engine/preset/PresetManager.cpp
     src/engine/render/WavFileWriter.hpp

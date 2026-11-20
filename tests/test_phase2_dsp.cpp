@@ -27,6 +27,7 @@
 #include "engine/memory/EpochReclaimer.hpp"
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
+#include "core/log/LogErrorCodes.hpp"
 
 using namespace desk32::engine::dsp;
 using namespace desk32::engine::pipeline;
@@ -235,6 +236,7 @@ private slots:
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
     void testMasterGainPostTapIsolation();
     void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
+    void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
     void cleanupTestCase();
 
 private:
@@ -3505,6 +3507,178 @@ void TestPhase2Dsp::testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing()
     QVERIFY(ctrl.applyPresetProfile(PresetCategories::ListeningCorrection, "My Asymmetric Rig"));
     QCOMPARE(ctrl.getListeningBand(false, 4)["gainDb"].toDouble(), 5.5);
     QCOMPARE(ctrl.getListeningBand(true, 4)["gainDb"].toDouble(), -4.5);
+}
+
+void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
+{
+    using namespace desk32::engine::pipeline;
+    using desk32::core::EngineController;
+    using namespace desk32::engine::preset;
+
+    // 1. Reverb TailPreserving Bypass + maxTailRetentionSeconds timeout + processing budget cap (§5.6)
+    {
+        ReverbNode rev("TailRev");
+        rev.configure(48000.0);
+        rev.setBypassBehavior(BypassBehavior::TailPreserving);
+        rev.prepareInstance(48000.0, 0.75, 0.3, 0.5, 0.0, true, true, 0.25 /* max 0.25s tail */, 0.0);
+
+        std::vector<double> excL(1024, 0.6), excR(1024, 0.6);
+        rev.process(excL.data(), excR.data(), 1024);
+
+        rev.setBypassed(true);
+        QVERIFY(rev.wantsProcessWhileBypassed());
+        QCOMPARE(rev.nodeState(), NodeState::TailRingout);
+
+        std::vector<double> tailL(512, 0.3), tailR(512, 0.3);
+        rev.process(tailL.data(), tailR.data(), 512);
+        double maxTailDiff = 0.0;
+        for (size_t i = 0; i < 512; ++i) {
+            maxTailDiff = std::max(maxTailDiff, std::abs(tailL[i] - 0.3));
+        }
+        QVERIFY(maxTailDiff > 1e-4); // Decaying wet tail added to dry 0.3 while bypassed!
+
+        // Exceed 0.25s = 12000 frames retention ceiling -> terminates wet tail cleanly
+        for (int b = 0; b < 30; ++b) {
+            std::fill(tailL.begin(), tailL.end(), 0.3);
+            std::fill(tailR.begin(), tailR.end(), 0.3);
+            rev.process(tailL.data(), tailR.data(), 512);
+        }
+        QCOMPARE(tailL[0], 0.3);
+        QVERIFY(rev.tailRetentionTimeoutRetireCount() >= 1);
+    }
+
+    // 2. ParametricEQ >16-band variable overflow storage (§5.2) + Controller warning (§11.1)
+    {
+        ParametricEQ peq;
+        std::vector<ParametricEQ::BandConfig> twentyBands(20);
+        for (size_t i = 0; i < 20; ++i) {
+            twentyBands[i].frequency = 50.0 + static_cast<double>(i) * 400.0;
+            twentyBands[i].gainDb = 1.5;
+            twentyBands[i].Q = 1.2;
+            twentyBands[i].enabled = true;
+        }
+        const auto rep = peq.importBandsWithReport(twentyBands, twentyBands);
+        QVERIFY(rep.truncated);
+        QCOMPARE(rep.requestedLeft, size_t(20));
+        QCOMPARE(rep.activeLeft, ParametricEQ::BANDS_PER_CHANNEL);
+        QCOMPARE(rep.overflowLeft, size_t(4));
+        QCOMPARE(peq.overflowLeftBands().size(), size_t(4));
+        QCOMPARE(peq.exportBands(false).size(), size_t(20));
+    }
+
+    // 3. BiquadFilter coefficient smoothing + AudioChain post-init bypass crossfade (0 RT alloc) (§5.9)
+    {
+        BiquadFilter filt;
+        filt.setCoefficients(BiquadFilter::calculateCoefficients(BiquadFilterType::Peak, 48000.0, 1000.0, 1.0, 0.0));
+        const auto boost = BiquadFilter::calculateCoefficients(BiquadFilterType::Peak, 48000.0, 1000.0, 1.0, 12.0);
+        filt.setCoefficientsSmooth(boost, 64);
+        QVERIFY(filt.isSmoothingCoefficients());
+        for (int s = 0; s < 64; ++s) {
+            (void)filt.process(0.1);
+        }
+        QVERIFY(!filt.isSmoothingCoefficients());
+
+        AudioChain chain("SmoothChain", ChainPurpose::MasteringChain);
+        auto peqNode = std::make_shared<ParametricEqNode>("Master PEQ");
+        peqNode->configure(48000.0);
+        chain.appendNode(peqNode);
+        chain.configure(48000.0);
+        chain.setBypassed(false);
+
+        std::vector<double> l(256, 0.5), r(256, 0.5);
+        chain.process(l.data(), r.data(), 256); // Block 0: prime chain
+
+        chain.setBypassed(true);
+        std::fill(l.begin(), l.end(), 0.5);
+        std::fill(r.begin(), r.end(), 0.5);
+        // Zero RT heap allocation check during bypass crossfade
+        s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+        s_trackAllocations.store(true, std::memory_order_relaxed);
+        {
+            AudioThreadScopeGuard rtGuard;
+            chain.process(l.data(), r.data(), 256);
+        }
+        s_trackAllocations.store(false, std::memory_order_relaxed);
+        QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+    }
+
+    // 4. EngineController §8.2 4-state capabilities, §9.2 node contracts, Bit-Perfect Level 1 independent of Direct Mode,
+    // and >16-band preset truncation warning signal + LogService entry
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    PresetManager::instance().setCustomRootPath(m_tempDir->path() + "/p2_audit_presets");
+
+    const QVariantMap caps = ctrl.getAudioCapabilities();
+    QVERIFY(caps["directMode"].toString() == "Unknown" || caps["directMode"].toString() == "Supported" ||
+            caps["directMode"].toString() == "Unavailable" || caps["directMode"].toString() == "Unsupported");
+    QCOMPARE(caps["exclusiveAccess"].toString(), QString("Unsupported"));
+    QCOMPARE(caps["hardwareBitPerfect"].toString(), QString("Unknown"));
+
+    const QVariantList contracts = ctrl.getAudioNodeContracts();
+    QVERIFY(contracts.size() >= 8);
+    QCOMPARE(contracts[0].toMap()["sampleFormat"].toString(), QString("Float64Planar"));
+    QCOMPARE(contracts[0].toMap()["inputChannels"].toInt(), 2);
+    QCOMPARE(contracts[0].toMap()["outputChannels"].toInt(), 2);
+
+    // Independent Bit-Perfect Level 1 with Direct Mode OFF + dither OFF + lossless F32LE
+    ctrl.setDirectModeEnabled(false);
+    ctrl.setGlobalDspBypass(true);
+    ctrl.setMasterMute(false);
+    ctrl.setMasterGain(1.0);
+    ctrl.setListeningVolume(1.0);
+    ctrl.setListeningMuted(false);
+    ctrl.setOutputPcmFormat("F32LE");
+    ctrl.setLiveDitherEnabled(false);
+
+    std::vector<float> dummyOut(256 * 2, 0.0f);
+    ctrl.renderOfflineBlock(dummyOut.data(), 256);
+    const QVariantMap bpIndependent = ctrl.getBitPerfectVerificationReport();
+    QCOMPARE(bpIndependent["level1"].toMap()["status"].toString(), QString("Verified"));
+    QCOMPARE(bpIndependent["level1"].toMap()["ditherActive"].toBool(), false);
+    QVERIFY(bpIndependent["level1"].toMap()["outputPcmLossless"].toBool());
+    QVERIFY(bpIndependent["level1"].toMap()["verifiedBlocks"].toULongLong() >= 1);
+
+    // Live dither toggle on integer quantization format S24_32LE (§3.4 / §4.3)
+    ctrl.setOutputPcmFormat("S24_32LE");
+    std::vector<int32_t> rawInt32(256 * 2, 0);
+    ctrl.setLiveDitherEnabled(false);
+    ctrl.renderOfflineRawBlock(rawInt32.data(), 256);
+    const QVariantMap bpS24Clean = ctrl.getBitPerfectVerificationReport();
+    QCOMPARE(bpS24Clean["level1"].toMap()["status"].toString(), QString("Verified"));
+    QCOMPARE(bpS24Clean["level1"].toMap()["ditherActive"].toBool(), false);
+    QVERIFY(bpS24Clean["level1"].toMap()["outputPcmLossless"].toBool());
+
+    // Re-enable live dither on S24_32LE -> Level 1 & bitPerfectStatus immediately reflect TPDF dither
+    ctrl.setLiveDitherEnabled(true);
+    ctrl.renderOfflineRawBlock(rawInt32.data(), 256);
+    const QVariantMap bpS24Dither = ctrl.getBitPerfectVerificationReport();
+    QCOMPARE(bpS24Dither["level1"].toMap()["status"].toString(), QString("NotVerified"));
+    QCOMPARE(bpS24Dither["level1"].toMap()["ditherActive"].toBool(), true);
+    QCOMPARE(ctrl.bitPerfectStatus(), 1);
+    ctrl.setOutputPcmFormat("F32LE");
+
+    // >16-band Listening Correction preset emits presetImportWarning & sets report
+    QSignalSpy warnSpy(&ctrl, &EngineController::presetImportWarning);
+    QVariantMap bigPreset;
+    QVariantList bigBands;
+    for (int i = 0; i < 20; ++i) {
+        QVariantMap bm;
+        bm["index"] = i;
+        bm["frequency"] = 100.0 + i * 500.0;
+        bm["gain_db"] = 2.0;
+        bm["q"] = 1.0;
+        bm["type"] = 0;
+        bm["enabled"] = true;
+        bigBands.append(bm);
+    }
+    bigPreset["left_bands"] = bigBands;
+    bigPreset["right_bands"] = bigBands;
+    QVERIFY(ctrl.savePreset(PresetCategories::ListeningCorrection, "Huge20BandRig", bigPreset));
+    QVERIFY(ctrl.applyPresetProfile(PresetCategories::ListeningCorrection, "Huge20BandRig"));
+    QVERIFY(warnSpy.count() >= 1);
+    const QVariantMap importRep = ctrl.getLastPresetImportReport();
+    QVERIFY(importRep["truncated"].toBool());
+    QCOMPARE(importRep["overflowLeftBands"].toInt(), 4);
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

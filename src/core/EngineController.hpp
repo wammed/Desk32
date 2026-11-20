@@ -20,7 +20,10 @@
 #include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/preset/PresetManager.hpp"
 #include "engine/render/RenderEngine.hpp"
+#include "engine/backend/AudioControlManager.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
+#include "engine/backend/PipeWireControlAdapter.hpp"
+#include "engine/insert/PipeWireInsertTransport.hpp"
 #include "core/log/LogService.hpp"
 
 namespace desk32::core {
@@ -114,6 +117,11 @@ class EngineController : public QObject {
     Q_PROPERTY(bool renderRollbackSucceeded READ renderRollbackSucceeded NOTIFY renderStateChanged)
     Q_PROPERTY(double renderMonitorVolume READ renderMonitorVolume WRITE setRenderMonitorVolume NOTIFY renderMonitorVolumeChanged)
     Q_PROPERTY(double listeningVolume READ listeningVolume WRITE setListeningVolume NOTIFY listeningVolumeChanged)
+    Q_PROPERTY(bool renderMonitorMuted READ renderMonitorMuted WRITE setRenderMonitorMuted NOTIFY renderMonitorMutedChanged)
+    Q_PROPERTY(bool listeningMuted READ listeningMuted WRITE setListeningMuted NOTIFY listeningMutedChanged)
+    Q_PROPERTY(QString outputPcmFormat READ outputPcmFormat WRITE setOutputPcmFormat NOTIFY diagnosticsChanged)
+    Q_PROPERTY(bool liveDitherEnabled READ isLiveDitherEnabled WRITE setLiveDitherEnabled NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString currentOutputDevice READ currentOutputDevice NOTIFY diagnosticsChanged)
 
 public:
     static EngineController& instance();
@@ -165,6 +173,14 @@ public:
     [[nodiscard]] QString bitPerfectModeStateText() const;
     Q_INVOKABLE QVariantMap getBitPerfectVerificationReport() const;
     Q_INVOKABLE QVariantMap getAudioCapabilities() const;
+    Q_INVOKABLE QVariantList enumerateOutputDevices() const;
+    Q_INVOKABLE bool selectOutputDevice(const QString& deviceIdOrName);
+    [[nodiscard]] QString currentOutputDevice() const;
+    Q_INVOKABLE bool setOutputBufferFrames(int bufferFrames);
+    Q_INVOKABLE void setOutputPcmFormat(const QString& formatName);
+    [[nodiscard]] QString outputPcmFormat() const;
+    Q_INVOKABLE void setLiveDitherEnabled(bool enabled);
+    [[nodiscard]] bool isLiveDitherEnabled() const noexcept;
     [[nodiscard]] int backendStatus() const;
     [[nodiscard]] QString backendStatusText() const;
 
@@ -216,6 +232,8 @@ public:
     [[nodiscard]] bool renderRollbackSucceeded() const;
     [[nodiscard]] double renderMonitorVolume() const;
     [[nodiscard]] double listeningVolume() const;
+    [[nodiscard]] bool renderMonitorMuted() const;
+    [[nodiscard]] bool listeningMuted() const;
     [[nodiscard]] std::shared_ptr<engine::pipeline::AudioPipeline> pipeline() const noexcept { return m_pipeline; }
 
     // Property setters & QML invokables
@@ -284,7 +302,10 @@ public:
     Q_INVOKABLE QVariantMap getLimiterParams();
 
     Q_INVOKABLE void setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving);
+    Q_INVOKABLE void setReverbLimits(double maxTailRetentionSeconds, double maxProcessingTimeMs);
     Q_INVOKABLE QVariantMap getReverbParams();
+    Q_INVOKABLE QVariantMap getLastPresetImportReport() const;
+    Q_INVOKABLE QVariantList getAudioNodeContracts() const;
 
     // Listening Correction Presets & Per-Band Control (Section 5.10)
     Q_INVOKABLE QStringList availableListeningPresets();
@@ -323,6 +344,11 @@ public:
     Q_INVOKABLE void triggerInsertLatencyMeasurement();
     Q_INVOKABLE void calibrateInsertLatency();
     Q_INVOKABLE void recordInsertImpulseReturn(qint64 returnFrame);
+    Q_INVOKABLE void beginInsertLatencyCalibration();
+    Q_INVOKABLE bool recordInsertLatencyCalibrationSample(qint64 measuredFrames, double peakSnrDb);
+    Q_INVOKABLE bool confirmRecommendedInsertLatency(bool allowOverrideUnsafe = false);
+    Q_INVOKABLE void cancelInsertLatencyCalibration();
+    Q_INVOKABLE QVariantMap getLatencyAlignmentReport() const;
     Q_INVOKABLE QVariantMap getExternalInsertStatus() const;
     Q_INVOKABLE void disconnectExternalInsert();
     Q_INVOKABLE void resetInsertXRuns();
@@ -351,6 +377,8 @@ public:
     Q_INVOKABLE void resetRenderStatus();
     Q_INVOKABLE void setRenderMonitorVolume(double volume);
     Q_INVOKABLE void setListeningVolume(double volume);
+    Q_INVOKABLE void setRenderMonitorMuted(bool muted);
+    Q_INVOKABLE void setListeningMuted(bool muted);
     Q_INVOKABLE bool auditionRenderedFile(const QString& targetDeckId, const QString& filePath, bool switchToRenderMonitor = true);
     Q_INVOKABLE QVariantMap getRenderStatus() const;
 
@@ -365,9 +393,12 @@ public:
     [[nodiscard]] engine::render::RenderEngine& renderEngine() noexcept { return m_renderEngine; }
     [[nodiscard]] engine::deck::DeckManager* deckManager() noexcept { return m_deckManager.get(); }
     [[nodiscard]] engine::backend::PipeWireAudioOutput* audioOutput() noexcept { return m_audioOutput.get(); }
+    [[nodiscard]] engine::backend::AudioControlManager* audioControlManager() const noexcept { return m_audioControlManager.get(); }
+    [[nodiscard]] std::shared_ptr<engine::insert::PipeWireInsertTransport> insertTransport() const noexcept { return m_insertTransport; }
 
     /// Test helper: Render an audio block through the controller's audio output callback
     void renderOfflineBlock(float* outInterleaved, size_t frames);
+    void renderOfflineRawBlock(void* outInterleaved, size_t frames);
 
 signals:
     void activeDeckChanged(const QString& deckId);
@@ -395,6 +426,11 @@ signals:
     void renderStateChanged();
     void renderMonitorVolumeChanged(double volume);
     void listeningVolumeChanged(double volume);
+    void renderMonitorMutedChanged(bool muted);
+    void listeningMutedChanged(bool muted);
+    void presetImportWarning(const QString& target, int requestedLeft, int requestedRight,
+                             int activeLimit, int overflowLeft, int overflowRight,
+                             const QString& message);
     void renderTaskStarted(const QString& taskId, const QString& name, int totalTracks);
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
 
@@ -419,6 +455,8 @@ private:
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
     std::unique_ptr<engine::backend::PipeWireAudioOutput> m_audioOutput;
+    std::unique_ptr<engine::backend::AudioControlManager> m_audioControlManager;
+    std::shared_ptr<engine::insert::PipeWireInsertTransport> m_insertTransport;
 
     // Control Thread UI Parameter Snapshots & Response Curve Calculators (P0-21)
     // Strictly owned by Control Thread and completely separated from running AudioChain DSP nodes.
@@ -473,6 +511,12 @@ private:
     // Private helpers for DSP node lookup and signal dispatch (P1-1, P1-2)
     void emitDspNodeSignal(const QString& nodeName);
     bool findDspNode(const QString& nodeName, uint8_t& outChain, uint8_t& outIndex) const noexcept;
+    void updateSourceBitDepthFromActiveDeck();
+
+    std::atomic<double> m_reverbMaxTailRetentionSeconds{5.0};
+    std::atomic<double> m_reverbMaxProcessingTimeMs{0.0};
+    mutable std::mutex m_presetReportMutex;
+    QVariantMap m_lastPresetImportReport;
 
     // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
     engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};

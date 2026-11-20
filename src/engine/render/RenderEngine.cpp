@@ -412,15 +412,17 @@ QString RenderEngine::enqueueAlbumRender(const QString& folderPath, const Render
         return QString();
     }
 
-    // Supported extensions: .flac, .wav, .mp3, .ogg, .opus, .m4a, .aac
-    QStringList filters;
-    filters << "*.flac" << "*.wav" << "*.mp3" << "*.ogg" << "*.opus" << "*.m4a" << "*.aac";
-    QFileInfoList list = dir.entryInfoList(filters, QDir::Files | QDir::NoSymLinks, QDir::Unsorted);
+    // Filter using FolderSession::isSupportedAudioExtension() so .wav/.flac/.mp3/.ogg/.opus/.m4a/.aac/.wma/.aif/.aiff
+    // and case-insensitive extensions match live session folder scanning (§20.1 / §5.11.6)
+    const QFileInfoList list = dir.entryInfoList(QDir::Files | QDir::NoSymLinks, QDir::Unsorted);
 
     std::vector<std::string> fileNames;
     fileNames.reserve(static_cast<size_t>(list.size()));
     for (const auto& fi : list) {
         if (fi.isSymLink() || fi.fileName().startsWith(QStringLiteral(".desk32"))) {
+            continue;
+        }
+        if (!session::FolderSession::isSupportedAudioExtension(fi.suffix().toLower())) {
             continue;
         }
         fileNames.push_back(fi.fileName().toStdString());
@@ -798,6 +800,7 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
         jobDet.insert(QStringLiteral("bit_depth"), static_cast<int>(task.settings.bitDepth));
         jobDet.insert(QStringLiteral("rate_mode"), static_cast<int>(task.settings.rateMode));
         jobDet.insert(QStringLiteral("available_bytes"), QStorageInfo(task.sourceFolder).bytesAvailable());
+        jobDet.insert(QStringLiteral("external_insert_excluded"), task.dspSnapshot.externalInsertWasActiveInLive);
         core::log::LogService::instance().log(
             "Render",
             task.type == RenderType::Album ? "AlbumRender" : "TrackRender",
@@ -809,6 +812,17 @@ bool RenderEngine::processTask(RenderTaskInfo& task, RenderSequenceManager& seqM
             QString::fromUtf8(QJsonDocument(jobDet).toJson(QJsonDocument::Compact)),
             parentOpId, ""
         );
+        if (task.dspSnapshot.externalInsertWasActiveInLive) {
+            const QString insertLabel = task.dspSnapshot.externalInsertNodeName.empty()
+                                            ? QStringLiteral("ExternalInsert")
+                                            : QString::fromStdString(task.dspSnapshot.externalInsertNodeName);
+            task.warningMessage = QString("External Insert '%1' was active in live monitoring and is excluded from offline render per §6.6.")
+                                      .arg(insertLabel);
+            core::log::LogService::instance().log(
+                "Render", "ExternalInsertExcluded", "Warning",
+                task.warningMessage, "RenderEngine", insertLabel, "{}",
+                parentOpId, "");
+        }
     }
 
     // 3. Render tracks sequentially
@@ -1302,7 +1316,15 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
         }
     }
 
-    writer.close();
+    if (!writer.close()) {
+        outError = QString("Failed to finalize rendered WAV file '%1': %2")
+                       .arg(outputFilePath, QString::fromStdString(writer.lastError()));
+        QFile::remove(outputFilePath);
+        core::log::LogService::instance().log(
+            "Render", "WavFinalize", "Failed", outError, "FileSystem", outputFilePath,
+            "{}", "", "", core::log::ErrorCode::RenderWriteFailed, 0.0);
+        return false;
+    }
 
     // Verify written file exists and has valid audio data
     QFileInfo outFi(outputFilePath);

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "AudioNode.hpp"
-#include <vector>
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cstring>
 #include <memory>
 #include <string>
-#include <atomic>
+#include <vector>
 
 namespace desk32::engine::pipeline {
 
@@ -17,6 +20,7 @@ enum class ChainPurpose {
 class AudioChain {
 public:
     static constexpr size_t MAX_NODES = 16; ///< Upper bound on DSP nodes per chain for bounded O(N) traversal (P0-29)
+    static constexpr size_t DRY_SCRATCH_FRAMES = AudioNode::DEFAULT_MAX_BLOCK_SIZE;
 
     explicit AudioChain(std::string name, ChainPurpose purpose)
         : m_name(std::move(name))
@@ -98,6 +102,9 @@ public:
         for (auto& node : m_nodes) {
             node->reset();
         }
+        m_hasProcessedBlock = false;
+        m_chainFadeRemaining = 0;
+        m_nodeFadeRemaining.fill(0);
     }
 
     /// Reclaim retired DSP instances across all nodes outside Audio Thread (P0-21)
@@ -128,26 +135,150 @@ public:
     [[nodiscard]] bool isBypassed() const noexcept { return m_bypassed.load(std::memory_order_relaxed); }
     void setBypassed(bool bypassed) noexcept { m_bypassed.store(bypassed, std::memory_order_relaxed); }
 
-    /// Real-time audio processing.
-    /// Executes sequentially across all active nodes in the chain.
+    /// Real-time audio processing (zero heap allocations).
+    /// Executes sequentially across active nodes and applies ~5ms linear dry/wet smoothing on bypass transitions (§5.9).
     inline void process(double* left, double* right, size_t frameCount) {
-        if (m_bypassed.load(std::memory_order_relaxed)) return;
+        const bool curChainBypass = m_bypassed.load(std::memory_order_relaxed);
+        const size_t nNodes = std::min(m_nodes.size(), MAX_NODES);
 
-        for (auto& node : m_nodes) {
-            if (!node->isBypassed()) {
-                node->process(left, right, frameCount);
+        if (!m_hasProcessedBlock) {
+            m_prevChainBypassed = curChainBypass;
+            for (size_t i = 0; i < nNodes; ++i) {
+                m_prevNodeBypassed[i] = m_nodes[i]->isBypassed();
             }
+            m_hasProcessedBlock = true;
+            if (curChainBypass) {
+                return;
+            }
+            for (size_t i = 0; i < nNodes; ++i) {
+                auto& node = m_nodes[i];
+                if (!node->isBypassed() || node->wantsProcessWhileBypassed()) {
+                    node->process(left, right, frameCount);
+                }
+            }
+            return;
+        }
+
+        const size_t fadeLen = static_cast<size_t>(std::clamp(m_sampleRate * 0.005, 16.0, 512.0));
+        if (curChainBypass != m_prevChainBypassed) {
+            m_chainFadeTotal = fadeLen;
+            m_chainFadeRemaining = fadeLen;
+            m_chainFadeToBypass = curChainBypass;
+            m_prevChainBypassed = curChainBypass;
+        }
+
+        if (curChainBypass && m_chainFadeRemaining == 0) {
+            return;
+        }
+
+        const bool applyChainFade = (m_chainFadeRemaining > 0) && (frameCount <= DRY_SCRATCH_FRAMES);
+        if (applyChainFade) {
+            std::memcpy(m_chainDryL.data(), left, frameCount * sizeof(double));
+            std::memcpy(m_chainDryR.data(), right, frameCount * sizeof(double));
+        } else if (curChainBypass) {
+            return;
+        }
+
+        for (size_t i = 0; i < nNodes; ++i) {
+            auto& node = m_nodes[i];
+            const bool nodeBypass = node->isBypassed();
+            const bool tailBypass = (node->bypassBehavior() == BypassBehavior::TailPreserving);
+
+            if (nodeBypass != m_prevNodeBypassed[i]) {
+                m_prevNodeBypassed[i] = nodeBypass;
+                if (!tailBypass && !curChainBypass) {
+                    m_nodeFadeTotal[i] = fadeLen;
+                    m_nodeFadeRemaining[i] = fadeLen;
+                    m_nodeFadeToBypass[i] = nodeBypass;
+                } else {
+                    m_nodeFadeRemaining[i] = 0;
+                }
+            }
+
+            const bool fadingNode = (m_nodeFadeRemaining[i] > 0) && (frameCount <= DRY_SCRATCH_FRAMES);
+            if (!nodeBypass) {
+                if (fadingNode) {
+                    std::memcpy(m_nodeDryL.data(), left, frameCount * sizeof(double));
+                    std::memcpy(m_nodeDryR.data(), right, frameCount * sizeof(double));
+                    node->process(left, right, frameCount);
+                    applyCrossfade(left, right, m_nodeDryL.data(), m_nodeDryR.data(),
+                                   frameCount, m_nodeFadeRemaining[i], m_nodeFadeTotal[i], m_nodeFadeToBypass[i]);
+                } else {
+                    m_nodeFadeRemaining[i] = 0;
+                    node->process(left, right, frameCount);
+                }
+            } else if (tailBypass && node->wantsProcessWhileBypassed()) {
+                m_nodeFadeRemaining[i] = 0;
+                node->process(left, right, frameCount);
+            } else if (fadingNode && m_nodeFadeToBypass[i]) {
+                std::memcpy(m_nodeDryL.data(), left, frameCount * sizeof(double));
+                std::memcpy(m_nodeDryR.data(), right, frameCount * sizeof(double));
+                node->setRtFadeForceActive(true);
+                node->process(left, right, frameCount);
+                node->setRtFadeForceActive(false);
+                applyCrossfade(left, right, m_nodeDryL.data(), m_nodeDryR.data(),
+                               frameCount, m_nodeFadeRemaining[i], m_nodeFadeTotal[i], true);
+            } else {
+                m_nodeFadeRemaining[i] = 0;
+            }
+        }
+
+        if (applyChainFade) {
+            applyCrossfade(left, right, m_chainDryL.data(), m_chainDryR.data(),
+                           frameCount, m_chainFadeRemaining, m_chainFadeTotal, m_chainFadeToBypass);
         }
     }
 
 private:
+    static inline void applyCrossfade(double* wetL, double* wetR,
+                                      const double* dryL, const double* dryR,
+                                      size_t frameCount,
+                                      size_t& fadeRemaining, size_t fadeTotal,
+                                      bool fadeToBypass) noexcept
+    {
+        if (fadeTotal == 0 || fadeRemaining == 0) {
+            fadeRemaining = 0;
+            return;
+        }
+        const double invTotal = 1.0 / static_cast<double>(fadeTotal);
+        for (size_t i = 0; i < frameCount; ++i) {
+            if (fadeRemaining > 0) {
+                const size_t done = fadeTotal - fadeRemaining;
+                const double progress = static_cast<double>(done) * invTotal;
+                const double wetWeight = fadeToBypass ? (1.0 - progress) : progress;
+                const double dryWeight = 1.0 - wetWeight;
+                wetL[i] = wetL[i] * wetWeight + dryL[i] * dryWeight;
+                wetR[i] = wetR[i] * wetWeight + dryR[i] * dryWeight;
+                --fadeRemaining;
+            } else if (fadeToBypass) {
+                wetL[i] = dryL[i];
+                wetR[i] = dryR[i];
+            }
+        }
+    }
+
     std::string m_name;
     ChainPurpose m_purpose;
     std::vector<std::shared_ptr<AudioNode>> m_nodes;
     double m_sampleRate = 48000.0;
     std::atomic<bool> m_bypassed{false};
     std::atomic<uint64_t> m_rejectedNodeCount{0};
+
+    bool m_hasProcessedBlock{false};
+    bool m_prevChainBypassed{false};
+    size_t m_chainFadeRemaining{0};
+    size_t m_chainFadeTotal{0};
+    bool m_chainFadeToBypass{false};
+
+    std::array<bool, MAX_NODES> m_prevNodeBypassed{};
+    std::array<size_t, MAX_NODES> m_nodeFadeRemaining{};
+    std::array<size_t, MAX_NODES> m_nodeFadeTotal{};
+    std::array<bool, MAX_NODES> m_nodeFadeToBypass{};
+
+    alignas(64) std::array<double, DRY_SCRATCH_FRAMES> m_chainDryL{};
+    alignas(64) std::array<double, DRY_SCRATCH_FRAMES> m_chainDryR{};
+    alignas(64) std::array<double, DRY_SCRATCH_FRAMES> m_nodeDryL{};
+    alignas(64) std::array<double, DRY_SCRATCH_FRAMES> m_nodeDryR{};
 };
 
 } // namespace desk32::engine::pipeline
-

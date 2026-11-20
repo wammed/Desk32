@@ -127,11 +127,17 @@ public:
     }
 
     /// Fast, real-time safe assignment of all precalculated band coefficients (Audio Thread, P0-27)
-    inline void applyAllCoefficients(const std::array<BiquadCoefficients, NUM_BANDS>& coeffs) noexcept
+    inline void applyAllCoefficients(const std::array<BiquadCoefficients, NUM_BANDS>& coeffs,
+                                     size_t smoothSamples = 0) noexcept
     {
         for (size_t i = 0; i < NUM_BANDS; ++i) {
-            m_leftFilters[i].setCoefficients(coeffs[i]);
-            m_rightFilters[i].setCoefficients(coeffs[i]);
+            if (smoothSamples > 1) {
+                m_leftFilters[i].setCoefficientsSmooth(coeffs[i], smoothSamples);
+                m_rightFilters[i].setCoefficientsSmooth(coeffs[i], smoothSamples);
+            } else {
+                m_leftFilters[i].setCoefficients(coeffs[i]);
+                m_rightFilters[i].setCoefficients(coeffs[i]);
+            }
         }
     }
 

@@ -65,6 +65,10 @@ struct RenderDspSnapshot {
     double limiterCeilingDb = -0.1;
     double limiterReleaseMs = 50.0;
     double limiterLookaheadMs = 1.0;
+
+    // External Insert live-session exclusion notice (§6.6)
+    bool externalInsertWasActiveInLive = false;
+    std::string externalInsertNodeName;
 };
 
 /// Offline DSP Render Chain for File Output (Specification Section 5.11.3 & 20.1).
@@ -102,6 +106,11 @@ public:
         m_comp.reset();
         m_limiter.reset();
         m_reverb.reset();
+    }
+
+    void setExternalInsertLiveStatus(bool active, std::string nodeName = {}) {
+        m_externalInsertWasActiveInLive = active;
+        m_externalInsertNodeName = std::move(nodeName);
     }
 
     // Direct access to cloned DSP processors
@@ -215,6 +224,9 @@ public:
         s.limiterReleaseMs = m_limiter.releaseMs();
         s.limiterLookaheadMs = m_limiter.lookaheadMs();
 
+        s.externalInsertWasActiveInLive = m_externalInsertWasActiveInLive;
+        s.externalInsertNodeName = m_externalInsertNodeName;
+
         return s;
     }
 
@@ -314,6 +326,8 @@ public:
 private:
     double m_sampleRate = 48000.0;
     bool m_enabled = true;
+    bool m_externalInsertWasActiveInLive = false;
+    std::string m_externalInsertNodeName;
 
     ParametricEQ m_peq;
     GraphicEQ m_geq;

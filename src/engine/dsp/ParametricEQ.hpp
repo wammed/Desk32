@@ -21,6 +21,16 @@ public:
         double gainDb = 0.0;
     };
 
+    struct BandImportReport {
+        size_t requestedLeft = 0;
+        size_t requestedRight = 0;
+        size_t activeLeft = 0;
+        size_t activeRight = 0;
+        size_t overflowLeft = 0;
+        size_t overflowRight = 0;
+        bool truncated = false;
+    };
+
     ParametricEQ()
     {
         initDefaults();
@@ -39,6 +49,8 @@ public:
             m_enabled.store(other.m_enabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             m_leftBands = other.m_leftBands;
             m_rightBands = other.m_rightBands;
+            m_overflowLeftBands = other.m_overflowLeftBands;
+            m_overflowRightBands = other.m_overflowRightBands;
             m_leftFilters = other.m_leftFilters;
             m_rightFilters = other.m_rightFilters;
         }
@@ -143,23 +155,41 @@ public:
     inline void applyCoefficients(const std::array<BiquadCoefficients, BANDS_PER_CHANNEL>& leftCoeffs,
                                   const std::array<BiquadCoefficients, BANDS_PER_CHANNEL>& rightCoeffs,
                                   const std::array<bool, BANDS_PER_CHANNEL>& leftEnabled,
-                                  const std::array<bool, BANDS_PER_CHANNEL>& rightEnabled) noexcept
+                                  const std::array<bool, BANDS_PER_CHANNEL>& rightEnabled,
+                                  size_t smoothSamples = 0) noexcept
     {
         for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
-            m_leftFilters[i].setCoefficients(leftCoeffs[i]);
-            m_rightFilters[i].setCoefficients(rightCoeffs[i]);
+            if (smoothSamples > 1) {
+                m_leftFilters[i].setCoefficientsSmooth(leftCoeffs[i], smoothSamples);
+                m_rightFilters[i].setCoefficientsSmooth(rightCoeffs[i], smoothSamples);
+            } else {
+                m_leftFilters[i].setCoefficients(leftCoeffs[i]);
+                m_rightFilters[i].setCoefficients(rightCoeffs[i]);
+            }
             m_leftBands[i].enabled = leftEnabled[i];
             m_rightBands[i].enabled = rightEnabled[i];
         }
     }
 
-    /// Export all bands for dynamic vector serialization (Spec v3.8 §5.6)
+    /// Export all bands including any >16 variable overflow bands (Spec §5.2 / v3.8 §5.6)
     [[nodiscard]] std::vector<BandConfig> exportBands(bool rightChannel) const {
         const auto& src = rightChannel ? m_rightBands : m_leftBands;
-        return std::vector<BandConfig>(src.begin(), src.end());
+        const auto& overflow = rightChannel ? m_overflowRightBands : m_overflowLeftBands;
+        std::vector<BandConfig> out(src.begin(), src.end());
+        out.insert(out.end(), overflow.begin(), overflow.end());
+        return out;
     }
 
-    /// Import bands from dynamic vector serialization
+    [[nodiscard]] const std::vector<BandConfig>& overflowLeftBands() const noexcept { return m_overflowLeftBands; }
+    [[nodiscard]] const std::vector<BandConfig>& overflowRightBands() const noexcept { return m_overflowRightBands; }
+    [[nodiscard]] size_t totalLeftBandCount() const noexcept { return BANDS_PER_CHANNEL + m_overflowLeftBands.size(); }
+    [[nodiscard]] size_t totalRightBandCount() const noexcept { return BANDS_PER_CHANNEL + m_overflowRightBands.size(); }
+    void clearOverflowBands() {
+        m_overflowLeftBands.clear();
+        m_overflowRightBands.clear();
+    }
+
+    /// Import bands from dynamic vector serialization: first 16 activate in DSP, excess (>16) retained in variable overflow vector (§5.2)
     void importBands(bool rightChannel, const std::vector<BandConfig>& bands) {
         const size_t n = std::min(bands.size(), BANDS_PER_CHANNEL);
         for (size_t i = 0; i < n; ++i) {
@@ -169,6 +199,28 @@ public:
                 setLeftBand(i, bands[i]);
             }
         }
+        auto& overflow = rightChannel ? m_overflowRightBands : m_overflowLeftBands;
+        overflow.clear();
+        if (bands.size() > BANDS_PER_CHANNEL) {
+            overflow.assign(bands.begin() + static_cast<std::ptrdiff_t>(BANDS_PER_CHANNEL), bands.end());
+        }
+    }
+
+    /// Import L/R bands and report whether >16 bands triggered overflow truncation in active DSP (§5.2, §11.1)
+    BandImportReport importBandsWithReport(const std::vector<BandConfig>& leftBands,
+                                           const std::vector<BandConfig>& rightBands)
+    {
+        importBands(false, leftBands);
+        importBands(true, rightBands);
+        BandImportReport report;
+        report.requestedLeft = leftBands.size();
+        report.requestedRight = rightBands.size();
+        report.activeLeft = std::min(leftBands.size(), BANDS_PER_CHANNEL);
+        report.activeRight = std::min(rightBands.size(), BANDS_PER_CHANNEL);
+        report.overflowLeft = m_overflowLeftBands.size();
+        report.overflowRight = m_overflowRightBands.size();
+        report.truncated = (report.overflowLeft > 0 || report.overflowRight > 0);
+        return report;
     }
 
     static std::vector<std::string> factoryPresetNames()
@@ -287,6 +339,7 @@ public:
         if (!getPresetBandConfigs(presetName, m_leftBands, m_rightBands)) {
             return false;
         }
+        clearOverflowBands();
         configure(m_sampleRate);
         return true;
     }
@@ -319,6 +372,8 @@ private:
     std::atomic<bool> m_enabled{false};
     std::array<BandConfig, BANDS_PER_CHANNEL> m_leftBands;
     std::array<BandConfig, BANDS_PER_CHANNEL> m_rightBands;
+    std::vector<BandConfig> m_overflowLeftBands;
+    std::vector<BandConfig> m_overflowRightBands;
     std::array<BiquadFilter, BANDS_PER_CHANNEL> m_leftFilters;
     std::array<BiquadFilter, BANDS_PER_CHANNEL> m_rightFilters;
 };

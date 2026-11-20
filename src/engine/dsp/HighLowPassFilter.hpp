@@ -102,17 +102,29 @@ public:
 
     /// Fast, real-time safe assignment of precalculated coefficients (Audio Thread execution, P0-27)
     /// Zero allocations, zero trigonometric functions, zero locks, bounded O(1) execution.
-    inline void applyCoefficients(const HighLowPassCoefficients& c) noexcept
+    inline void applyCoefficients(const HighLowPassCoefficients& c, size_t smoothSamples = 0) noexcept
     {
-        m_hpfLeft1.setCoefficients(c.hpfStage1);
-        m_hpfRight1.setCoefficients(c.hpfStage1);
-        m_hpfLeft2.setCoefficients(c.hpfStage2);
-        m_hpfRight2.setCoefficients(c.hpfStage2);
+        if (smoothSamples > 1) {
+            m_hpfLeft1.setCoefficientsSmooth(c.hpfStage1, smoothSamples);
+            m_hpfRight1.setCoefficientsSmooth(c.hpfStage1, smoothSamples);
+            m_hpfLeft2.setCoefficientsSmooth(c.hpfStage2, smoothSamples);
+            m_hpfRight2.setCoefficientsSmooth(c.hpfStage2, smoothSamples);
 
-        m_lpfLeft1.setCoefficients(c.lpfStage1);
-        m_lpfRight1.setCoefficients(c.lpfStage1);
-        m_lpfLeft2.setCoefficients(c.lpfStage2);
-        m_lpfRight2.setCoefficients(c.lpfStage2);
+            m_lpfLeft1.setCoefficientsSmooth(c.lpfStage1, smoothSamples);
+            m_lpfRight1.setCoefficientsSmooth(c.lpfStage1, smoothSamples);
+            m_lpfLeft2.setCoefficientsSmooth(c.lpfStage2, smoothSamples);
+            m_lpfRight2.setCoefficientsSmooth(c.lpfStage2, smoothSamples);
+        } else {
+            m_hpfLeft1.setCoefficients(c.hpfStage1);
+            m_hpfRight1.setCoefficients(c.hpfStage1);
+            m_hpfLeft2.setCoefficients(c.hpfStage2);
+            m_hpfRight2.setCoefficients(c.hpfStage2);
+
+            m_lpfLeft1.setCoefficients(c.lpfStage1);
+            m_lpfRight1.setCoefficients(c.lpfStage1);
+            m_lpfLeft2.setCoefficients(c.lpfStage2);
+            m_lpfRight2.setCoefficients(c.lpfStage2);
+        }
 
         m_hpfSlope = (c.hpfSlope == 1) ? FilterSlope::Slope24dB : FilterSlope::Slope12dB;
         m_lpfSlope = (c.lpfSlope == 1) ? FilterSlope::Slope24dB : FilterSlope::Slope12dB;

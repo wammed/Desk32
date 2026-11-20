@@ -9,6 +9,7 @@
 #include "engine/dsp/AlgorithmicReverb.hpp"
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <mutex>
@@ -36,7 +37,7 @@ public:
     }
 
     void process(double* left, double* right, size_t frameCount) override {
-        if (isBypassed()) return;
+        if (isEffectivelyBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_eq.process(left[i], right[i]);
         }
@@ -45,8 +46,9 @@ public:
     void applyCoefficients(const std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL>& leftCoeffs,
                            const std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL>& rightCoeffs,
                            const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& leftEnabled,
-                           const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& rightEnabled) noexcept {
-        m_eq.applyCoefficients(leftCoeffs, rightCoeffs, leftEnabled, rightEnabled);
+                           const std::array<bool, ParametricEQ::BANDS_PER_CHANNEL>& rightEnabled,
+                           size_t smoothSamples = 0) noexcept {
+        m_eq.applyCoefficients(leftCoeffs, rightCoeffs, leftEnabled, rightEnabled, smoothSamples);
     }
 
     [[nodiscard]] const ParametricEQ& dsp() const noexcept { return m_eq; }
@@ -83,14 +85,15 @@ public:
     }
 
     void process(double* left, double* right, size_t frameCount) override {
-        if (isBypassed()) return;
+        if (isEffectivelyBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_geq.process(left[i], right[i]);
         }
     }
 
-    void applyAllCoefficients(const std::array<BiquadCoefficients, GraphicEQ::NUM_BANDS>& coeffs) noexcept {
-        m_geq.applyAllCoefficients(coeffs);
+    void applyAllCoefficients(const std::array<BiquadCoefficients, GraphicEQ::NUM_BANDS>& coeffs,
+                              size_t smoothSamples = 0) noexcept {
+        m_geq.applyAllCoefficients(coeffs, smoothSamples);
     }
 
     void applyBandEnabled(const std::array<bool, GraphicEQ::NUM_BANDS>& enabled) noexcept {
@@ -136,19 +139,27 @@ public:
 
     void reset() override {
         m_filter.reset();
+        m_hpfEnabledResetRestore();
+    }
+
+    void resetFilterStateOnly() noexcept {
+        m_filter.reset();
+    }
+
+    void m_hpfEnabledResetRestore() noexcept {
         m_filter.setHpfEnabled(true);
         m_filter.setLpfEnabled(true);
     }
 
     void process(double* left, double* right, size_t frameCount) override {
-        if (isBypassed()) return;
+        if (isEffectivelyBypassed()) return;
         for (size_t i = 0; i < frameCount; ++i) {
             m_filter.process(left[i], right[i]);
         }
     }
 
-    void applyCoefficients(const HighLowPassCoefficients& coeffs) noexcept {
-        m_filter.applyCoefficients(coeffs);
+    void applyCoefficients(const HighLowPassCoefficients& coeffs, size_t smoothSamples = 0) noexcept {
+        m_filter.applyCoefficients(coeffs, smoothSamples);
     }
 
     [[nodiscard]] const HighLowPassFilter& dsp() const noexcept { return m_filter; }
@@ -246,7 +257,7 @@ public:
         }
 
         // 2. Audio processing with active instance
-        if (m_active && !isBypassed()) {
+        if (m_active && !isEffectivelyBypassed()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_active->process(left[i], right[i]);
             }
@@ -421,7 +432,7 @@ public:
         }
 
         // 2. Audio processing with active instance
-        if (m_active && !isBypassed()) {
+        if (m_active && !isEffectivelyBypassed()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_active->process(left[i], right[i]);
             }
@@ -519,6 +530,8 @@ public:
         double predelayMs{0.0};
         bool tailPreserving{true};
         bool enabled{true};
+        double maxTailRetentionSeconds{5.0};
+        double maxProcessingTimeMs{0.0};
     };
 
     struct RingoutSlot {
@@ -536,7 +549,8 @@ public:
         MaxRetentionSafetyCeiling = 3,  // Fallback safety timeout (10 seconds @ sampleRate)
         SlotCapacityEviction = 4,       // All 8 ringout slots full; lowest-energy slot evicted
         ExplicitCancel = 5,             // Explicit reset() / non-tail-preserving cancel
-        AbnormalStateReset = 6          // NaN / Inf detected in internal state
+        AbnormalStateReset = 6,         // NaN / Inf detected in internal state
+        TailRetentionTimeout = 7        // Configurable maxTailRetentionSeconds ceiling reached during TailPreserving bypass
     };
 
     explicit ReverbNode(std::string name = "Reverb")
@@ -568,20 +582,28 @@ public:
             cfg = m_config;
         }
         prepareInstance(sampleRate, cfg.roomSize, cfg.damping, cfg.wetLevel,
-                        cfg.predelayMs, cfg.tailPreserving, cfg.enabled);
+                        cfg.predelayMs, cfg.tailPreserving, cfg.enabled,
+                        cfg.maxTailRetentionSeconds, cfg.maxProcessingTimeMs);
     }
 
     // Called on Control Thread (P0-21, P0-22)
     void prepareInstance(double sampleRate, double roomSize, double damping,
                          double wetLevel, double predelayMs, bool tailPreserving,
-                         bool enabled) {
+                         bool enabled, double maxTailRetentionSeconds = 5.0,
+                         double maxProcessingTimeMs = 0.0) {
+        const double clampedRetention = std::clamp(maxTailRetentionSeconds, 0.1, 30.0);
+        const double clampedBudgetMs = std::max(0.0, maxProcessingTimeMs);
+        m_maxTailRetentionSeconds.store(clampedRetention, std::memory_order_relaxed);
+        m_maxProcessingTimeMs.store(clampedBudgetMs, std::memory_order_relaxed);
+
         auto next = std::make_unique<AlgorithmicReverb>();
         next->configure(sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
         AlgorithmicReverb* raw = next.release();
         AlgorithmicReverb* unconsumed = nullptr;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
-            m_config = {sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled};
+            m_config = {sampleRate, roomSize, damping, wetLevel, predelayMs,
+                        tailPreserving, enabled, clampedRetention, clampedBudgetMs};
             unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
         }
         if (unconsumed) {
@@ -590,6 +612,60 @@ public:
             delete unconsumed;
         }
         reclaimRetired();
+    }
+
+    void setTailRetentionAndTimeBudget(double maxTailRetentionSeconds, double maxProcessingTimeMs) noexcept {
+        const double clampedRetention = std::clamp(maxTailRetentionSeconds, 0.1, 30.0);
+        const double clampedBudgetMs = std::max(0.0, maxProcessingTimeMs);
+        m_maxTailRetentionSeconds.store(clampedRetention, std::memory_order_relaxed);
+        m_maxProcessingTimeMs.store(clampedBudgetMs, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        m_config.maxTailRetentionSeconds = clampedRetention;
+        m_config.maxProcessingTimeMs = clampedBudgetMs;
+    }
+
+    [[nodiscard]] double maxTailRetentionSeconds() const noexcept {
+        return m_maxTailRetentionSeconds.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] double maxProcessingTimeMs() const noexcept {
+        return m_maxProcessingTimeMs.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t processingBudgetExceededCount() const noexcept {
+        return m_processingBudgetExceededCount.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t tailRetentionTimeoutRetireCount() const noexcept {
+        return m_tailRetentionTimeoutRetireCount.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] bool wantsProcessWhileBypassed() const noexcept override {
+        if (bypassBehavior() != BypassBehavior::TailPreserving) {
+            return false;
+        }
+        if (m_active && m_active->totalInternalEnergy() > 1e-12) {
+            return true;
+        }
+        for (const auto& slot : m_ringoutSlots) {
+            if (slot.reverb != nullptr) return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] NodeState nodeState() const noexcept override {
+        if (hasInvalidState() || m_hasError.load(std::memory_order_relaxed)) {
+            return NodeState::Error;
+        }
+        if (!m_configured.load(std::memory_order_relaxed)) {
+            return NodeState::Uninitialized;
+        }
+        if (isBypassed()) {
+            return (bypassBehavior() == BypassBehavior::TailPreserving && wantsProcessWhileBypassed())
+                       ? NodeState::TailRingout
+                       : NodeState::Bypassed;
+        }
+        for (const auto& slot : m_ringoutSlots) {
+            if (slot.reverb != nullptr) return NodeState::TailRingout;
+        }
+        return NodeState::Active;
     }
 
     void reset() override {
@@ -680,12 +756,61 @@ public:
             }
         }
 
-        // 2. Bypass handling (P0-22): When bypassed, audio passes through clean without wet reverb.
-        // However, we MUST advance ringout slots and active reverb with zero input (0.0)
-        // so that internal delay states decay naturally rather than freezing indefinitely!
+        // 2. Bypass handling (§5.6 / P0-22):
+        // - Immediate: dry passes through untouched, ringout & active decay silently with 0.0 input.
+        // - TailPreserving: dry passes through untouched AND decaying wet tail is added until natural decay
+        //   or maxTailRetentionSeconds timeout, bounded by optional maxProcessingTimeMs budget.
         if (isBypassed()) {
+            const bool emitWetTail = (bypassBehavior() == BypassBehavior::TailPreserving);
+            const double budgetMs = m_maxProcessingTimeMs.load(std::memory_order_relaxed);
+            const bool checkBudget = (budgetMs > 0.0);
+            const auto tStart = checkBudget ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+            const double sr = std::max(8000.0, m_active ? m_active->sampleRate() : m_sampleRate);
+            const size_t maxRetentionFrames = static_cast<size_t>(
+                std::clamp(m_maxTailRetentionSeconds.load(std::memory_order_relaxed), 0.1, 30.0) * sr);
+
+            if (!m_wasBypassedInProcess) {
+                m_wasBypassedInProcess = true;
+                m_bypassTailElapsedFrames = 0;
+            }
+            m_bypassTailElapsedFrames += frameCount;
+
+            if (emitWetTail && m_bypassTailElapsedFrames > maxRetentionFrames) {
+                if (m_active && m_active->totalInternalEnergy() > 0.0) {
+                    m_active->reset();
+                    recordRetireReason(RetireReason::TailRetentionTimeout);
+                }
+                for (auto& slot : m_ringoutSlots) {
+                    if (slot.reverb) {
+                        slot.reverb->reset();
+                        recordRetireReason(RetireReason::TailRetentionTimeout);
+                        retireInstance(slot.reverb);
+                        slot = RingoutSlot{};
+                    }
+                }
+                return;
+            }
+
+            bool budgetExceeded = false;
             for (auto& slot : m_ringoutSlots) {
                 if (!slot.reverb) continue;
+                if (checkBudget && !budgetExceeded) {
+                    const double elapsedMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - tStart).count();
+                    if (elapsedMs >= budgetMs) {
+                        budgetExceeded = true;
+                        m_processingBudgetExceededCount.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+                if (budgetExceeded) {
+                    slot.reverb->reset();
+                    recordRetireReason(RetireReason::SlotCapacityEviction);
+                    retireInstance(slot.reverb);
+                    slot = RingoutSlot{};
+                    continue;
+                }
+
                 double maxTail = 0.0;
                 bool abnormal = false;
                 for (size_t i = 0; i < frameCount; ++i) {
@@ -694,6 +819,10 @@ public:
                     if (!std::isfinite(dummyL) || !std::isfinite(dummyR)) {
                         abnormal = true;
                         break;
+                    }
+                    if (emitWetTail) {
+                        left[i] += dummyL;
+                        right[i] += dummyR;
                     }
                     double absL = std::abs(dummyL);
                     double absR = std::abs(dummyR);
@@ -719,17 +848,40 @@ public:
                 }
             }
             if (m_active) {
-                for (size_t i = 0; i < frameCount; ++i) {
-                    double dummyL = 0.0, dummyR = 0.0;
-                    m_active->process(dummyL, dummyR);
-                    if (!std::isfinite(dummyL) || !std::isfinite(dummyR)) {
-                        m_active->reset();
-                        break;
+                if (checkBudget && !budgetExceeded) {
+                    const double elapsedMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - tStart).count();
+                    if (elapsedMs >= budgetMs) {
+                        budgetExceeded = true;
+                        m_processingBudgetExceededCount.fetch_add(1, std::memory_order_relaxed);
                     }
+                }
+                if (!budgetExceeded) {
+                    for (size_t i = 0; i < frameCount; ++i) {
+                        double dummyL = 0.0, dummyR = 0.0;
+                        m_active->process(dummyL, dummyR);
+                        if (!std::isfinite(dummyL) || !std::isfinite(dummyR)) {
+                            m_active->reset();
+                            break;
+                        }
+                        if (emitWetTail) {
+                            left[i] += dummyL;
+                            right[i] += dummyR;
+                        }
+                    }
+                } else {
+                    m_active->reset();
                 }
             }
             return;
         }
+        m_wasBypassedInProcess = false;
+        m_bypassTailElapsedFrames = 0;
+
+        const double budgetMs = m_maxProcessingTimeMs.load(std::memory_order_relaxed);
+        const bool checkBudget = (budgetMs > 0.0);
+        const auto activeStart = checkBudget ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
 
         // 3. Active audio processing with new parameters
         if (m_active) {
@@ -749,12 +901,22 @@ public:
         }
 
         // 4. Ringout slots processing: input 0.0 to render decaying reverberation tails naturally
+        bool activeBudgetExceeded = false;
         for (auto& slot : m_ringoutSlots) {
             if (!slot.reverb) continue;
 
-            if (slot.reverb->hasInvalidState()) {
+            if (checkBudget && !activeBudgetExceeded) {
+                const double elapsedMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - activeStart).count();
+                if (elapsedMs >= budgetMs) {
+                    activeBudgetExceeded = true;
+                    m_processingBudgetExceededCount.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            if (activeBudgetExceeded || slot.reverb->hasInvalidState()) {
                 slot.reverb->reset();
-                recordRetireReason(RetireReason::AbnormalStateReset);
+                recordRetireReason(activeBudgetExceeded ? RetireReason::SlotCapacityEviction
+                                                        : RetireReason::AbnormalStateReset);
                 retireInstance(slot.reverb);
                 slot = RingoutSlot{};
                 continue;
@@ -871,6 +1033,7 @@ public:
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
         auto node = std::make_shared<ReverbNode>(m_name);
         node->setBypassed(isBypassed());
+        node->setBypassBehavior(bypassBehavior());
         Config cfg;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
@@ -878,7 +1041,8 @@ public:
         }
         node->prepareInstance(cfg.sampleRate, cfg.roomSize, cfg.damping,
                               cfg.wetLevel, cfg.predelayMs, cfg.tailPreserving,
-                              cfg.enabled);
+                              cfg.enabled, cfg.maxTailRetentionSeconds,
+                              cfg.maxProcessingTimeMs);
         return node;
     }
 
@@ -900,6 +1064,9 @@ private:
             break;
         case RetireReason::AbnormalStateReset:
             m_abnormalStateRetireCount.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case RetireReason::TailRetentionTimeout:
+            m_tailRetentionTimeoutRetireCount.fetch_add(1, std::memory_order_relaxed);
             break;
         default:
             break;
@@ -931,6 +1098,12 @@ private:
     std::atomic<uint64_t> m_capacityEvictionRetireCount{0};
     std::atomic<uint64_t> m_explicitCancelRetireCount{0};
     std::atomic<uint64_t> m_abnormalStateRetireCount{0};
+    std::atomic<uint64_t> m_tailRetentionTimeoutRetireCount{0};
+    std::atomic<uint64_t> m_processingBudgetExceededCount{0};
+    std::atomic<double> m_maxTailRetentionSeconds{5.0};
+    std::atomic<double> m_maxProcessingTimeMs{0.0};
+    bool m_wasBypassedInProcess{false};
+    size_t m_bypassTailElapsedFrames{0};
     std::atomic<RetireReason> m_lastRetireReason{RetireReason::None};
 };
 

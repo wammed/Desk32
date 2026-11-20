@@ -1,6 +1,7 @@
 #include "WorkspaceManager.hpp"
 #include "core/log/LogErrorCodes.hpp"
 #include "core/log/LogService.hpp"
+#include "engine/decoder/FFmpegAudioDecoder.hpp"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -260,6 +261,7 @@ void WorkspaceManager::simulateAppRestartForTesting() {
         m_lastError.clear();
         m_externalModificationCount = 0;
         m_externalChangeDetails.clear();
+        m_logOnlyProvenanceRelPaths.clear();
     }
     emit workspaceStateChanged();
 }
@@ -854,6 +856,16 @@ bool WorkspaceManager::openWorkspace(const QString& dirPath, QString& outError) 
     // Run startup cleanup, Stage 2 integrity verification against last known index, GC & Stage 1 watcher on worker thread
     runOnWorkerThread([this]() {
         cleanTempDirectoryLocked();
+        std::map<QString, StateIndexEntry> seededIndex;
+        if (loadStateIndexLocked(seededIndex)) {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_logOnlyProvenanceRelPaths.clear();
+            for (const auto& [rp, se] : seededIndex) {
+                if (se.logOnlyProvenance) {
+                    m_logOnlyProvenanceRelPaths.insert(rp);
+                }
+            }
+        }
         QStringList changes;
         std::vector<WorkspaceFileEntry> current;
         scanCurrentWorkspaceLocked(current, false);
@@ -1125,10 +1137,12 @@ void WorkspaceManager::continueInReadOnlyMode() {
 void WorkspaceManager::scanCurrentWorkspaceLocked(std::vector<WorkspaceFileEntry>& outEntries, bool computeTags) const {
     outEntries.clear();
     QString wsRoot;
+    std::set<QString> logOnlySnapshot;
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         if (m_readOnlyMode || m_openWorkspacePath.isEmpty() || m_lockFd < 0) return;
         wsRoot = m_openWorkspacePath;
+        logOnlySnapshot = m_logOnlyProvenanceRelPaths;
     }
 
     std::function<void(const QString&, const QString&)> walk = [&](const QString& curDir, const QString& relPrefix) {
@@ -1160,8 +1174,12 @@ void WorkspaceManager::scanCurrentWorkspaceLocked(std::vector<WorkspaceFileEntry
                 entry.mtimeNs = static_cast<qint64>(st.st_mtim.tv_sec) * 1000000000LL +
                                 static_cast<qint64>(st.st_mtim.tv_nsec);
                 if (computeFileSha256(fullPath, entry.sha256)) {
+                    entry.logOnlyProvenance = (logOnlySnapshot.count(relPath) > 0);
                     if (computeTags) {
                         entry.metadata = metadata::MetadataReader::parseTags(fullPath.toStdString());
+                        if (!entry.metadata.provenanceEmbedSupported) {
+                            entry.logOnlyProvenance = true;
+                        }
                     }
                     outEntries.push_back(std::move(entry));
                 }
@@ -1241,7 +1259,7 @@ void WorkspaceManager::cleanTempDirectoryLocked() {
     }
 }
 
-bool WorkspaceManager::loadStateIndexLocked(std::map<QString, std::pair<QString, qint64>>& outIndex) const {
+bool WorkspaceManager::loadStateIndexLocked(std::map<QString, StateIndexEntry>& outIndex) const {
     outIndex.clear();
     QString wsRoot;
     {
@@ -1266,8 +1284,9 @@ bool WorkspaceManager::loadStateIndexLocked(std::map<QString, std::pair<QString,
         const QString rp = o.value(QStringLiteral("relative_path")).toString();
         const QString sha = o.value(QStringLiteral("sha256")).toString();
         const qint64 sz = o.value(QStringLiteral("size")).toInteger();
+        const bool logOnly = o.value(QStringLiteral("log_only_provenance")).toBool(false);
         if (!rp.isEmpty() && !sha.isEmpty()) {
-            outIndex[rp] = std::make_pair(sha, sz);
+            outIndex[rp] = StateIndexEntry{sha, sz, logOnly};
         }
     }
     return true;
@@ -1287,6 +1306,7 @@ bool WorkspaceManager::saveStateIndexLocked(const std::vector<WorkspaceFileEntry
         o.insert(QStringLiteral("relative_path"), e.relativePath);
         o.insert(QStringLiteral("sha256"), e.sha256);
         o.insert(QStringLiteral("size"), e.size);
+        o.insert(QStringLiteral("log_only_provenance"), e.logOnlyProvenance);
         arr.append(o);
     }
     QJsonObject root;
@@ -1304,7 +1324,7 @@ bool WorkspaceManager::saveStateIndexLocked(const std::vector<WorkspaceFileEntry
 void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector<WorkspaceFileEntry>& currentEntries,
                                                                QStringList& outMessages)
 {
-    std::map<QString, std::pair<QString, qint64>> prevIndex;
+    std::map<QString, StateIndexEntry> prevIndex;
     if (!loadStateIndexLocked(prevIndex)) {
         return;
     }
@@ -1327,10 +1347,10 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
             }
             core::log::LogService::instance().log(
                 "Workspace", "ExternalModification", "Warning", msg, "WorkspaceFile", relPath,
-                QString("{\"type\":\"removed_or_renamed\",\"expected_sha256\":\"%1\"}").arg(expected.first),
+                QString("{\"type\":\"removed_or_renamed\",\"expected_sha256\":\"%1\"}").arg(expected.sha256),
                 "", "", core::log::ErrorCode::WorkspaceExternalModification, 0.0);
             emit externalModificationDetected(relPath, msg);
-        } else if (it->second->sha256 != expected.first) {
+        } else if (it->second->sha256 != expected.sha256) {
             const QString msg = QString("External modification detected (SHA-256 changed) for workspace file: %1").arg(relPath);
             outMessages.append(msg);
             modifiedAbsPaths.append(it->second->absolutePath);
@@ -1342,9 +1362,27 @@ void WorkspaceManager::detectExternalChangesAgainstIndexLocked(const std::vector
             core::log::LogService::instance().log(
                 "Workspace", "ExternalModification", "Warning", msg, "WorkspaceFile", relPath,
                 QString("{\"type\":\"content_or_tag_modified\",\"expected_sha256\":\"%1\",\"actual_sha256\":\"%2\"}")
-                    .arg(expected.first, it->second->sha256),
+                    .arg(expected.sha256, it->second->sha256),
                 "", "", core::log::ErrorCode::WorkspaceExternalModification, 0.0);
             emit externalModificationDetected(relPath, msg);
+        }
+    }
+
+    // Detect externally added regular files on disk that are not recorded in prevIndex
+    for (const auto& e : currentEntries) {
+        if (prevIndex.find(e.relativePath) == prevIndex.end()) {
+            const QString msg = QString("Externally added file detected in workspace: %1").arg(e.relativePath);
+            outMessages.append(msg);
+            {
+                std::lock_guard<std::mutex> lock(m_stateMutex);
+                ++m_externalModificationCount;
+                m_externalChangeDetails[e.relativePath] = msg;
+            }
+            core::log::LogService::instance().log(
+                "Workspace", "ExternalModification", "Warning", msg, "WorkspaceFile", e.relativePath,
+                QString("{\"type\":\"externally_added\",\"actual_sha256\":\"%1\"}").arg(e.sha256),
+                "", "", core::log::ErrorCode::WorkspaceExternalModification, 0.0);
+            emit externalModificationDetected(e.relativePath, msg);
         }
     }
 
@@ -1418,7 +1456,7 @@ std::vector<WorkspaceFileEntry> WorkspaceManager::listWorkspaceFiles(const QStri
         std::vector<WorkspaceFileEntry> all;
         scanCurrentWorkspaceLocked(all, true);
 
-        std::map<QString, std::pair<QString, qint64>> prevIndex;
+        std::map<QString, StateIndexEntry> prevIndex;
         loadStateIndexLocked(prevIndex);
 
         std::map<QString, QString> persistedExtChanges;
@@ -1436,7 +1474,10 @@ std::vector<WorkspaceFileEntry> WorkspaceManager::listWorkspaceFiles(const QStri
                 continue;
             }
             auto it = prevIndex.find(e.relativePath);
-            if (it != prevIndex.end() && it->second.first != e.sha256) {
+            if (it != prevIndex.end()) {
+                e.logOnlyProvenance = e.logOnlyProvenance || it->second.logOnlyProvenance;
+            }
+            if (it != prevIndex.end() && it->second.sha256 != e.sha256) {
                 e.externallyModified = true;
                 e.externalChangeDetail = QStringLiteral("SHA-256 differs from last known Desk32 state");
             } else {
@@ -1463,6 +1504,7 @@ QVariantList WorkspaceManager::getWorkspaceFiles(const QString& relativeSubDir) 
         m["size"] = e.size;
         m["externallyModified"] = e.externallyModified;
         m["externalChangeDetail"] = e.externalChangeDetail;
+        m["logOnlyProvenance"] = e.logOnlyProvenance || !e.metadata.provenanceEmbedSupported;
         m["metadata"] = metadataToVariantMap(e.metadata);
         list.append(m);
     }
@@ -1484,10 +1526,17 @@ QVariantMap WorkspaceManager::getFileDetails(const QString& relativePath) const 
     computeFileSha256(absP, sha, &sz);
     const auto meta = metadata::MetadataReader::parseTags(absP.toStdString());
 
+    std::map<QString, StateIndexEntry> idx;
+    const bool hasIdx = loadStateIndexLocked(idx);
+    const auto idxIt = idx.find(relP);
+    const bool logOnly = !meta.provenanceEmbedSupported ||
+                         (hasIdx && idxIt != idx.end() && idxIt->second.logOnlyProvenance);
+
     out["relativePath"] = relP;
     out["absolutePath"] = absP;
     out["sha256"] = sha;
     out["size"] = sz;
+    out["logOnlyProvenance"] = logOnly;
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         auto it = m_externalChangeDetails.find(relP);
@@ -1548,6 +1597,43 @@ ImportResult WorkspaceManager::importFile(const QString& sourceFilePath, const Q
             res.message = QString("Source file does not exist or cannot be resolved: %1").arg(sourceFilePath);
             setLastError(res.message);
             return res;
+        }
+
+        // Prevent self-copy when source file already resides inside the currently open workspace (§2.5)
+        if (isSameOrSubpath(sourceCanon, wsRoot)) {
+            res.status = ImportResultStatus::Failed;
+            res.message = QString("Source file is already inside the open workspace (self-copy prevented): %1").arg(sourceCanon);
+            setLastError(res.message);
+            core::log::LogService::instance().log(
+                "Workspace", "ImportFile", "Failed", res.message, "AudioFile", sourceCanon);
+            return res;
+        }
+
+        // AUD-10 / §2.3: Strictly reject mono and multichannel audio upfront (2-channel stereo only)
+        {
+            decoder::FFmpegAudioDecoder probeDecoder;
+            if (!probeDecoder.open(sourceCanon.toStdString())) {
+                const std::string decErr = probeDecoder.lastError();
+                if (decErr.find("Non-stereo") != std::string::npos ||
+                    decErr.find("AUD-10") != std::string::npos) {
+                    res.status = ImportResultStatus::Failed;
+                    res.message = QString::fromStdString(decErr);
+                    setLastError(res.message);
+                    core::log::LogService::instance().log(
+                        "Workspace", "ImportFile", "Failed", res.message, "AudioFile", sourceCanon,
+                        "{}", "", "", core::log::ErrorCode::WorkspaceNonStereoRejected, 0.0);
+                    return res;
+                }
+            } else if (probeDecoder.formatInfo().channels != 2) {
+                res.status = ImportResultStatus::Failed;
+                res.message = QString("Non-stereo audio format rejected: source has %1 channel(s). Stereo 2-channel audio only (AUD-10).")
+                                  .arg(probeDecoder.formatInfo().channels);
+                setLastError(res.message);
+                core::log::LogService::instance().log(
+                    "Workspace", "ImportFile", "Failed", res.message, "AudioFile", sourceCanon,
+                    "{}", "", "", core::log::ErrorCode::WorkspaceNonStereoRejected, 0.0);
+                return res;
+            }
         }
 
         // (1) & (2): Open read-only and compute original SHA-256
@@ -1721,6 +1807,15 @@ ImportResult WorkspaceManager::importFile(const QString& sourceFilePath, const Q
                               .arg(destRelPath, QString::fromStdString(ec.message()));
             setLastError(res.message);
             return res;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            if (!res.provenanceEmbedded) {
+                m_logOnlyProvenanceRelPaths.insert(destRelPath);
+            } else {
+                m_logOnlyProvenanceRelPaths.erase(destRelPath);
+            }
         }
 
         // (7) Log provenance & update state index + watcher
@@ -2138,6 +2233,9 @@ bool WorkspaceManager::renameWorkspaceFile(const QString& relativePath, const QS
             std::lock_guard<std::mutex> lock(m_stateMutex);
             m_externalChangeDetails.erase(srcRel);
             m_externalChangeDetails.erase(dstRel);
+            if (m_logOnlyProvenanceRelPaths.erase(srcRel) > 0) {
+                m_logOnlyProvenanceRelPaths.insert(dstRel);
+            }
         }
 
         std::vector<WorkspaceFileEntry> current;
@@ -2223,6 +2321,9 @@ bool WorkspaceManager::moveWorkspaceFile(const QString& relativePath, const QStr
             std::lock_guard<std::mutex> lock(m_stateMutex);
             m_externalChangeDetails.erase(srcRel);
             m_externalChangeDetails.erase(dstRel);
+            if (m_logOnlyProvenanceRelPaths.erase(srcRel) > 0) {
+                m_logOnlyProvenanceRelPaths.insert(dstRel);
+            }
         }
 
         std::vector<WorkspaceFileEntry> current;
@@ -2295,6 +2396,7 @@ bool WorkspaceManager::deleteWorkspaceFile(const QString& relativePath, QString&
         {
             std::lock_guard<std::mutex> lock(m_stateMutex);
             m_externalChangeDetails.erase(relPath);
+            m_logOnlyProvenanceRelPaths.erase(relPath);
         }
 
         std::vector<WorkspaceFileEntry> current;

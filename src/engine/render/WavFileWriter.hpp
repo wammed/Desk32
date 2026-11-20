@@ -150,32 +150,62 @@ public:
         return true;
     }
 
+    [[nodiscard]] const std::string& lastError() const noexcept { return m_lastError; }
+    void setForceCloseErrorForTest(bool force) noexcept { m_forceCloseErrorForTest = force; }
+
     /// Finalize WAV header sizes and close file
     bool close() {
         if (!m_file.isOpen()) return true;
 
-        qint64 totalDataBytes = static_cast<qint64>(m_totalFramesWritten) * m_blockAlign;
-        qint64 riffSize = 36 + totalDataBytes;
-
-        // Update sizes in header
-        if (m_file.seek(4)) {
-            uint32_t rSize = static_cast<uint32_t>(riffSize);
-            m_file.write(reinterpret_cast<const char*>(&rSize), 4);
+        bool ok = true;
+        if (m_forceCloseErrorForTest || m_file.error() != QFileDevice::NoError) {
+            ok = false;
+            m_lastError = m_forceCloseErrorForTest
+                              ? "Injected WAV close I/O error"
+                              : m_file.errorString().toStdString();
         }
 
-        if (m_file.seek(40)) {
-            uint32_t dSize = static_cast<uint32_t>(totalDataBytes);
-            m_file.write(reinterpret_cast<const char*>(&dSize), 4);
+        const qint64 totalDataBytes = static_cast<qint64>(m_totalFramesWritten) * m_blockAlign;
+        const qint64 riffSize = 36 + totalDataBytes;
+
+        // Update sizes in header and check seek/write/flush status
+        if (ok) {
+            const uint32_t rSize = static_cast<uint32_t>(riffSize);
+            if (!m_file.seek(4) || m_file.write(reinterpret_cast<const char*>(&rSize), 4) != 4) {
+                ok = false;
+                m_lastError = "Failed to seek or write WAV RIFF header size: " +
+                              m_file.errorString().toStdString();
+            }
         }
 
-        m_file.flush();
+        if (ok) {
+            const uint32_t dSize = static_cast<uint32_t>(totalDataBytes);
+            if (!m_file.seek(40) || m_file.write(reinterpret_cast<const char*>(&dSize), 4) != 4) {
+                ok = false;
+                m_lastError = "Failed to seek or write WAV data chunk size: " +
+                              m_file.errorString().toStdString();
+            }
+        }
+
+        if (ok && (!m_file.flush() || m_file.error() != QFileDevice::NoError)) {
+            ok = false;
+            m_lastError = "Failed to flush finalized WAV output: " +
+                          m_file.errorString().toStdString();
+        }
+
         m_file.close();
-        return true;
+        if (ok && m_file.error() != QFileDevice::NoError) {
+            ok = false;
+            m_lastError = "WAV file error on close: " + m_file.errorString().toStdString();
+        }
+        return ok;
     }
 
 private:
     QFile m_file;
     QString m_filePath;
+    std::string m_lastError;
+    bool m_forceCloseErrorForTest = false;
     uint32_t m_sampleRate = 48000;
     WavBitDepth m_bitDepth = WavBitDepth::Int24;
     uint16_t m_formatTag = 1;

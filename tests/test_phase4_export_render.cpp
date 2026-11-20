@@ -6,6 +6,7 @@
 #include <atomic>
 #include <QDir>
 #include <QFile>
+#include <QProcess>
 #include <cmath>
 #include <vector>
 #include <array>
@@ -262,6 +263,9 @@ private slots:
 
     // 29. Phase 4 Gap Fixes: .WAV preservation, per-node render toggle, tap consistency, post-render workspace index refresh
     void testPhase4GapFixesFilenamePerNodeRenderTapAndIndexRefresh();
+
+    // 30. Phase 4 Audit: independent path mutes, real pipeline clone tap check, External Insert warning, .aiff album filter, WavFileWriter close error check
+    void testPhase4AuditRenderRoutingCloneAndWavClose();
 
 private:
     struct CleanupEvaluation {
@@ -2522,6 +2526,117 @@ void TestPhase4ExportRender::testPhase4GapFixesFilenamePerNodeRenderTapAndIndexR
     // Reset render toggles cleanly
     controller.setRenderNodeEnabled("Reverb", true);
     controller.resetRenderStatus();
+}
+
+void TestPhase4ExportRender::testPhase4AuditRenderRoutingCloneAndWavClose()
+{
+    using namespace desk32::engine::workspace;
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    RenderEngine& engine = RenderEngine::instance();
+
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString wsDir = tmp.filePath("ws_p4_audit");
+    QDir().mkpath(wsDir);
+    auto& wsMgr = WorkspaceManager::instance();
+    wsMgr.setConfigFilePathForTesting(tmp.filePath("ws_p4_cfg.json"));
+    QString err;
+    QVERIFY2(wsMgr.registerAndOpenWorkspace(wsDir, err), qPrintable(err));
+
+    // 1. Independent listeningMuted & renderMonitorMuted controls (§5.11.4)
+    ctrl.setListeningVolume(1.0);
+    ctrl.setRenderMonitorVolume(1.0);
+    ctrl.setListeningMuted(true);
+    ctrl.setRenderMonitorMuted(false);
+    QCOMPARE(ctrl.listeningMuted(), true);
+    QCOMPARE(ctrl.renderMonitorMuted(), false);
+
+    // Load test WAV on Deck A and confirm RenderMonitor plays non-silent while Listening is muted
+    const QString wavSrc = tmp.filePath("mute_test.wav");
+    QVERIFY(createTestWav(wavSrc, 48000.0, 24000));
+    QVERIFY(ctrl.loadTrack("A", wavSrc));
+    ctrl.setDirectModeEnabled(false);
+    ctrl.play("A");
+    auto* deckA = ctrl.deckManager()->deck('A');
+    QTRY_VERIFY_WITH_TIMEOUT(deckA->worker().ringBuffer().availableRead() >= 2048, 3000);
+
+    ctrl.setOutputRoutingMode(0); // ListeningPath (muted!)
+    std::vector<float> buf(512 * 2, 0.0f);
+    for (int i = 0; i < 4; ++i) {
+        ctrl.renderOfflineBlock(buf.data(), 512);
+    }
+    double listenMutedPeak = 0.0;
+    for (float s : buf) listenMutedPeak = std::max(listenMutedPeak, std::abs(static_cast<double>(s)));
+    QVERIFY(listenMutedPeak < 1e-4);
+
+    ctrl.setOutputRoutingMode(1); // RenderMonitorPath (unmuted!)
+    for (int i = 0; i < 4; ++i) {
+        ctrl.renderOfflineBlock(buf.data(), 512);
+    }
+    double monActivePeak = 0.0;
+    for (float s : buf) monActivePeak = std::max(monActivePeak, std::abs(static_cast<double>(s)));
+    QVERIFY(monActivePeak > 0.1);
+    ctrl.stop("A");
+    ctrl.setListeningMuted(false);
+
+    // 2. Real cloned MasterChain verification + External Insert active warning propagation (§5.11.6, §6.6)
+    QVERIFY(ctrl.configureExternalInsert("LiveRack", "r:in1", "r:in2", "r:out1", "r:out2", 48000.0, 256, 0));
+    ctrl.setExternalInsertBypass(false);
+    ctrl.setDspNodeBypass("PEQ", false);
+    ctrl.setPeqBand(false, 2, 1000.0, 2.5, 1.0, 0, true);
+    const QVariantMap tapRep = ctrl.verifyRenderTapConsistency();
+    QVERIFY(tapRep["usedRealPipelineClone"].toBool());
+    QVERIFY(tapRep["externalInsertExcludedFromRender"].toBool());
+    QVERIFY(tapRep["consistent"].toBool());
+
+    const QString singleDir = wsDir + "/single_src";
+    QDir().mkpath(singleDir);
+    const QString singleWav = singleDir + "/ins_warn.wav";
+    QVERIFY(createTestWav(singleWav, 48000.0, 4800));
+    wsMgr.refreshIndexAfterInternalWrite();
+    QVERIFY(ctrl.loadTrack("A", singleWav));
+    {
+        QSignalSpy doneSpy(&engine, &RenderEngine::renderTaskFinished);
+        QVERIFY(!ctrl.startTrackRender("A", 1, 0, 48000.0, false, true).isEmpty());
+        QVERIFY(doneSpy.wait(10000));
+        QCOMPARE(ctrl.renderStatus(), static_cast<int>(RenderStatus::Completed));
+        QVERIFY(ctrl.getRenderStatus()["warningMessage"].toString().contains("External Insert"));
+        ctrl.resetRenderStatus();
+    }
+    ctrl.setExternalInsertBypass(true);
+
+    // 3. Album render filtering via FolderSession::isSupportedAudioExtension (.aiff & uppercase supported)
+    const QString albumDir = wsDir + "/aiff_album";
+    QDir().mkpath(albumDir);
+    const QString aiffOut = albumDir + "/01_Track.AIFF";
+    {
+        QProcess ff;
+        ff.start(QStringLiteral("ffmpeg"),
+                 {QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("quiet"),
+                  QStringLiteral("-i"), singleWav, aiffOut});
+        QVERIFY(ff.waitForFinished(10000) && ff.exitCode() == 0 && QFile::exists(aiffOut));
+    }
+    wsMgr.refreshIndexAfterInternalWrite();
+    {
+        QSignalSpy doneSpy(&engine, &RenderEngine::renderTaskFinished);
+        const QString aiffTid = ctrl.startAlbumRender(albumDir, 1, 0, 48000.0, false, false);
+        QVERIFY(!aiffTid.isEmpty());
+        QVERIFY(doneSpy.wait(10000));
+        QCOMPARE(ctrl.renderStatus(), static_cast<int>(RenderStatus::Completed));
+        QCOMPARE(ctrl.renderTotalTracks(), 1);
+        ctrl.resetRenderStatus();
+    }
+
+    // 4. WavFileWriter::close() error verification (§20.1)
+    WavFileWriter errWriter;
+    const QString errWav = tmp.filePath("err_close.wav");
+    QVERIFY(errWriter.open(errWav, 48000.0, WavBitDepth::Int16));
+    std::vector<double> onesL(128, 0.2), onesR(128, 0.2);
+    QVERIFY(errWriter.writeBlock(onesL.data(), onesR.data(), 128, false));
+    errWriter.setForceCloseErrorForTest(true);
+    QVERIFY(!errWriter.close());
+    QVERIFY(!errWriter.lastError().empty());
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

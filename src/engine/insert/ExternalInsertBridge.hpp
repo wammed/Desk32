@@ -44,6 +44,29 @@ enum class DisconnectPolicy : uint8_t {
     StopPlayback = 2
 };
 
+/// Spec §7 Latency Alignment measurement stability / confidence level
+enum class LatencyConfidence : uint8_t {
+    Unmeasured = 0,
+    High = 1,
+    Unstable = 2,
+    LowSnr = 3
+};
+
+/// Spec §7 2-step Latency Calibration candidate awaiting user confirmation
+struct LatencyCalibrationCandidate {
+    bool sessionActive = false;
+    bool hasMeasurement = false;
+    bool confirmed = false;
+    int64_t recommendedFrames = -1;
+    int64_t minFrames = -1;
+    int64_t maxFrames = -1;
+    int64_t spreadFrames = 0;
+    double peakSnrDb = 0.0;
+    uint32_t sampleCount = 0;
+    LatencyConfidence confidence = LatencyConfidence::Unmeasured;
+    std::string summary;
+};
+
 struct ExternalPortInfo {
     std::string clientName;
     std::string sendPortL;
@@ -59,6 +82,46 @@ struct ExternalPortInfo {
     std::string hostPresetReference{};
 };
 
+struct InsertTransportDiagnostics {
+    bool connected = false;
+    bool simulationMode = false;
+    uint32_t sendNodeId = 0;
+    uint32_t returnNodeId = 0;
+    uint32_t resolvedTargetPorts = 0;
+    uint32_t activeLinksCreated = 0;
+    uint64_t sendBlocksWritten = 0;
+    uint64_t returnBlocksRead = 0;
+    uint64_t xrunOrUnderruns = 0;
+    uint32_t negotiatedSendRate = 0;
+    uint32_t negotiatedReturnRate = 0;
+    uint32_t negotiatedQuantum = 0;
+    bool rateMismatchDetected = false;
+    bool bufferMismatchDetected = false;
+    bool graphDisconnected = false;
+    std::string errorDetail;
+};
+
+/// Abstract real-time transport for External Insert (implemented by PipeWireInsertTransport).
+/// Kept free of PipeWire headers so ExternalInsertBridge remains portable for non-PipeWire tests.
+class IExternalInsertTransport {
+public:
+    virtual ~IExternalInsertTransport() = default;
+
+    virtual bool configureAndConnect(const ExternalPortInfo& target,
+                                     double engineSampleRate,
+                                     size_t engineBufferSize) = 0;
+    virtual void disconnect() = 0;
+    [[nodiscard]] virtual bool isConnected() const noexcept = 0;
+
+    /// Real-time thread call: strictly zero heap allocations and zero blocking locks.
+    virtual bool exchangeBlock(double* inOutLeft, double* inOutRight, size_t frames) noexcept = 0;
+
+    [[nodiscard]] virtual bool hasRateMismatch() const noexcept = 0;
+    [[nodiscard]] virtual bool hasBufferMismatch() const noexcept = 0;
+    [[nodiscard]] virtual bool consumeGraphDisconnectEvent() noexcept = 0;
+    [[nodiscard]] virtual InsertTransportDiagnostics diagnostics() const = 0;
+};
+
 class ExternalInsertBridge {
 public:
     using MockProcessorFunc = std::function<void(double*, double*, size_t)>;
@@ -71,6 +134,10 @@ public:
     ExternalInsertBridge() = default;
 
     ~ExternalInsertBridge() {
+        if (m_transport) {
+            m_rtTransport.store(nullptr, std::memory_order_release);
+            m_transport->disconnect();
+        }
         reclaimRetiredMocks();
         delete m_preparedMock.exchange(nullptr, std::memory_order_acquire);
         delete m_activeMock;
@@ -189,6 +256,153 @@ public:
         return m_delayCompensationFrames.load(std::memory_order_acquire);
     }
 
+    void setTransport(std::shared_ptr<IExternalInsertTransport> transport) {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        if (m_transport && m_transport != transport) {
+            m_rtTransport.store(nullptr, std::memory_order_release);
+            m_transport->disconnect();
+        }
+        m_transport = std::move(transport);
+        m_rtTransport.store(m_transport.get(), std::memory_order_release);
+    }
+
+    [[nodiscard]] std::shared_ptr<IExternalInsertTransport> transport() const {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        return m_transport;
+    }
+
+    void setRequireLiveTransport(bool requireLive) noexcept {
+        m_requireLiveTransport.store(requireLive, std::memory_order_release);
+    }
+    [[nodiscard]] bool requireLiveTransport() const noexcept {
+        return m_requireLiveTransport.load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] bool isTransportLiveConnected() const noexcept {
+        auto* tr = m_rtTransport.load(std::memory_order_acquire);
+        return tr && tr->isConnected();
+    }
+
+    [[nodiscard]] InsertTransportDiagnostics transportDiagnostics() const {
+        std::lock_guard<std::mutex> lock(m_configMutex);
+        if (!m_transport) {
+            return {};
+        }
+        return m_transport->diagnostics();
+    }
+
+    [[nodiscard]] static const char* latencyConfidenceToString(LatencyConfidence c) noexcept {
+        switch (c) {
+            case LatencyConfidence::Unmeasured: return "Unmeasured";
+            case LatencyConfidence::High: return "High";
+            case LatencyConfidence::Unstable: return "Unstable";
+            case LatencyConfidence::LowSnr: return "LowSnr";
+        }
+        return "Unmeasured";
+    }
+
+    /// Spec §7 Step 1: Start multi-sample latency calibration session without auto-applying to PDC.
+    void beginLatencyCalibrationSession() {
+        std::lock_guard<std::mutex> lock(m_calMutex);
+        m_calSamples.clear();
+        m_minCalSnrDb = 999.0;
+        m_calCandidate = LatencyCalibrationCandidate{};
+        m_calCandidate.sessionActive = true;
+        m_calCandidate.summary = "Calibration session started; collecting round-trip impulse samples.";
+    }
+
+    /// Record one measured round-trip delay sample and evaluate jitter/SNR stability.
+    bool recordLatencyCalibrationSample(int64_t measuredFrames, double peakSnrDb) {
+        std::lock_guard<std::mutex> lock(m_calMutex);
+        if (!m_calCandidate.sessionActive) {
+            m_calCandidate.sessionActive = true;
+        }
+        if (measuredFrames < 0) {
+            return false;
+        }
+        m_calSamples.push_back(measuredFrames);
+        if (std::isfinite(peakSnrDb)) {
+            m_minCalSnrDb = std::min(m_minCalSnrDb, peakSnrDb);
+        } else {
+            m_minCalSnrDb = 0.0;
+        }
+        recomputeCalibrationCandidateLocked();
+        return m_calCandidate.confidence == LatencyConfidence::High;
+    }
+
+    /// Analyze a returned buffer block for an expected impulse sent at `expectedSendIdx` and record sample.
+    bool measureCalibrationSampleFromBuffers(const double* returnL,
+                                             const double* returnR,
+                                             size_t frames,
+                                             size_t expectedSendIdx,
+                                             double noiseFloorRms = 1e-6)
+    {
+        if (!returnL || !returnR || frames == 0 || expectedSendIdx >= frames) {
+            return false;
+        }
+        double peakAmp = 0.0;
+        size_t peakIdx = expectedSendIdx;
+        double residualSqSum = 0.0;
+        size_t residualCount = 0;
+
+        for (size_t i = expectedSendIdx; i < frames; ++i) {
+            const double mag = std::max(std::abs(returnL[i]), std::abs(returnR[i]));
+            if (mag > peakAmp) {
+                peakAmp = mag;
+                peakIdx = i;
+            }
+        }
+        for (size_t i = 0; i < frames; ++i) {
+            if (i == peakIdx) continue;
+            residualSqSum += 0.5 * (returnL[i] * returnL[i] + returnR[i] * returnR[i]);
+            ++residualCount;
+        }
+
+        const double measuredFloor = (residualCount > 0)
+                                         ? std::sqrt(residualSqSum / static_cast<double>(residualCount))
+                                         : noiseFloorRms;
+        const double effectiveFloor = std::max(noiseFloorRms, measuredFloor);
+        const double snrDb = (peakAmp > 1e-12)
+                                 ? (20.0 * std::log10(peakAmp / std::max(1e-12, effectiveFloor)))
+                                 : 0.0;
+        const int64_t delayFrames = static_cast<int64_t>(peakIdx - expectedSendIdx);
+        return recordLatencyCalibrationSample(delayFrames, snrDb);
+    }
+
+    /// Spec §7 Step 2: Explicit user confirmation applies recommended PDC only if confidence is High
+    /// (unless `allowOverrideUnsafe == true` for explicit force override).
+    bool confirmRecommendedLatency(bool allowOverrideUnsafe = false) {
+        std::lock_guard<std::mutex> lock(m_calMutex);
+        if (!m_calCandidate.hasMeasurement || m_calCandidate.recommendedFrames < 0) {
+            return false;
+        }
+        if (m_calCandidate.confidence != LatencyConfidence::High && !allowOverrideUnsafe) {
+            return false;
+        }
+        const size_t frames = static_cast<size_t>(m_calCandidate.recommendedFrames);
+        const double sr = std::max(1.0, m_engineSampleRate.load(std::memory_order_acquire));
+        m_delayCompensationFrames.store(static_cast<int64_t>(frames), std::memory_order_release);
+        m_measuredLatencyFrames.store(m_calCandidate.recommendedFrames, std::memory_order_release);
+        m_measuredLatencyMs.store((static_cast<double>(frames) / sr) * 1000.0, std::memory_order_release);
+        m_latencySource.store(LatencySource::HardwareMeasured, std::memory_order_release);
+        m_calCandidate.confirmed = true;
+        m_calCandidate.sessionActive = false;
+        m_calCandidate.summary = "Confirmed and applied " + std::to_string(frames) + " frames to DelayCompensationBuffer.";
+        return true;
+    }
+
+    void cancelLatencyCalibrationSession() {
+        std::lock_guard<std::mutex> lock(m_calMutex);
+        m_calSamples.clear();
+        m_minCalSnrDb = 999.0;
+        m_calCandidate = LatencyCalibrationCandidate{};
+    }
+
+    [[nodiscard]] LatencyCalibrationCandidate latencyCalibrationCandidate() const {
+        std::lock_guard<std::mutex> lock(m_calMutex);
+        return m_calCandidate;
+    }
+
     /// Configure external insert connection ports
     bool configure(const ExternalPortInfo& config, double engineSampleRate, size_t engineBufferSize) {
         std::lock_guard<std::mutex> lock(m_configMutex);
@@ -203,6 +417,7 @@ public:
         }
 
         if (m_config.clientName.empty()) {
+            if (m_transport) m_transport->disconnect();
             m_state.store(InsertState::NotConfigured, std::memory_order_release);
             return false;
         }
@@ -210,6 +425,7 @@ public:
         // 1. Feedback Loop Detection & Prevention:
         // Check if send port is identical to return port or self-referential
         if (m_config.sendPortL == m_config.returnPortL || m_config.sendPortR == m_config.returnPortR) {
+            if (m_transport) m_transport->disconnect();
             m_state.store(InsertState::Error, std::memory_order_release);
             m_lastError = "Feedback loop detected: Send and Return ports are identical!";
             m_isBypassed.store(true, std::memory_order_release);
@@ -218,6 +434,7 @@ public:
 
         // 2. Sample Rate & Buffer Matching Check
         if (std::abs(m_config.sampleRate - engineSampleRate) > 0.01) {
+            if (m_transport) m_transport->disconnect();
             m_state.store(InsertState::RateMismatch, std::memory_order_release);
             m_lastError = "Sample rate mismatch between Engine and External Host";
             m_isBypassed.store(true, std::memory_order_release);
@@ -225,10 +442,24 @@ public:
         }
 
         if (m_config.bufferSize != engineBufferSize) {
+            if (m_transport) m_transport->disconnect();
             m_state.store(InsertState::BufferMismatch, std::memory_order_release);
             m_lastError = "Buffer size mismatch between Engine and External Host";
             m_isBypassed.store(true, std::memory_order_release);
             return false;
+        }
+
+        if (m_transport) {
+            const bool trOk = m_transport->configureAndConnect(m_config, engineSampleRate, engineBufferSize);
+            if (!trOk && m_requireLiveTransport.load(std::memory_order_acquire)) {
+                m_state.store(InsertState::HostNotFound, std::memory_order_release);
+                m_lastError = m_transport->diagnostics().errorDetail;
+                if (m_lastError.empty()) {
+                    m_lastError = "Live external insert transport failed to connect target ports";
+                }
+                m_isBypassed.store(true, std::memory_order_release);
+                return false;
+            }
         }
 
         m_state.store(InsertState::Connected, std::memory_order_release);
@@ -442,6 +673,22 @@ public:
             m_activeMock = prepared;
         }
 
+        // 1b. Monitor live PipeWire / transport graph disconnect & param mismatch events (§8.3)
+        if (auto* tr = m_rtTransport.load(std::memory_order_acquire)) {
+            if (tr->consumeGraphDisconnectEvent()) {
+                m_state.store(InsertState::Disconnected, std::memory_order_release);
+                m_isBypassed.store(true, std::memory_order_release);
+            } else if (tr->hasRateMismatch()) {
+                m_state.store(InsertState::RateMismatch, std::memory_order_release);
+                m_isBypassed.store(true, std::memory_order_release);
+                return;
+            } else if (tr->hasBufferMismatch()) {
+                m_state.store(InsertState::BufferMismatch, std::memory_order_release);
+                m_isBypassed.store(true, std::memory_order_release);
+                return;
+            }
+        }
+
         const InsertState curState = m_state.load(std::memory_order_acquire);
         if (curState == InsertState::Disconnected || curState == InsertState::Error) {
             const DisconnectPolicy policy = m_disconnectPolicy.load(std::memory_order_acquire);
@@ -475,9 +722,11 @@ public:
         const bool measuring = m_measuringLatency.load(std::memory_order_acquire);
         const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
         const bool hasMock = (m_activeMock && m_activeMock->func);
+        IExternalInsertTransport* tr = m_rtTransport.load(std::memory_order_acquire);
+        const bool hasLiveTransport = (!hasMock && tr && tr->isConnected());
 
-        if (measuring && hasMock) {
-            // Inject impulse before external loopback processor so loopback sees it
+        if (measuring && (hasMock || hasLiveTransport)) {
+            // Inject impulse before external loopback processor/transport so loopback sees it
             for (size_t i = 0; i < frames; ++i) {
                 if (baseFrame + i == targetFrame) {
                     inOutLeft[i] += 1.0;
@@ -486,7 +735,7 @@ public:
             }
         }
 
-        // Execute active mock processor without any locks or refcounting on Audio Thread
+        // Execute active mock processor or live transport without any locks or allocations on Audio Thread
         if (hasMock) {
             m_activeMock->func(inOutLeft, inOutRight, frames);
             if (measuring) {
@@ -495,6 +744,16 @@ public:
                     if (baseFrame + i > targetFrame &&
                         (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
                         recordImpulseReturn(baseFrame + i, LatencySource::SimulatedMock);
+                        break;
+                    }
+                }
+            }
+        } else if (hasLiveTransport) {
+            if (tr->exchangeBlock(inOutLeft, inOutRight, frames) && measuring) {
+                for (size_t i = 0; i < frames; ++i) {
+                    if (baseFrame + i > targetFrame &&
+                        (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
+                        recordImpulseReturn(baseFrame + i, LatencySource::HardwareMeasured);
                         break;
                     }
                 }
@@ -535,6 +794,38 @@ public:
     }
 
 private:
+    void recomputeCalibrationCandidateLocked() {
+        m_calCandidate.sessionActive = true;
+        m_calCandidate.confirmed = false;
+        m_calCandidate.sampleCount = static_cast<uint32_t>(m_calSamples.size());
+        if (m_calSamples.empty()) {
+            m_calCandidate.hasMeasurement = false;
+            m_calCandidate.confidence = LatencyConfidence::Unmeasured;
+            m_calCandidate.summary = "No calibration samples recorded.";
+            return;
+        }
+        std::vector<int64_t> sorted = m_calSamples;
+        std::sort(sorted.begin(), sorted.end());
+        m_calCandidate.hasMeasurement = true;
+        m_calCandidate.minFrames = sorted.front();
+        m_calCandidate.maxFrames = sorted.back();
+        m_calCandidate.spreadFrames = sorted.back() - sorted.front();
+        m_calCandidate.recommendedFrames = sorted[sorted.size() / 2];
+        m_calCandidate.peakSnrDb = (m_minCalSnrDb < 900.0) ? m_minCalSnrDb : 0.0;
+
+        if (m_calCandidate.peakSnrDb < 18.0) {
+            m_calCandidate.confidence = LatencyConfidence::LowSnr;
+            m_calCandidate.summary = "Low SNR (< 18 dB) detected in return path; auto-apply held.";
+        } else if (m_calCandidate.spreadFrames > 2) {
+            m_calCandidate.confidence = LatencyConfidence::Unstable;
+            m_calCandidate.summary = "Round-trip jitter exceeds 2 frames (spread=" +
+                                     std::to_string(m_calCandidate.spreadFrames) + "); auto-apply held.";
+        } else {
+            m_calCandidate.confidence = LatencyConfidence::High;
+            m_calCandidate.summary = "Stable round-trip latency candidate ready for confirmation.";
+        }
+    }
+
     void retireMock(MockHolder* old) noexcept {
         old->nextRetired = m_retiredMockHead.load(std::memory_order_relaxed);
         while (!m_retiredMockHead.compare_exchange_weak(old->nextRetired, old,
@@ -546,6 +837,9 @@ private:
     std::atomic<bool> m_isBypassed{true};
     mutable std::mutex m_configMutex;
     ExternalPortInfo m_config;
+    std::shared_ptr<IExternalInsertTransport> m_transport;
+    alignas(64) std::atomic<IExternalInsertTransport*> m_rtTransport{nullptr};
+    std::atomic<bool> m_requireLiveTransport{false};
     std::atomic<double> m_engineSampleRate{48000.0};
     std::atomic<size_t> m_engineBufferSize{256};
     std::string m_lastError;
@@ -553,6 +847,11 @@ private:
     MockHolder* m_activeMock{nullptr};
     alignas(64) std::atomic<MockHolder*> m_preparedMock{nullptr};
     alignas(64) std::atomic<MockHolder*> m_retiredMockHead{nullptr};
+
+    mutable std::mutex m_calMutex;
+    std::vector<int64_t> m_calSamples;
+    double m_minCalSnrDb = 999.0;
+    LatencyCalibrationCandidate m_calCandidate;
 
     std::atomic<uint32_t> m_xrunCount{0};
     std::atomic<bool> m_measuringLatency{false};

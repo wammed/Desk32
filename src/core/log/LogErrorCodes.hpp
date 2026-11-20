@@ -28,6 +28,7 @@ constexpr int32_t AutoAdvanceTrackMismatch = 1036;
 // 2000-2999: AudioBackend / PipeWire / ALSA / JACK
 constexpr int32_t PipeWireInitFailed = 2001;
 constexpr int32_t PipeWireStartFailed = 2002;
+constexpr int32_t AudioDeviceSwitchFailed = 2003;
 constexpr int32_t AudioXrunDetected = 2010;
 
 // 3000-3999: External Insert / Plugin Host / DSP Queue
@@ -35,6 +36,7 @@ constexpr int32_t DspQueueFull = 3001;
 constexpr int32_t ExternalHostFailed = 3002;
 constexpr int32_t ExternalPluginMissing = 3003;
 constexpr int32_t DspBypassResyncFailed = 3005;
+constexpr int32_t ExternalInsertLatencyUnstable = 3006;
 
 // 4000-4999: Render / Export
 constexpr int32_t RenderDiskSpaceLow = 4001;
@@ -67,6 +69,7 @@ constexpr int32_t WorkspaceExternalModification = 7010;
 constexpr int32_t WorkspaceSaveAbortedOnChange = 7011;
 constexpr int32_t WorkspaceRollbackFailed = 7012;
 constexpr int32_t WorkspacePartialRecovery = 7013;
+constexpr int32_t WorkspaceNonStereoRejected = 7014;
 
 // 9000-9999: Logging / Diagnostics Subsystem
 constexpr int32_t LogQueueOverflow = 9001;

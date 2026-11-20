@@ -11,6 +11,7 @@
 #include "engine/insert/DelayCompensationBuffer.hpp"
 #include "engine/insert/ExternalInsertBridge.hpp"
 #include "engine/insert/ExternalInsertNode.hpp"
+#include "engine/insert/PipeWireInsertTransport.hpp"
 #include "engine/preset/PresetManager.hpp"
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
@@ -112,6 +113,9 @@ private slots:
 
     // 13. Phase 3 Gap Fixes: pw-dump discovery, verified recovery, chain position, disconnect policies, auto impulse, metadata & session state
     void testPhase3GapFixesInsertPoliciesDiscoveryAndSessionState();
+
+    // 14. PipeWireInsertTransport loopback/disconnect/mismatch & 2-step latency calibration stability judgment
+    void testPipeWireInsertTransportAndTwoStepLatencyCalibration();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -1046,6 +1050,82 @@ void TestPhase3ExternalInsert::testPhase3GapFixesInsertPoliciesDiscoveryAndSessi
     QCOMPARE(st["reportedLatencyText"].toString(), QString("Not Reported"));
     QCOMPARE(st["pluginName"].toString(), QString("LSP Comp"));
     QCOMPARE(st["hostPresetReference"].toString(), QString("StudioPreset1"));
+}
+
+void TestPhase3ExternalInsert::testPipeWireInsertTransportAndTwoStepLatencyCalibration()
+{
+    // 1. PipeWireInsertTransport simulation loopback + graph removal + rate/buffer mismatch detection
+    auto transport = std::make_shared<PipeWireInsertTransport>();
+    transport->setSimulationMode(true);
+    transport->setSimulationLoopbackLatencyFrames(32);
+
+    ExternalInsertBridge bridge;
+    bridge.setTransport(transport);
+    ExternalPortInfo cfg{"SimHost", "sim:in_l", "sim:in_r", "sim:out_l", "sim:out_r", 48000.0, 256, 32};
+    QVERIFY(bridge.configure(cfg, 48000.0, 256));
+    QVERIFY(bridge.isTransportLiveConnected());
+    QCOMPARE(bridge.transportDiagnostics().activeLinksCreated, uint32_t(4));
+
+    bridge.triggerLatencyMeasurement();
+    std::vector<double> l(256, 0.0), r(256, 0.0);
+    bridge.process(l.data(), r.data(), 256);
+    QCOMPARE(bridge.measuredLatencyFrames(), int64_t(32));
+
+    transport->simulateGraphNodeRemoved();
+    std::fill(l.begin(), l.end(), 0.25);
+    std::fill(r.begin(), r.end(), 0.25);
+    bridge.process(l.data(), r.data(), 256);
+    QCOMPARE(bridge.state(), InsertState::Disconnected);
+    QVERIFY(bridge.isBypassed());
+
+    // Rate & buffer mismatch monitoring
+    QVERIFY(bridge.configure(cfg, 48000.0, 256));
+    transport->simulateRateMismatch(96000);
+    bridge.process(l.data(), r.data(), 256);
+    QCOMPARE(bridge.state(), InsertState::RateMismatch);
+    QVERIFY(bridge.isBypassed());
+
+    QVERIFY(bridge.configure(cfg, 48000.0, 256));
+    transport->simulateBufferMismatch(512);
+    bridge.process(l.data(), r.data(), 256);
+    QCOMPARE(bridge.state(), InsertState::BufferMismatch);
+    QVERIFY(bridge.isBypassed());
+
+    // 2. Two-step Latency Alignment & Stability Judgment via EngineController
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    QVERIFY(ctrl.configureExternalInsert("SimRack", "s:in1", "s:in2", "s:out1", "s:out2", 48000.0, 256, 0));
+    ctrl.setInsertDelayCompensation(0);
+
+    // Case A: High jitter -> Unstable -> confirm refused
+    ctrl.beginInsertLatencyCalibration();
+    QVERIFY(ctrl.recordInsertLatencyCalibrationSample(48, 36.0));
+    QVERIFY(!ctrl.recordInsertLatencyCalibrationSample(55, 36.0)); // spread=7 > 2
+    QCOMPARE(ctrl.getLatencyAlignmentReport()["confidenceText"].toString(), QString("Unstable"));
+    QVERIFY(!ctrl.confirmRecommendedInsertLatency(false));
+    QCOMPARE(ctrl.insertDelayCompensation(), 0); // Auto-apply held!
+
+    // Case B: Low SNR -> LowSnr -> confirm refused
+    ctrl.beginInsertLatencyCalibration();
+    QVERIFY(!ctrl.recordInsertLatencyCalibrationSample(64, 9.5)); // < 18 dB
+    QCOMPARE(ctrl.getLatencyAlignmentReport()["confidenceText"].toString(), QString("LowSnr"));
+    QVERIFY(!ctrl.confirmRecommendedInsertLatency(false));
+    QCOMPARE(ctrl.insertDelayCompensation(), 0);
+
+    // Case C: Stable multi-sample -> High confidence, NOT applied until confirmRecommendedInsertLatency()
+    ctrl.beginInsertLatencyCalibration();
+    QVERIFY(ctrl.recordInsertLatencyCalibrationSample(64, 42.0));
+    QVERIFY(ctrl.recordInsertLatencyCalibrationSample(65, 41.0));
+    QVERIFY(ctrl.recordInsertLatencyCalibrationSample(64, 43.0));
+    const QVariantMap rep = ctrl.getLatencyAlignmentReport();
+    QCOMPARE(rep["confidenceText"].toString(), QString("High"));
+    QCOMPARE(rep["recommendedFrames"].toLongLong(), qint64(64));
+    QCOMPARE(rep["confirmed"].toBool(), false);
+    QCOMPARE(ctrl.insertDelayCompensation(), 0); // Not auto-applied!
+
+    QVERIFY(ctrl.confirmRecommendedInsertLatency());
+    QCOMPARE(ctrl.insertDelayCompensation(), 64);
+    QCOMPARE(ctrl.getLatencyAlignmentReport()["confirmed"].toBool(), true);
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

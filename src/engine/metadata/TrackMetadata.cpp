@@ -194,14 +194,14 @@ TrackMetadata MetadataReader::parseTags(const std::string& path,
     }
 
     TagLib::FileRef ref(&stream, /*readAudioProperties=*/true);
+    meta.codecName = codecFromExtension(path);
     if (ref.isNull() || !ref.file()) {
         meta.provenanceEmbedSupported = false;
-        meta.codecName = codecFromExtension(path);
         return meta;
     }
 
-    meta.provenanceEmbedSupported = (ref.tag() != nullptr) || !ref.properties().isEmpty();
-    meta.codecName = codecFromExtension(path);
+    // Align with supportsPropertyEmbedding(): raw ADTS .aac lacks an encapsulated custom PropertyMap container
+    meta.provenanceEmbedSupported = (ref.tag() != nullptr) && (meta.codecName != "AAC");
 
     if (const TagLib::AudioProperties* ap = ref.audioProperties()) {
         if (ap->sampleRate() > 0) {

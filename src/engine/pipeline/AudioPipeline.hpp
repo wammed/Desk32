@@ -47,7 +47,11 @@ struct DspTelemetry {
     double masterRmsR = 0.0;
     bool masterClipped = false;
     bool level1SamplesIdentical = false;
+    bool level1OutputPcmLossless = false;
+    bool level1DitherActive = false;
+    bool level1DirectBypassActive = false;
     double level1MaxAbsDiff = 0.0;
+    double level1PostPcmMaxAbsDiff = 0.0;
     uint64_t level1InputHash = 0;
     uint64_t level1OutputHash = 0;
     uint64_t level1VerifiedBlocks = 0;
@@ -131,8 +135,33 @@ public:
     [[nodiscard]] double listeningVolume() const noexcept { return m_listeningVolume.load(); }
     void setListeningVolume(double vol) noexcept { m_listeningVolume.store(std::clamp(vol, 0.0, 2.0)); }
 
+    [[nodiscard]] bool listeningMuted() const noexcept { return m_listeningMuted.load(std::memory_order_relaxed); }
+    void setListeningMuted(bool muted) noexcept { m_listeningMuted.store(muted, std::memory_order_relaxed); }
+
     [[nodiscard]] double renderMonitorVolume() const noexcept { return m_renderMonitorVolume.load(); }
     void setRenderMonitorVolume(double vol) noexcept { m_renderMonitorVolume.store(std::clamp(vol, 0.0, 2.0)); }
+
+    [[nodiscard]] bool renderMonitorMuted() const noexcept { return m_renderMonitorMuted.load(std::memory_order_relaxed); }
+    void setRenderMonitorMuted(bool muted) noexcept { m_renderMonitorMuted.store(muted, std::memory_order_relaxed); }
+
+    [[nodiscard]] bool liveDitherEnabled() const noexcept { return m_liveDitherEnabled.load(std::memory_order_relaxed); }
+    void setLiveDitherEnabled(bool enabled) noexcept { m_liveDitherEnabled.store(enabled, std::memory_order_relaxed); }
+
+    [[nodiscard]] std::unique_ptr<AudioChain> cloneMasterChainForVerification() const {
+        auto guard = m_masterReclaimer.enterRead();
+        if (!guard) {
+            return nullptr;
+        }
+        return guard->clone();
+    }
+
+    [[nodiscard]] std::unique_ptr<AudioChain> cloneListeningChainForVerification() const {
+        auto guard = m_listeningReclaimer.enterRead();
+        if (!guard) {
+            return nullptr;
+        }
+        return guard->clone();
+    }
 
     /// Thread-safe Telemetry Snapshot retrieval for Control / UI Thread (P0-26, P0-29).
     /// Audio Thread publishes via publishTelemetry() with zero mutexes and non-blocking lock-free buffer swap.
@@ -366,13 +395,19 @@ public:
     }
 
     void updateReverb(double roomSize, double damping, double wetLevel, double predelayMs,
-                      bool tailPreserving, bool enabled) {
+                      bool tailPreserving, bool enabled,
+                      double maxTailRetentionSeconds = 5.0,
+                      double maxProcessingTimeMs = 0.0) {
         auto guard = m_masterReclaimer.enterRead();
         if (guard) {
             for (size_t i = 0; i < guard->nodeCount(); ++i) {
                 if (auto* rev = dynamic_cast<ReverbNode*>(guard->node(i))) {
+                    rev->setBypassBehavior(tailPreserving ? BypassBehavior::TailPreserving
+                                                          : BypassBehavior::Immediate);
                     rev->prepareInstance(m_graphSampleRate.load(std::memory_order_relaxed),
-                                         roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
+                                         roomSize, damping, wetLevel, predelayMs,
+                                         tailPreserving, enabled,
+                                         maxTailRetentionSeconds, maxProcessingTimeMs);
                     break;
                 }
             }
@@ -469,9 +504,14 @@ public:
             FormatConverter::convertPlanarFloat64ToPcm(
                 left, right, frameCount, outPcmBuffer, targetFormat, effectiveDither
             );
+            const double postPcmDiff = computePostPcmMaxAbsDiff(
+                outPcmBuffer, targetFormat, m_level1RefL.data(), m_level1RefR.data(), refFrames);
+            const bool postPcmLossless =
+                (refFrames > 0) && (outPcmBuffer != nullptr) && !effectiveDither &&
+                (targetFormat != SampleFormat::Int16) && (postPcmDiff <= 1e-6);
             publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
                              prePeakL, prePeakR, preRmsL, preRmsR,
-                             inputHash, refFrames, true);
+                             inputHash, refFrames, true, postPcmLossless, effectiveDither, postPcmDiff);
             return;
         }
 
@@ -488,8 +528,12 @@ public:
 
         // 3. Logical Render Tap Branching (Section 5.11, Spec §5.2 downstream Master Gain & Level Match)
         const OutputPathMode currentMode = m_outputMode.load(std::memory_order_relaxed);
-        const double listenVol = m_listeningVolume.load(std::memory_order_relaxed);
-        const double renderMonVol = m_renderMonitorVolume.load(std::memory_order_relaxed);
+        const double listenVol = m_listeningMuted.load(std::memory_order_relaxed)
+                                     ? 0.0
+                                     : m_listeningVolume.load(std::memory_order_relaxed);
+        const double renderMonVol = m_renderMonitorMuted.load(std::memory_order_relaxed)
+                                        ? 0.0
+                                        : m_renderMonitorVolume.load(std::memory_order_relaxed);
         if (!m_smoothersInitialized.load(std::memory_order_relaxed)) {
             m_listeningVolSmoother.reset(listenVol);
             m_renderMonVolSmoother.reset(renderMonVol);
@@ -530,14 +574,25 @@ public:
         }
 
         // 4. Output Boundary: Interleave and convert from planar float64 to target PCM with TPDF dither
+        // FormatConverter only applies TPDF dither on integer quantization formats (Int24_32 / Int16).
+        const bool formatUsesDither =
+            (targetFormat == SampleFormat::Int24_32 || targetFormat == SampleFormat::Int16);
+        const bool effectiveDither =
+            applyDither && formatUsesDither && m_liveDitherEnabled.load(std::memory_order_relaxed);
         FormatConverter::convertPlanarFloat64ToPcm(
-            left, right, frameCount, outPcmBuffer, targetFormat, applyDither
+            left, right, frameCount, outPcmBuffer, targetFormat, effectiveDither
         );
+        const double postPcmDiff = computePostPcmMaxAbsDiff(
+            outPcmBuffer, targetFormat, m_level1RefL.data(), m_level1RefR.data(), refFrames);
+        const bool postPcmLossless =
+            (refFrames > 0) && (outPcmBuffer != nullptr) && !effectiveDither &&
+            (targetFormat != SampleFormat::Int16) && (postPcmDiff <= 1e-6);
 
         // 5. Publish Telemetry Snapshot to UI Thread (P0-26)
+        m_hasProcessedAnyBlock.store(true, std::memory_order_relaxed);
         publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
                          prePeakL, prePeakR, preRmsL, preRmsR,
-                         inputHash, refFrames, false);
+                         inputHash, refFrames, false, postPcmLossless, effectiveDither, postPcmDiff);
     }
 
 private:
@@ -639,13 +694,17 @@ private:
         m_mailboxConsumed.fetch_add(1, std::memory_order_relaxed);
         m_lastConsumedSequence.store(params.sequenceNumber, std::memory_order_relaxed);
 
+        const size_t smoothSamples = m_hasProcessedAnyBlock.load(std::memory_order_relaxed)
+            ? static_cast<size_t>(std::clamp(m_graphSampleRate.load(std::memory_order_relaxed) * 0.005, 32.0, 512.0))
+            : 0;
+
         bool appliedAny = false;
         if (master) {
             // 1. Graphic EQ: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.geqModifiedMask != 0) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* geqNode = dynamic_cast<GraphicEqNode*>(master->node(i))) {
-                        geqNode->applyAllCoefficients(params.geqCoefficients);
+                        geqNode->applyAllCoefficients(params.geqCoefficients, smoothSamples);
                         geqNode->applyBandEnabled(params.geqBandEnabled);
                         appliedAny = true;
                         break;
@@ -661,7 +720,8 @@ private:
                             params.peqLeftCoefficients,
                             params.peqRightCoefficients,
                             params.peqLeftEnabled,
-                            params.peqRightEnabled
+                            params.peqRightEnabled,
+                            smoothSamples
                         );
                         appliedAny = true;
                         break;
@@ -673,7 +733,7 @@ private:
             if (params.filterModified) {
                 for (size_t i = 0; i < master->nodeCount(); ++i) {
                     if (auto* filterNode = dynamic_cast<HighLowPassNode*>(master->node(i))) {
-                        filterNode->applyCoefficients(params.filterCoefficients);
+                        filterNode->applyCoefficients(params.filterCoefficients, smoothSamples);
                         appliedAny = true;
                         break;
                     }
@@ -690,7 +750,8 @@ private:
                             params.listeningLeftCoefficients,
                             params.listeningRightCoefficients,
                             params.listeningLeftEnabled,
-                            params.listeningRightEnabled
+                            params.listeningRightEnabled,
+                            smoothSamples
                         );
                         appliedAny = true;
                         break;
@@ -704,6 +765,71 @@ private:
         }
     }
 
+    static double computePostPcmMaxAbsDiff(const void* pcmBuf, SampleFormat fmt,
+                                           const double* refL, const double* refR,
+                                           size_t frames) noexcept {
+        if (!pcmBuf || !refL || !refR || frames == 0) {
+            return 0.0;
+        }
+        double maxDiff = 0.0;
+        switch (fmt) {
+        case SampleFormat::Float32: {
+            const auto* in = static_cast<const float*>(pcmBuf);
+            for (size_t i = 0; i < frames; ++i) {
+                const double refClampL = std::clamp(refL[i], -1.0, 1.0);
+                const double refClampR = std::clamp(refR[i], -1.0, 1.0);
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2]) - refClampL));
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2 + 1]) - refClampR));
+            }
+            break;
+        }
+        case SampleFormat::Int24_32: {
+            const auto* in = static_cast<const int32_t*>(pcmBuf);
+            constexpr double invScale = 1.0 / 8388607.0;
+            for (size_t i = 0; i < frames; ++i) {
+                const double refClampL = std::clamp(refL[i], -1.0, 1.0);
+                const double refClampR = std::clamp(refR[i], -1.0, 1.0);
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2]) * invScale - refClampL));
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2 + 1]) * invScale - refClampR));
+            }
+            break;
+        }
+        case SampleFormat::Int32: {
+            const auto* in = static_cast<const int32_t*>(pcmBuf);
+            constexpr double invScale = 1.0 / 2147483647.0;
+            for (size_t i = 0; i < frames; ++i) {
+                const double refClampL = std::clamp(refL[i], -1.0, 1.0);
+                const double refClampR = std::clamp(refR[i], -1.0, 1.0);
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2]) * invScale - refClampL));
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2 + 1]) * invScale - refClampR));
+            }
+            break;
+        }
+        case SampleFormat::Int16: {
+            const auto* in = static_cast<const int16_t*>(pcmBuf);
+            constexpr double invScale = 1.0 / 32767.0;
+            for (size_t i = 0; i < frames; ++i) {
+                const double refClampL = std::clamp(refL[i], -1.0, 1.0);
+                const double refClampR = std::clamp(refR[i], -1.0, 1.0);
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2]) * invScale - refClampL));
+                maxDiff = std::max(maxDiff, std::abs(static_cast<double>(in[i * 2 + 1]) * invScale - refClampR));
+            }
+            break;
+        }
+        case SampleFormat::Float64: {
+            const auto* in = static_cast<const double*>(pcmBuf);
+            for (size_t i = 0; i < frames; ++i) {
+                const double refClampL = std::clamp(refL[i], -1.0, 1.0);
+                const double refClampR = std::clamp(refR[i], -1.0, 1.0);
+                maxDiff = std::max(maxDiff, std::abs(in[i * 2] - refClampL));
+                maxDiff = std::max(maxDiff, std::abs(in[i * 2 + 1] - refClampR));
+            }
+            break;
+        }
+        }
+        return maxDiff;
+    }
+
     /// Audio Thread: Mutex-free, non-blocking lock-free Telemetry publication (P0-29).
     /// Inspects up to AudioChain::MAX_NODES (strictly bounded O(N) where N <= 16, zero dynamic allocation, zero locks)
     /// and publishes the snapshot buffer via a single O(1) atomic exchange.
@@ -712,7 +838,10 @@ private:
                           double prePeakL = 0.0, double prePeakR = 0.0,
                           double preRmsL = 0.0, double preRmsR = 0.0,
                           uint64_t inputHash = 0, size_t refFrames = 0,
-                          bool directBypass = false) noexcept {
+                          bool directBypass = false,
+                          bool postPcmLossless = false,
+                          bool effectiveDither = false,
+                          double postPcmMaxDiff = 0.0) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
         t.processedFrameCount += frames;
@@ -764,7 +893,11 @@ private:
         t.level1MaxAbsDiff = maxAbsDiff;
         const bool identical = (frames > 0) && (inputHash == outputHash) && (maxAbsDiff == 0.0);
         t.level1SamplesIdentical = identical;
-        if (directBypass && identical) {
+        t.level1OutputPcmLossless = postPcmLossless;
+        t.level1DitherActive = effectiveDither;
+        t.level1DirectBypassActive = directBypass;
+        t.level1PostPcmMaxAbsDiff = postPcmMaxDiff;
+        if (identical && postPcmLossless) {
             t.level1VerifiedBlocks = m_level1VerifiedBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
         } else {
             t.level1VerifiedBlocks = m_level1VerifiedBlocks.load(std::memory_order_relaxed);
@@ -804,6 +937,9 @@ private:
     std::atomic<OutputPathMode> m_outputMode{OutputPathMode::ListeningPath};
     std::atomic<double> m_listeningVolume{1.0};
     std::atomic<double> m_renderMonitorVolume{1.0};
+    std::atomic<bool> m_listeningMuted{false};
+    std::atomic<bool> m_renderMonitorMuted{false};
+    std::atomic<bool> m_liveDitherEnabled{true};
 
     dsp::ParameterCommandQueue m_paramQueue;
     dsp::DspParameterMailbox m_paramMailbox;
@@ -827,6 +963,7 @@ private:
     dsp::ParameterSmoother m_renderMonVolSmoother{1.0, 10.0, 48000.0};
     dsp::ParameterSmoother m_levelMatchSmoother{1.0, 10.0, 48000.0};
     std::atomic<bool> m_smoothersInitialized{false};
+    std::atomic<bool> m_hasProcessedAnyBlock{false};
     alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefL{};
     alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefR{};
     alignas(64) std::atomic<uint64_t> m_level1VerifiedBlocks{0};

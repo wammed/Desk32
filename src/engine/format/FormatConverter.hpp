@@ -17,6 +17,7 @@ enum class DitherType {
 enum class SampleFormat {
     Float32,   ///< Stereo 32-bit float interleaved (Standard PipeWire/JACK graph format)
     Int24_32,  ///< Stereo 24-bit PCM in 32-bit int interleaved
+    Int32,     ///< Stereo 32-bit signed integer PCM interleaved
     Int16,     ///< Stereo 16-bit integer PCM interleaved
     Float64    ///< Stereo 64-bit float interleaved
 };
@@ -105,6 +106,15 @@ public:
                     double ditherR = applyDither ? fastTpdf() : 0.0;
                     out[i * 2]     = static_cast<int32_t>(std::lrint(std::clamp(left[i] * scale + ditherL, -8388608.0, 8388607.0)));
                     out[i * 2 + 1] = static_cast<int32_t>(std::lrint(std::clamp(right[i] * scale + ditherR, -8388608.0, 8388607.0)));
+                }
+                break;
+            }
+            case SampleFormat::Int32: {
+                auto* out = static_cast<int32_t*>(outInterleavedBuffer);
+                constexpr double scale = 2147483647.0;
+                for (size_t i = 0; i < frames; ++i) {
+                    out[i * 2]     = static_cast<int32_t>(std::lrint(std::clamp(left[i], -1.0, 1.0) * scale));
+                    out[i * 2 + 1] = static_cast<int32_t>(std::lrint(std::clamp(right[i], -1.0, 1.0) * scale));
                 }
                 break;
             }

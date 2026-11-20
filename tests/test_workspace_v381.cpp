@@ -98,6 +98,7 @@ private slots:
     void testDeckLevelMatchPostTapAndOffsetFrames();
     void testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory();
     void testPhase4GapFixesRenameRollbackExternalReloadTargetedStopHardlink();
+    void testWorkspaceAuditStereoOnlySelfCopyExternalAddAndLogOnlyIndex();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -843,6 +844,106 @@ void TestWorkspaceV381::testPhase4GapFixesRenameRollbackExternalReloadTargetedSt
     QVERIFY(!ws.moveWorkspaceFile("hardlink_target.wav", "Sub", hlErr));
     QVERIFY(!ws.deleteWorkspaceFile("hardlink_target.wav", hlErr));
     ::unlink(hlTarget.toUtf8().constData());
+}
+
+void TestWorkspaceV381::testWorkspaceAuditStereoOnlySelfCopyExternalAddAndLogOnlyIndex()
+{
+    auto& ws = WorkspaceManager::instance();
+    auto& ctrl = desk32::core::EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+
+    const QString wsDir = m_tempDir->filePath("ws_audit_edge_cases");
+    const QString srcDir = m_tempDir->filePath("src_audit_edge_cases");
+    QDir().mkpath(wsDir);
+    QDir().mkpath(srcDir);
+
+    QString err;
+    QVERIFY2(ws.registerAndOpenWorkspace(wsDir, err), qPrintable(err));
+
+    // Create a clean 2ch stereo source WAV first
+    const QString stereoWav = srcDir + "/stereo.wav";
+    QVERIFY(createTestWav(stereoWav, 48000.0, 2400));
+
+    // 1. AUD-10: Reject mono (1ch) and multichannel audio during importFile()
+    const QString monoWav = srcDir + "/mono.wav";
+    {
+        QProcess ff;
+        ff.start(QStringLiteral("ffmpeg"),
+                 {QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("quiet"),
+                  QStringLiteral("-i"), stereoWav, QStringLiteral("-ac"), QStringLiteral("1"),
+                  monoWav});
+        QVERIFY(ff.waitForFinished(10000) && ff.exitCode() == 0 && QFile::exists(monoWav));
+    }
+    const auto monoRes = ws.importFile(monoWav);
+    QCOMPARE(monoRes.status, ImportResultStatus::Failed);
+    QVERIFY(monoRes.message.contains("Non-stereo") || monoRes.message.contains("AUD-10"));
+
+    // 2. Self-copy guard & getDeckState() canCopyToWorkspace / isInsideOpenWorkspace
+    const auto stereoImp = ws.importFile(stereoWav);
+    QCOMPARE(stereoImp.status, ImportResultStatus::Imported);
+
+    const auto selfCopyRes = ws.importFile(stereoImp.destPath);
+    QCOMPARE(selfCopyRes.status, ImportResultStatus::Failed);
+    QVERIFY(selfCopyRes.message.contains("already inside the open workspace"));
+
+    QVERIFY(ctrl.loadTrack("A", stereoImp.destPath));
+    const QVariantMap wsDeckState = ctrl.getDeckState("A");
+    QCOMPARE(wsDeckState["isInsideOpenWorkspace"].toBool(), true);
+    QCOMPARE(wsDeckState["canCopyToWorkspace"].toBool(), false);
+    QVERIFY(!ctrl.copyDeckTrackToWorkspace("A"));
+
+    QVERIFY(ctrl.loadTrack("B", stereoWav));
+    const QVariantMap extDeckState = ctrl.getDeckState("B");
+    QCOMPARE(extDeckState["isInsideOpenWorkspace"].toBool(), false);
+    QCOMPARE(extDeckState["canCopyToWorkspace"].toBool(), true);
+    ctrl.stop("A");
+    ctrl.stop("B");
+
+    // 3. External file addition detection against state_index.json
+    const QString intruderPath = wsDir + "/externally_dropped.wav";
+    QVERIFY(createTestWav(intruderPath, 48000.0, 2400));
+    const QStringList extChanges = ws.verifyWorkspaceIntegrity();
+    bool sawExternalAdd = false;
+    for (const QString& m : extChanges) {
+        if (m.contains("externally_dropped.wav") && m.contains("Externally added")) {
+            sawExternalAdd = true;
+        }
+    }
+    QVERIFY(sawExternalAdd);
+    ws.acknowledgeExternalModifications();
+    QVERIFY(ws.deleteWorkspaceFile("externally_dropped.wav", err));
+
+    // 4. Raw ADTS .aac log_only_provenance persistence in state_index.json & MetadataReader alignment
+    const QString adtsAac = srcDir + "/raw_stereo.aac";
+    {
+        QProcess ff;
+        ff.start(QStringLiteral("ffmpeg"),
+                 {QStringLiteral("-y"), QStringLiteral("-v"), QStringLiteral("quiet"),
+                  QStringLiteral("-i"), stereoWav, QStringLiteral("-c:a"), QStringLiteral("aac"),
+                  QStringLiteral("-f"), QStringLiteral("adts"), adtsAac});
+        QVERIFY(ff.waitForFinished(10000) && ff.exitCode() == 0 && QFile::exists(adtsAac));
+    }
+    const TrackMetadata parsedAac = MetadataReader::parseTags(adtsAac.toStdString());
+    QCOMPARE(parsedAac.provenanceEmbedSupported, false);
+
+    const auto aacImp = ws.importFile(adtsAac);
+    QCOMPARE(aacImp.status, ImportResultStatus::Imported);
+    QCOMPARE(aacImp.provenanceEmbedded, false);
+
+    const QVariantMap aacDetails = ws.getFileDetails("raw_stereo.aac");
+    QCOMPARE(aacDetails["logOnlyProvenance"].toBool(), true);
+
+    QFile idxFile(wsDir + "/.desk32/state_index.json");
+    QVERIFY(idxFile.open(QIODevice::ReadOnly));
+    const QJsonDocument idxDoc = QJsonDocument::fromJson(idxFile.readAll());
+    bool foundLogOnlyInIndex = false;
+    for (const QJsonValue& val : idxDoc.object().value("files").toArray()) {
+        const QJsonObject o = val.toObject();
+        if (o.value("relative_path").toString() == "raw_stereo.aac") {
+            foundLogOnlyInIndex = o.value("log_only_provenance").toBool(false);
+        }
+    }
+    QVERIFY(foundLogOnlyInIndex);
 }
 
 QTEST_GUILESS_MAIN(TestWorkspaceV381)

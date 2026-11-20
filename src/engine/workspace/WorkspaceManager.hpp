@@ -60,6 +60,13 @@ struct WorkspaceFileEntry {
     metadata::TrackMetadata metadata;
     bool externallyModified = false;
     QString externalChangeDetail;
+    bool logOnlyProvenance = false;
+};
+
+struct StateIndexEntry {
+    QString sha256;
+    qint64 size = 0;
+    bool logOnlyProvenance = false;
 };
 
 struct SaveManifestFile {
@@ -322,7 +329,7 @@ private:
     bool loadSaveByIdLocked(const QString& saveId, SaveManifest& outManifest, QString& outError) const;
     bool writeSaveManifestLocked(const SaveManifest& manifest, QString& outError) const;
     void scanCurrentWorkspaceLocked(std::vector<WorkspaceFileEntry>& outEntries, bool computeTags = true) const;
-    bool loadStateIndexLocked(std::map<QString, std::pair<QString, qint64>>& outIndex) const;
+    bool loadStateIndexLocked(std::map<QString, StateIndexEntry>& outIndex) const;
     bool saveStateIndexLocked(const std::vector<WorkspaceFileEntry>& entries) const;
     void detectExternalChangesAgainstIndexLocked(const std::vector<WorkspaceFileEntry>& currentEntries,
                                                  QStringList& outMessages);
@@ -345,6 +352,7 @@ private:
     StopPlaybackCallback m_stopPlaybackCallback;
     MetadataReloadCallback m_metadataReloadCallback;
     std::map<QString, QString> m_externalChangeDetails;
+    std::set<QString> m_logOnlyProvenanceRelPaths;
 
     // Dedicated Workspace Worker Thread (Specification §9.5)
     mutable std::mutex m_workerQueueMutex;

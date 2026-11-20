@@ -21,11 +21,16 @@ public:
                                 pipeline::NodeAffiliation affiliation = pipeline::NodeAffiliation::RenderCommon,
                                 std::shared_ptr<ExternalInsertBridge> bridge = nullptr)
         : pipeline::AudioNode(std::move(name), affiliation)
-        , m_bridge(bridge ? std::move(bridge) : std::make_shared<ExternalInsertBridge>())
+        , m_bridge(bridge ? bridge : std::make_shared<ExternalInsertBridge>())
         , m_delayBuffer(std::make_unique<DelayCompensationBuffer>())
     {
-        // Default to bypassed until configured and activated
-        setBypassed(true);
+        if (!bridge) {
+            // Default to bypassed until configured and activated
+            setBypassed(true);
+        } else {
+            // Preserve shared bridge's bypass state without mutating it
+            pipeline::AudioNode::setBypassed(m_bridge->isBypassed());
+        }
     }
 
     ~ExternalInsertNode() override = default;
@@ -77,9 +82,19 @@ public:
         return pipeline::AudioNode::isBypassed() || m_bridge->isBypassed();
     }
 
+    [[nodiscard]] pipeline::NodeState nodeState() const noexcept override {
+        const auto st = m_bridge ? m_bridge->state() : InsertState::NotConfigured;
+        if (st == InsertState::Error || st == InsertState::Disconnected ||
+            st == InsertState::RateMismatch || st == InsertState::BufferMismatch) {
+            return pipeline::NodeState::Error;
+        }
+        return pipeline::AudioNode::nodeState();
+    }
+
     [[nodiscard]] std::shared_ptr<pipeline::AudioNode> clone() const override {
+        const bool wasBypassed = isBypassed();
         auto node = std::make_shared<ExternalInsertNode>(m_name, m_affiliation, m_bridge);
-        node->setBypassed(isBypassed());
+        node->pipeline::AudioNode::setBypassed(wasBypassed);
         node->configure(m_sampleRate);
         node->delayBuffer().setDelayFrames(m_delayBuffer->delayFrames());
         return node;
@@ -93,8 +108,8 @@ public:
     void process(double* left, double* right, size_t frameCount) override {
         if (!left || !right || frameCount == 0) return;
 
-        // 1. If bypassed, pass through untouched (dry)
-        if (isBypassed()) {
+        // 1. If bypassed (and not in brief RT fade-out), pass through untouched (dry)
+        if (m_bridge->isBypassed() || pipeline::AudioNode::isEffectivelyBypassed()) {
             return;
         }
 
