@@ -55,6 +55,10 @@ public:
             m_lpfQ = other.m_lpfQ;
             m_hpfEnabled.store(other.m_hpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             m_lpfEnabled.store(other.m_lpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            m_hpfMix = other.m_hpfMix;
+            m_lpfMix = other.m_lpfMix;
+            m_hpfSlopeMix = other.m_hpfSlopeMix;
+            m_lpfSlopeMix = other.m_lpfSlopeMix;
             m_hpfLeft1 = other.m_hpfLeft1;
             m_hpfRight1 = other.m_hpfRight1;
             m_hpfLeft2 = other.m_hpfLeft2;
@@ -132,6 +136,10 @@ public:
         m_lpfQ = std::clamp(c.lpfQ, 0.1, 10.0);
         m_hpfEnabled.store(c.hpfEnabled, std::memory_order_relaxed);
         m_lpfEnabled.store(c.lpfEnabled, std::memory_order_relaxed);
+        m_hpfMix.setTarget(c.hpfEnabled ? 1.0 : 0.0, smoothSamples);
+        m_lpfMix.setTarget(c.lpfEnabled ? 1.0 : 0.0, smoothSamples);
+        m_hpfSlopeMix.setTarget((c.hpfSlope == 1) ? 1.0 : 0.0, smoothSamples);
+        m_lpfSlopeMix.setTarget((c.lpfSlope == 1) ? 1.0 : 0.0, smoothSamples);
     }
 
     void configure(double sampleRate, double hpfFreq = 20.0, double lpfFreq = 20000.0,
@@ -186,14 +194,31 @@ public:
         setLpfFrequency(m_lpfFreq);
     }
 
-    void setHpfSlope(FilterSlope slope) { m_hpfSlope = slope; }
-    void setLpfSlope(FilterSlope slope) { m_lpfSlope = slope; }
+    void setHpfSlope(FilterSlope slope) {
+        m_hpfSlope = slope;
+        m_hpfSlopeMix.setImmediate((slope == FilterSlope::Slope24dB) ? 1.0 : 0.0);
+    }
+    void setLpfSlope(FilterSlope slope) {
+        m_lpfSlope = slope;
+        m_lpfSlopeMix.setImmediate((slope == FilterSlope::Slope24dB) ? 1.0 : 0.0);
+    }
 
-    void setHpfEnabled(bool enabled) noexcept { m_hpfEnabled.store(enabled, std::memory_order_relaxed); }
+    void setHpfEnabled(bool enabled) noexcept {
+        m_hpfEnabled.store(enabled, std::memory_order_relaxed);
+        m_hpfMix.setImmediate(enabled ? 1.0 : 0.0);
+    }
     [[nodiscard]] bool isHpfEnabled() const noexcept { return m_hpfEnabled.load(std::memory_order_relaxed); }
 
-    void setLpfEnabled(bool enabled) noexcept { m_lpfEnabled.store(enabled, std::memory_order_relaxed); }
+    void setLpfEnabled(bool enabled) noexcept {
+        m_lpfEnabled.store(enabled, std::memory_order_relaxed);
+        m_lpfMix.setImmediate(enabled ? 1.0 : 0.0);
+    }
     [[nodiscard]] bool isLpfEnabled() const noexcept { return m_lpfEnabled.load(std::memory_order_relaxed); }
+
+    [[nodiscard]] bool isSmoothingTransition() const noexcept {
+        return m_hpfMix.remaining > 0 || m_lpfMix.remaining > 0 ||
+               m_hpfSlopeMix.remaining > 0 || m_lpfSlopeMix.remaining > 0;
+    }
 
     void reset()
     {
@@ -236,25 +261,92 @@ public:
 
     inline void process(double& left, double& right)
     {
-        if (m_hpfEnabled.load(std::memory_order_relaxed)) {
-            left = m_hpfLeft1.process(left);
-            right = m_hpfRight1.process(right);
-            if (m_hpfSlope == FilterSlope::Slope24dB) {
-                left = m_hpfLeft2.process(left);
-                right = m_hpfRight2.process(right);
-            }
-        }
-        if (m_lpfEnabled.load(std::memory_order_relaxed)) {
-            left = m_lpfLeft1.process(left);
-            right = m_lpfRight1.process(right);
-            if (m_lpfSlope == FilterSlope::Slope24dB) {
-                left = m_lpfLeft2.process(left);
-                right = m_lpfRight2.process(right);
-            }
-        }
+        processSection(left, right,
+                       m_hpfLeft1, m_hpfRight1, m_hpfLeft2, m_hpfRight2,
+                       m_hpfMix, m_hpfSlopeMix);
+        processSection(left, right,
+                       m_lpfLeft1, m_lpfRight1, m_lpfLeft2, m_lpfRight2,
+                       m_lpfMix, m_lpfSlopeMix);
     }
 
 private:
+    struct MixRamp {
+        double current = 0.0;
+        double target = 0.0;
+        double step = 0.0;
+        size_t remaining = 0;
+
+        void setImmediate(double v) noexcept {
+            current = v;
+            target = v;
+            step = 0.0;
+            remaining = 0;
+        }
+
+        void setTarget(double newTarget, size_t smoothSamples) noexcept {
+            if (smoothSamples <= 1) {
+                setImmediate(newTarget);
+                return;
+            }
+            if (remaining == 0 && current == newTarget && target == newTarget) {
+                return;
+            }
+            if (remaining > 0 && target == newTarget) {
+                return;
+            }
+            target = newTarget;
+            step = (target - current) / static_cast<double>(smoothSamples);
+            remaining = smoothSamples;
+        }
+
+        inline double advance() noexcept {
+            if (remaining > 0) {
+                current += step;
+                --remaining;
+                if (remaining == 0) {
+                    current = target;
+                }
+            }
+            return current;
+        }
+    };
+
+    static inline void processSection(
+        double& left,
+        double& right,
+        BiquadFilter& s1L,
+        BiquadFilter& s1R,
+        BiquadFilter& s2L,
+        BiquadFilter& s2R,
+        MixRamp& enableMix,
+        MixRamp& slopeMix) noexcept
+    {
+        const double dryL = left;
+        const double dryR = right;
+
+        // Keep all filter stages warmed on the live signal even when disabled or at 12 dB/oct
+        const double st1L = s1L.process(dryL);
+        const double st1R = s1R.process(dryR);
+        const double st2L = s2L.process(st1L);
+        const double st2R = s2R.process(st1R);
+
+        const double sm = slopeMix.advance();
+        const double wetL = (sm <= 0.0) ? st1L : ((sm >= 1.0) ? st2L : (st1L + (st2L - st1L) * sm));
+        const double wetR = (sm <= 0.0) ? st1R : ((sm >= 1.0) ? st2R : (st1R + (st2R - st1R) * sm));
+
+        const double em = enableMix.advance();
+        if (em <= 0.0) {
+            left = dryL;
+            right = dryR;
+        } else if (em >= 1.0) {
+            left = wetL;
+            right = wetR;
+        } else {
+            left = dryL + (wetL - dryL) * em;
+            right = dryR + (wetR - dryR) * em;
+        }
+    }
+
     double m_sampleRate = 48000.0;
     double m_hpfFreq = 20.0;
     double m_lpfFreq = 20000.0;
@@ -264,6 +356,10 @@ private:
     double m_lpfQ = 0.7071067811865475;
     std::atomic<bool> m_hpfEnabled{false};
     std::atomic<bool> m_lpfEnabled{false};
+    MixRamp m_hpfMix;
+    MixRamp m_lpfMix;
+    MixRamp m_hpfSlopeMix;
+    MixRamp m_lpfSlopeMix;
 
     BiquadFilter m_hpfLeft1, m_hpfRight1;
     BiquadFilter m_hpfLeft2, m_hpfRight2;

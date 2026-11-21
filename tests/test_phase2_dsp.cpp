@@ -236,6 +236,7 @@ private slots:
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
     void testAutoPauseOtherDeckOnPlay();
     void testFolderSessionEndLoggingWithReasons();
+    void testHpfLpfClickFreeEnableDisableCrossfade();
     void testMasterGainPostTapIsolation();
     void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
     void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
@@ -3874,6 +3875,134 @@ void TestPhase2Dsp::testFolderSessionEndLoggingWithReasons()
     QVERIFY(reasons.contains(QStringLiteral("comparative_switch")));
     QVERIFY(reasons.contains(QStringLiteral("track_replaced")));
     QVERIFY(reasons.contains(QStringLiteral("end_of_folder")));
+}
+
+void TestPhase2Dsp::testHpfLpfClickFreeEnableDisableCrossfade()
+{
+    // §5.9: Toggling HPF/LPF ON or OFF in live AudioPipeline must keep filter state warmed
+    // while disabled and apply a smooth ~5ms section crossfade without step discontinuities.
+    constexpr double sr = 48000.0;
+    constexpr double freqHz = 50.0; // Strong bass signal removed by 500 Hz HPF
+    constexpr double amp = 0.8;
+    const double maxExpectedStep = amp * 2.0 * std::numbers::pi * freqHz / sr + 0.01;
+
+    HighLowPassFilter flt;
+    flt.configure(sr, 500.0, 20000.0,
+                  HighLowPassFilter::FilterSlope::Slope24dB,
+                  HighLowPassFilter::FilterSlope::Slope12dB);
+    flt.setHpfEnabled(false);
+    flt.setLpfEnabled(false);
+
+    double prevL = 0.0;
+    double maxStepOn = 0.0;
+    double maxStepOff = 0.0;
+    size_t sampleIdx = 0;
+
+    auto genSample = [&](size_t idx) {
+        return amp * std::sin(2.0 * std::numbers::pi * freqHz * static_cast<double>(idx) / sr);
+    };
+
+    // 1. Warm up signal with HPF OFF for 2048 samples (verify bit-exact passthrough)
+    for (int i = 0; i < 2048; ++i) {
+        const double x = genSample(sampleIdx++);
+        double l = x, r = x;
+        flt.process(l, r);
+        QCOMPARE(l, x);
+        prevL = l;
+    }
+
+    // 2. Enable HPF at 500 Hz with 240-sample (5ms) smooth crossfade near peak amplitude
+    const auto coeffsOn = HighLowPassFilter::calculateCoefficients(
+        sr, 500.0, 20000.0,
+        HighLowPassFilter::FilterSlope::Slope24dB,
+        HighLowPassFilter::FilterSlope::Slope12dB,
+        true, false);
+    flt.applyCoefficients(coeffsOn, 240);
+    QVERIFY(flt.isSmoothingTransition());
+
+    for (int i = 0; i < 480; ++i) {
+        const double x = genSample(sampleIdx++);
+        double l = x, r = x;
+        flt.process(l, r);
+        maxStepOn = std::max(maxStepOn, std::abs(l - prevL));
+        prevL = l;
+    }
+    QVERIFY(!flt.isSmoothingTransition());
+    QVERIFY2(maxStepOn < maxExpectedStep,
+             qPrintable(QString("HPF ON step too large: %1 >= %2").arg(maxStepOn).arg(maxExpectedStep)));
+
+    // 3. Disable HPF with 240-sample smooth crossfade
+    const auto coeffsOff = HighLowPassFilter::calculateCoefficients(
+        sr, 500.0, 20000.0,
+        HighLowPassFilter::FilterSlope::Slope24dB,
+        HighLowPassFilter::FilterSlope::Slope12dB,
+        false, false);
+    flt.applyCoefficients(coeffsOff, 240);
+    QVERIFY(flt.isSmoothingTransition());
+
+    for (int i = 0; i < 480; ++i) {
+        const double x = genSample(sampleIdx++);
+        double l = x, r = x;
+        flt.process(l, r);
+        maxStepOff = std::max(maxStepOff, std::abs(l - prevL));
+        prevL = l;
+    }
+    QVERIFY(!flt.isSmoothingTransition());
+    QVERIFY2(maxStepOff < maxExpectedStep,
+             qPrintable(QString("HPF OFF step too large: %1 >= %2").arg(maxStepOff).arg(maxExpectedStep)));
+
+    // 4. AudioPipeline end-to-end mailbox test with zero RT heap allocation
+    AudioPipeline pipeline(sr);
+    auto chain = std::make_unique<AudioChain>("FilterSmoothChain", ChainPurpose::MasteringChain);
+    auto fltNode = std::make_shared<HighLowPassNode>("HPF / LPF");
+    fltNode->configure(sr);
+    fltNode->setBypassed(false);
+    chain->appendNode(fltNode);
+    chain->configure(sr);
+    chain->setBypassed(false);
+    pipeline.swapMasterChain(std::move(chain));
+
+    constexpr size_t blockFrames = 256;
+    std::vector<double> inL(blockFrames), inR(blockFrames);
+    std::vector<float> outPcm(blockFrames * 2);
+
+    // Prime pipeline with HPF OFF at 500 Hz
+    pipeline.paramMailbox().setFilterParams(500.0f, 20000.0f, 1, 0, false, false, 0.70710678f, 0.70710678f);
+    for (int b = 0; b < 8; ++b) {
+        for (size_t i = 0; i < blockFrames; ++i) {
+            const double s = genSample(sampleIdx++);
+            inL[i] = s;
+            inR[i] = s;
+        }
+        pipeline.process(inL.data(), inR.data(), blockFrames, outPcm.data(), SampleFormat::Float32, false);
+    }
+    double pipePrev = static_cast<double>(outPcm[(blockFrames - 1) * 2]);
+
+    // Toggle HPF ON via mailbox and check zero RT allocations & zero step click
+    pipeline.paramMailbox().setFilterParams(500.0f, 20000.0f, 1, 0, true, false, 0.70710678f, 0.70710678f);
+    double pipeMaxStep = 0.0;
+    s_audioThreadAllocationCount.store(0, std::memory_order_relaxed);
+    s_trackAllocations.store(true, std::memory_order_relaxed);
+    {
+        AudioThreadScopeGuard rtGuard;
+        for (int b = 0; b < 4; ++b) {
+            for (size_t i = 0; i < blockFrames; ++i) {
+                const double s = genSample(sampleIdx++);
+                inL[i] = s;
+                inR[i] = s;
+            }
+            pipeline.process(inL.data(), inR.data(), blockFrames, outPcm.data(), SampleFormat::Float32, false);
+            for (size_t i = 0; i < blockFrames; ++i) {
+                const double cur = static_cast<double>(outPcm[i * 2]);
+                pipeMaxStep = std::max(pipeMaxStep, std::abs(cur - pipePrev));
+                pipePrev = cur;
+            }
+        }
+    }
+    s_trackAllocations.store(false, std::memory_order_relaxed);
+    QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
+    QVERIFY2(pipeMaxStep < maxExpectedStep,
+             qPrintable(QString("Pipeline HPF ON step too large: %1 >= %2").arg(pipeMaxStep).arg(maxExpectedStep)));
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)
