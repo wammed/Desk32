@@ -104,6 +104,60 @@ bool EngineController::initialize(bool offlineMode) {
         emit deckStateChanged(QString(cid));
         emit diagnosticsChanged();
       });
+      d->setFolderSessionEndCallback(
+          [this](const engine::deck::FolderSessionEndEvent &ev) {
+            const QString deckStr(ev.deckId);
+            const QString reasonStr = QString::fromStdString(ev.reason);
+            const QString folderPath = QString::fromStdString(ev.folderPath);
+            const QString trackPath =
+                QString::fromStdString(ev.currentTrackPath);
+            const bool isNormalEnd =
+                (ev.reason == "end_of_folder" ||
+                 ev.reason == "user_stop" ||
+                 ev.reason == "deck_locked" ||
+                 ev.reason == "comparative_switch" ||
+                 ev.reason == "track_replaced" ||
+                 ev.reason == "new_folder_session" ||
+                 ev.reason == "track_closed" ||
+                 ev.reason == "app_shutdown");
+            const QString statusStr =
+                (ev.errorCode != 0) ? QStringLiteral("Failed")
+                                    : (isNormalEnd ? QStringLiteral("Info")
+                                                   : QStringLiteral("Warning"));
+
+            QJsonObject det;
+            det.insert(QStringLiteral("session_id"),
+                       log::LogService::instance().sessionId());
+            det.insert(QStringLiteral("folder_session_id"),
+                       static_cast<qint64>(ev.folderSessionId));
+            det.insert(QStringLiteral("deck"), deckStr);
+            det.insert(QStringLiteral("folder_path"), folderPath);
+            det.insert(QStringLiteral("reason"), reasonStr);
+            det.insert(QStringLiteral("track_index"),
+                       static_cast<int>(ev.trackIndex));
+            det.insert(QStringLiteral("track_count"),
+                       static_cast<int>(ev.totalTracks));
+            det.insert(QStringLiteral("track_path"), trackPath);
+            if (!ev.detail.empty()) {
+              det.insert(QStringLiteral("detail"),
+                         QString::fromStdString(ev.detail));
+            }
+
+            log::LogService::instance().log(
+                QStringLiteral("FolderSession"),
+                QStringLiteral("EndSession"),
+                statusStr,
+                QString("Folder session ended in Deck %1 (reason: %2, track %3/%4)")
+                    .arg(deckStr, reasonStr)
+                    .arg(ev.totalTracks > 0 ? ev.trackIndex + 1 : 0)
+                    .arg(ev.totalTracks),
+                QStringLiteral("Folder"),
+                folderPath.isEmpty() ? deckStr : folderPath,
+                QString::fromUtf8(
+                    QJsonDocument(det).toJson(QJsonDocument::Compact)),
+                QString(), QString(), ev.errorCode, 0.0);
+            emit deckStateChanged(deckStr);
+          });
     }
   }
 
@@ -128,7 +182,7 @@ bool EngineController::initialize(bool offlineMode) {
             const QString loadedCanon = canonPath(d->trackInfo().path);
             if (canonAffected.isEmpty() ||
                 (!loadedCanon.isEmpty() && canonAffected.contains(loadedCanon))) {
-              d->stop();
+              d->stop("workspace_file_changed");
               emit deckStateChanged(QString(cid));
             }
           }
@@ -754,6 +808,14 @@ void EngineController::recordSessionEnd(const QString &reason) {
   if (m_sessionEndRecorded)
     return;
   m_sessionEndRecorded = true;
+
+  if (m_deckManager) {
+    for (char cid : {'A', 'B', 'C', 'D'}) {
+      if (auto *d = m_deckManager->deck(cid)) {
+        d->terminateFolderSession("app_shutdown");
+      }
+    }
+  }
 
   const auto now = std::chrono::steady_clock::now();
   const double uptimeMs =
@@ -2709,6 +2771,8 @@ bool EngineController::startFolderSession(const QString &deckId,
                           : QString();
     QJsonObject det;
     det.insert(QStringLiteral("deck"), deckId);
+    det.insert(QStringLiteral("folder_session_id"),
+               static_cast<qint64>(fs.sessionId()));
     det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
     det.insert(QStringLiteral("folder_path"), folderPath);
     det.insert(QStringLiteral("track_count"),
@@ -2764,12 +2828,22 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
     }
     emit deckStateChanged(deckId);
     emit diagnosticsChanged();
+    const auto &fs = d->folderSession();
+    QJsonObject det;
+    det.insert(QStringLiteral("deck"), deckId);
+    det.insert(QStringLiteral("folder_session_id"),
+               static_cast<qint64>(fs.sessionId()));
+    det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
+    det.insert(QStringLiteral("folder_path"), folderPath);
+    det.insert(QStringLiteral("track_count"),
+               static_cast<int>(fs.tracks().size()));
     log::LogService::instance().log(
         "FolderSession", "StartFromDeck", "Success",
         QString("Started folder session from loaded track in Deck %1 (%2 tracks)")
             .arg(deckId)
-            .arg(d->folderSession().tracks().size()),
-        "Folder", folderPath);
+            .arg(fs.tracks().size()),
+        "Folder", folderPath,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
   }
   return ok;
 }

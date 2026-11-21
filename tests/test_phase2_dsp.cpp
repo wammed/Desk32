@@ -235,6 +235,7 @@ private slots:
     void testSessionAndFolderObservabilityLogging();
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
     void testAutoPauseOtherDeckOnPlay();
+    void testFolderSessionEndLoggingWithReasons();
     void testMasterGainPostTapIsolation();
     void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
     void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
@@ -3777,6 +3778,102 @@ void TestPhase2Dsp::testAutoPauseOtherDeckOnPlay()
 
     ctrl.stop("A");
     ctrl.stop("B");
+}
+
+void TestPhase2Dsp::testFolderSessionEndLoggingWithReasons()
+{
+    auto& ctrl = desk32::core::EngineController::instance();
+    if (!ctrl.deckManager()) {
+        QVERIFY(ctrl.initialize(true));
+    }
+    auto& logSvc = desk32::core::log::LogService::instance();
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    auto writeWav = [](const QString& path) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        const uint32_t sr = 48000;
+        const uint16_t ch = 2;
+        const uint16_t bits = 16;
+        const uint32_t frames = 2400; // 50 ms
+        const uint32_t dataSize = frames * ch * (bits / 8);
+        const uint32_t riffSize = 36 + dataSize;
+        QByteArray hdr;
+        hdr.append("RIFF", 4);
+        hdr.append(reinterpret_cast<const char*>(&riffSize), 4);
+        hdr.append("WAVEfmt ", 8);
+        const uint32_t fmtSize = 16;
+        const uint16_t pcmFmt = 1;
+        const uint32_t byteRate = sr * ch * (bits / 8);
+        const uint16_t blockAlign = ch * (bits / 8);
+        hdr.append(reinterpret_cast<const char*>(&fmtSize), 4);
+        hdr.append(reinterpret_cast<const char*>(&pcmFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&ch), 2);
+        hdr.append(reinterpret_cast<const char*>(&sr), 4);
+        hdr.append(reinterpret_cast<const char*>(&byteRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&blockAlign), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2);
+        hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSize), 4);
+        f.write(hdr);
+        f.write(QByteArray(static_cast<int>(dataSize), '\0'));
+        f.close();
+        return true;
+    };
+
+    const QString wav1 = tempDir.filePath("01_one.wav");
+    const QString wav2 = tempDir.filePath("02_two.wav");
+    const QString singleWav = tempDir.filePath("single.wav");
+    QVERIFY(writeWav(wav1));
+    QVERIFY(writeWav(wav2));
+    QVERIFY(writeWav(singleWav));
+
+    ctrl.setDeckLocked("A", false);
+    ctrl.setDeckLocked("B", false);
+
+    // 1. user_stop
+    QVERIFY(ctrl.startFolderSession("A", tempDir.path(), {"01_one.wav", "02_two.wav"}));
+    ctrl.stop("A");
+
+    // 2. deck_locked
+    QVERIFY(ctrl.startFolderSession("A", tempDir.path(), {"01_one.wav", "02_two.wav"}));
+    ctrl.setDeckLocked("A", true);
+    ctrl.setDeckLocked("A", false);
+
+    // 3. comparative_switch
+    QVERIFY(ctrl.startFolderSession("A", tempDir.path(), {"01_one.wav", "02_two.wav"}));
+    QVERIFY(ctrl.loadTrack("B", singleWav));
+    ctrl.switchDeck("B", 1);
+
+    // 4. track_replaced
+    QVERIFY(ctrl.startFolderSession("A", tempDir.path(), {"01_one.wav", "02_two.wav"}));
+    QVERIFY(ctrl.loadTrack("A", singleWav));
+
+    // 5. end_of_folder (manual advance past final track)
+    QVERIFY(ctrl.startFolderSession("A", tempDir.path(), {"01_one.wav", "02_two.wav"}));
+    QVERIFY(ctrl.advanceFolderNext("A"));
+    QVERIFY(!ctrl.advanceFolderNext("A"));
+
+    logSvc.flush();
+    desk32::core::log::LogFilter f;
+    f.category = "FolderSession";
+    const auto events = logSvc.queryLogs(f);
+
+    QSet<QString> reasons;
+    for (const auto& ev : events) {
+        if (ev.operation == "EndSession") {
+            const QJsonObject d = QJsonDocument::fromJson(QByteArray::fromStdString(ev.detailsJson)).object();
+            QVERIFY(d.value("folder_session_id").toInteger() > 0);
+            QVERIFY(!d.value("reason").toString().isEmpty());
+            reasons.insert(d.value("reason").toString());
+        }
+    }
+    QVERIFY(reasons.contains(QStringLiteral("user_stop")));
+    QVERIFY(reasons.contains(QStringLiteral("deck_locked")));
+    QVERIFY(reasons.contains(QStringLiteral("comparative_switch")));
+    QVERIFY(reasons.contains(QStringLiteral("track_replaced")));
+    QVERIFY(reasons.contains(QStringLiteral("end_of_folder")));
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

@@ -83,6 +83,18 @@ struct EofNotification {
     bool decodeError = false;
 };
 
+struct FolderSessionEndEvent {
+    char deckId = 'A';
+    uint64_t folderSessionId = 0;
+    std::string folderPath;
+    size_t trackIndex = 0;
+    size_t totalTracks = 0;
+    std::string currentTrackPath;
+    std::string reason;
+    std::string detail;
+    int32_t errorCode = 0;
+};
+
 struct AutoAdvanceResult {
     bool executed = false;
     bool advanced = false;
@@ -236,6 +248,12 @@ public:
         m_errorLogCallback = std::move(cb);
     }
 
+    using FolderSessionEndCallback = std::function<void(const FolderSessionEndEvent&)>;
+    void setFolderSessionEndCallback(FolderSessionEndCallback cb) {
+        std::lock_guard<std::mutex> lock(m_controlMutex);
+        m_folderSessionEndCallback = std::move(cb);
+    }
+
     [[nodiscard]] std::string lastFolderSessionError() const {
         std::lock_guard<std::mutex> lock(m_controlMutex);
         return m_lastFolderSessionError;
@@ -307,26 +325,38 @@ public:
     [[nodiscard]] session::FolderSession& folderSession() noexcept { return m_folderSession; }
 
     void setLocked(bool locked) noexcept {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        m_isLocked.store(locked, std::memory_order_release);
-        if (locked) {
-            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-            m_needsFolderAdvance.store(false, std::memory_order_release);
-            discardPendingOverflow();
-            m_currentTrackPathHash.store(0, std::memory_order_release);
-            m_folderSession.stopSession(); // P0-10: Deck lock terminates and discards folder session
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            m_isLocked.store(locked, std::memory_order_release);
+            if (locked) {
+                m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+                m_needsFolderAdvance.store(false, std::memory_order_release);
+                discardPendingOverflow();
+                m_currentTrackPathHash.store(0, std::memory_order_release);
+                emitEnd = captureAndStopSessionLocked("deck_locked", "", 0, endEv, endCb); // P0-10: Deck lock terminates and discards folder session
+            }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
     }
 
     /// Section 2.7.5: Terminate and discard Folder Session while preserving the currently loaded track context
-    void terminateFolderSession() noexcept {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        if (m_folderSession.isActive()) {
-            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-            m_needsFolderAdvance.store(false, std::memory_order_release);
-            discardPendingOverflow();
-            m_folderSession.stopSession();
+    void terminateFolderSession(const std::string& reason = "terminated") noexcept {
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            if (m_folderSession.isActive()) {
+                m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+                m_needsFolderAdvance.store(false, std::memory_order_release);
+                discardPendingOverflow();
+                emitEnd = captureAndStopSessionLocked(reason, "", 0, endEv, endCb);
+            }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
     }
     void setOffsetFrames(int64_t offset) noexcept { m_offsetFrames.store(offset, std::memory_order_release); }
     void setLevelMatchGainDb(double db) noexcept {
@@ -342,49 +372,63 @@ public:
     /// Load standalone audio track using background DecoderWorker.
     /// Section 2.7.5: Blocked if Deck is locked.
     bool loadTrack(const std::string& filePath, double graphSampleRate) {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        if (m_isLocked.load(std::memory_order_acquire)) {
-            return false; // Protected by Deck Lock!
-        }
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        bool ok = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            if (m_isLocked.load(std::memory_order_acquire)) {
+                return false; // Protected by Deck Lock!
+            }
 
-        m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-        m_lastHandledEofGeneration.store(0, std::memory_order_release);
-        m_needsFolderAdvance.store(false, std::memory_order_release);
-        m_pausedByNormalSwitch.store(false, std::memory_order_release);
-        m_decodeErrorNotified.store(false, std::memory_order_release);
-        m_lastFolderSessionError.clear();
-        m_graphRate.store(graphSampleRate, std::memory_order_release);
-        m_folderSession.stopSession();
-        bool ok = m_worker.openTrack(filePath, graphSampleRate);
-        if (ok) {
-            m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(filePath), std::memory_order_release);
-            m_state.store(TransportState::Stopped, std::memory_order_release);
-            m_trackChanged.store(true, std::memory_order_release);
+            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+            m_lastHandledEofGeneration.store(0, std::memory_order_release);
+            m_needsFolderAdvance.store(false, std::memory_order_release);
+            m_pausedByNormalSwitch.store(false, std::memory_order_release);
+            m_decodeErrorNotified.store(false, std::memory_order_release);
+            m_lastFolderSessionError.clear();
+            m_graphRate.store(graphSampleRate, std::memory_order_release);
+            emitEnd = captureAndStopSessionLocked("track_replaced", filePath, 0, endEv, endCb);
+            ok = m_worker.openTrack(filePath, graphSampleRate);
+            if (ok) {
+                m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(filePath), std::memory_order_release);
+                m_state.store(TransportState::Stopped, std::memory_order_release);
+                m_trackChanged.store(true, std::memory_order_release);
+            }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
         return ok;
     }
 
     /// Synthetic/Benchmark track loading overload (backward compatibility for Phase 0 benchmarks)
     bool loadTrack(const TrackInfo& info, double graphSampleRate) {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        if (m_isLocked.load(std::memory_order_acquire)) {
-            return false;
-        }
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        bool ok = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            if (m_isLocked.load(std::memory_order_acquire)) {
+                return false;
+            }
 
-        m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-        m_lastHandledEofGeneration.store(0, std::memory_order_release);
-        m_needsFolderAdvance.store(false, std::memory_order_release);
-        m_pausedByNormalSwitch.store(false, std::memory_order_release);
-        m_decodeErrorNotified.store(false, std::memory_order_release);
-        m_lastFolderSessionError.clear();
-        m_graphRate.store(graphSampleRate, std::memory_order_release);
-        m_folderSession.stopSession();
-        bool ok = m_worker.openSyntheticTrack(info.totalFrames, info.sampleRate, graphSampleRate, info.path);
-        if (ok) {
-            m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(info.path), std::memory_order_release);
-            m_state.store(TransportState::Stopped, std::memory_order_release);
-            m_trackChanged.store(true, std::memory_order_release);
+            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+            m_lastHandledEofGeneration.store(0, std::memory_order_release);
+            m_needsFolderAdvance.store(false, std::memory_order_release);
+            m_pausedByNormalSwitch.store(false, std::memory_order_release);
+            m_decodeErrorNotified.store(false, std::memory_order_release);
+            m_lastFolderSessionError.clear();
+            m_graphRate.store(graphSampleRate, std::memory_order_release);
+            emitEnd = captureAndStopSessionLocked("track_replaced", info.path, 0, endEv, endCb);
+            ok = m_worker.openSyntheticTrack(info.totalFrames, info.sampleRate, graphSampleRate, info.path);
+            if (ok) {
+                m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(info.path), std::memory_order_release);
+                m_state.store(TransportState::Stopped, std::memory_order_release);
+                m_trackChanged.store(true, std::memory_order_release);
+            }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
         return ok;
     }
 
@@ -431,6 +475,12 @@ public:
         ErrorLogCallback cbCopy;
         std::string logOp, logTarget, logMsg;
         int32_t logErrCode = 0;
+        FolderSessionEndEvent prevEndEv;
+        FolderSessionEndCallback prevEndCb;
+        bool emitPrevEnd = false;
+        FolderSessionEndEvent failEndEv;
+        FolderSessionEndCallback failEndCb;
+        bool emitFailEnd = false;
         bool ok = false;
         {
             std::lock_guard<std::mutex> lock(m_controlMutex);
@@ -441,6 +491,8 @@ public:
             const std::vector<std::string> effectiveFiles =
                 fileNames.empty() ? session::FolderSession::scanSupportedAudioFiles(folderPath) : fileNames;
 
+            emitPrevEnd = captureAndStopSessionLocked("new_folder_session", folderPath, 0, prevEndEv, prevEndCb);
+
             m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
             m_lastHandledEofGeneration.store(0, std::memory_order_release);
             m_needsFolderAdvance.store(false, std::memory_order_release);
@@ -448,36 +500,36 @@ public:
             m_decodeErrorNotified.store(false, std::memory_order_release);
             m_lastFolderSessionError.clear();
 
-            if (!m_folderSession.startSession(folderPath, effectiveFiles)) {
-                return false;
-            }
-
-            m_graphRate.store(graphSampleRate, std::memory_order_release);
-            const auto* firstTrack = m_folderSession.currentTrack();
-            if (!firstTrack) return false;
-
-            ok = m_worker.openTrack(firstTrack->path, graphSampleRate);
-            if (ok) {
-                m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(firstTrack->path), std::memory_order_release);
-                m_state.store(TransportState::Stopped, std::memory_order_release);
-                m_trackChanged.store(true, std::memory_order_release);
-                (void)validateAndPrepareReadAheadLocked(logMsg, logTarget);
-                if (!logMsg.empty()) {
-                    cbCopy = m_errorLogCallback;
-                    logOp = "FolderSessionReadAhead";
-                    logErrCode = 1040;
+            if (m_folderSession.startSession(folderPath, effectiveFiles)) {
+                m_graphRate.store(graphSampleRate, std::memory_order_release);
+                const auto* firstTrack = m_folderSession.currentTrack();
+                if (firstTrack) {
+                    ok = m_worker.openTrack(firstTrack->path, graphSampleRate);
+                    if (ok) {
+                        m_currentTrackPathHash.store(session::FolderSession::hashTrackPath(firstTrack->path), std::memory_order_release);
+                        m_state.store(TransportState::Stopped, std::memory_order_release);
+                        m_trackChanged.store(true, std::memory_order_release);
+                        (void)validateAndPrepareReadAheadLocked(logMsg, logTarget);
+                        if (!logMsg.empty()) {
+                            cbCopy = m_errorLogCallback;
+                            logOp = "FolderSessionReadAhead";
+                            logErrCode = 1040;
+                        }
+                    } else {
+                        m_currentTrackPathHash.store(0, std::memory_order_release);
+                        logTarget = firstTrack->path;
+                        logMsg = "Failed to open initial track in Folder Session: " + logTarget;
+                        m_lastFolderSessionError = logMsg;
+                        emitFailEnd = captureAndStopSessionLocked("open_initial_failed", logMsg, 1041, failEndEv, failEndCb);
+                        logOp = "FolderSessionStart";
+                        logErrCode = 1041;
+                        cbCopy = m_errorLogCallback;
+                    }
                 }
-            } else {
-                m_currentTrackPathHash.store(0, std::memory_order_release);
-                logTarget = firstTrack->path;
-                m_folderSession.stopSession();
-                logMsg = "Failed to open initial track in Folder Session: " + logTarget;
-                m_lastFolderSessionError = logMsg;
-                logOp = "FolderSessionStart";
-                logErrCode = 1041;
-                cbCopy = m_errorLogCallback;
             }
         }
+        emitFolderSessionEnd(emitPrevEnd, prevEndCb, prevEndEv);
+        emitFolderSessionEnd(emitFailEnd, failEndCb, failEndEv);
         if (cbCopy) {
             cbCopy(logOp, logErrCode, logTarget, logMsg);
         }
@@ -489,6 +541,9 @@ public:
         ErrorLogCallback cbCopy;
         std::string logOp, logTarget, logMsg;
         int32_t logErrCode = 0;
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
         bool advanced = false;
         {
             std::lock_guard<std::mutex> lock(m_controlMutex);
@@ -505,8 +560,7 @@ public:
                              ? "Unrecoverable mid-stream decode error during Folder Session"
                              : m_worker.lastDecodeErrorMessage();
                 m_lastFolderSessionError = logMsg;
-                m_folderSession.stopSession();
-                stopLocked();
+                emitEnd = stopLocked("decode_error", logMsg, 1042, endEv, endCb);
                 cbCopy = m_errorLogCallback;
                 logOp = "FolderSessionDecodeError";
                 logErrCode = 1042;
@@ -518,8 +572,7 @@ public:
                              ? ("Next track unreadable or missing in Folder Session: " + logTarget)
                              : m_folderSession.readAheadError();
                 m_lastFolderSessionError = logMsg;
-                m_folderSession.stopSession();
-                stopLocked();
+                emitEnd = stopLocked("read_ahead_failed", logMsg, 1040, endEv, endCb);
                 cbCopy = m_errorLogCallback;
                 logOp = "FolderSessionReadAhead";
                 logErrCode = 1040;
@@ -547,8 +600,7 @@ public:
                             logTarget = nextTrack->path;
                             logMsg = "Failed to open next Folder Session track: " + logTarget;
                             m_lastFolderSessionError = logMsg;
-                            m_folderSession.stopSession();
-                            m_currentTrackPathHash.store(0, std::memory_order_release);
+                            emitEnd = stopLocked("open_track_failed", logMsg, 1041, endEv, endCb);
                             cbCopy = m_errorLogCallback;
                             logOp = "FolderSessionAdvance";
                             logErrCode = 1041;
@@ -556,12 +608,13 @@ public:
                     }
                 }
 
-                if (!advanced) {
-                    stopLocked();
+                if (!advanced && !emitEnd) {
+                    emitEnd = stopLocked("end_of_folder", "", 0, endEv, endCb);
                 }
                 m_transitionInProgress.store(false, std::memory_order_release);
             }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
         if (cbCopy) {
             cbCopy(logOp, logErrCode, logTarget, logMsg);
         }
@@ -573,6 +626,9 @@ public:
         ErrorLogCallback cbCopy;
         std::string logOp, logTarget, logMsg;
         int32_t logErrCode = 0;
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
         AutoAdvanceResult res;
         {
             std::lock_guard<std::mutex> lock(m_controlMutex);
@@ -604,7 +660,7 @@ public:
                              ? "Unrecoverable mid-stream decode error during Folder Session"
                              : m_worker.lastDecodeErrorMessage();
                 m_lastFolderSessionError = logMsg;
-                m_folderSession.stopSession();
+                emitEnd = captureAndStopSessionLocked("decode_error", logMsg, 1042, endEv, endCb);
                 m_currentTrackPathHash.store(0, std::memory_order_release);
                 m_state.store(TransportState::Stopped, std::memory_order_release);
                 m_worker.stop();
@@ -660,7 +716,7 @@ public:
                                  ? ("Next track unreadable or missing in Folder Session: " + logTarget)
                                  : m_folderSession.readAheadError();
                     m_lastFolderSessionError = logMsg;
-                    m_folderSession.stopSession();
+                    emitEnd = captureAndStopSessionLocked("read_ahead_failed", logMsg, 1040, endEv, endCb);
                     m_currentTrackPathHash.store(0, std::memory_order_release);
                     m_state.store(TransportState::Stopped, std::memory_order_release);
                     m_worker.stop();
@@ -689,7 +745,7 @@ public:
                             logTarget = nextTrack->path;
                             logMsg = "Failed to open next track in Folder Session: " + logTarget;
                             m_lastFolderSessionError = logMsg;
-                            m_folderSession.stopSession();
+                            emitEnd = captureAndStopSessionLocked("open_track_failed", logMsg, 1041, endEv, endCb);
                             m_currentTrackPathHash.store(0, std::memory_order_release);
                             m_state.store(TransportState::Stopped, std::memory_order_release);
                             m_worker.stop();
@@ -700,7 +756,7 @@ public:
                         }
                     }
                 } else {
-                    m_folderSession.stopSession();
+                    emitEnd = captureAndStopSessionLocked("end_of_folder", "", 0, endEv, endCb);
                     m_currentTrackPathHash.store(0, std::memory_order_release);
                     m_state.store(TransportState::Stopped, std::memory_order_release);
                     m_worker.stop();
@@ -717,6 +773,7 @@ public:
                 res.pathTo = m_folderSession.currentTrack() ? m_folderSession.currentTrack()->path : std::string();
             }
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
         if (cbCopy) {
             cbCopy(logOp, logErrCode, logTarget, logMsg);
         }
@@ -798,6 +855,9 @@ public:
         ErrorLogCallback cbCopy;
         std::string logOp, logTarget, logMsg;
         int32_t logErrCode = 0;
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
         bool retreated = false;
         {
             std::lock_guard<std::mutex> lock(m_controlMutex);
@@ -840,7 +900,7 @@ public:
                         logTarget = prevTrack->path;
                         logMsg = "Failed to open previous track in Folder Session: " + logTarget;
                         m_lastFolderSessionError = logMsg;
-                        stopLocked();
+                        emitEnd = stopLocked("open_track_failed", logMsg, 1041, endEv, endCb);
                         cbCopy = m_errorLogCallback;
                         logOp = "FolderSessionPrevious";
                         logErrCode = 1041;
@@ -849,6 +909,7 @@ public:
             }
             m_transitionInProgress.store(false, std::memory_order_release);
         }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
         if (cbCopy) {
             cbCopy(logOp, logErrCode, logTarget, logMsg);
         }
@@ -874,20 +935,32 @@ public:
         m_worker.pause();
     }
 
-    void stop() noexcept {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        stopLocked();
+    void stop(const std::string& reason = "user_stop") noexcept {
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            emitEnd = stopLocked(reason, "", 0, endEv, endCb);
+        }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
     }
 
     void closeTrack() noexcept {
-        std::lock_guard<std::mutex> lock(m_controlMutex);
-        m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
-        m_needsFolderAdvance.store(false, std::memory_order_release);
-        m_currentTrackPathHash.store(0, std::memory_order_release);
-        m_folderSession.stopSession();
-        m_worker.stop();
-        m_worker.closeTrack();
-        m_state.store(TransportState::Stopped, std::memory_order_release);
+        FolderSessionEndEvent endEv;
+        FolderSessionEndCallback endCb;
+        bool emitEnd = false;
+        {
+            std::lock_guard<std::mutex> lock(m_controlMutex);
+            m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
+            m_needsFolderAdvance.store(false, std::memory_order_release);
+            m_currentTrackPathHash.store(0, std::memory_order_release);
+            emitEnd = captureAndStopSessionLocked("track_closed", "", 0, endEv, endCb);
+            m_worker.stop();
+            m_worker.closeTrack();
+            m_state.store(TransportState::Stopped, std::memory_order_release);
+        }
+        emitFolderSessionEnd(emitEnd, endCb, endEv);
     }
 
     [[nodiscard]] bool isOpen() const noexcept { return m_worker.isOpen(); }
@@ -1167,16 +1240,54 @@ private:
         }
     }
 
-    void stopLocked() noexcept {
+    bool captureAndStopSessionLocked(const std::string& reason,
+                                     const std::string& detail,
+                                     int32_t errorCode,
+                                     FolderSessionEndEvent& outEvent,
+                                     FolderSessionEndCallback& outCb) noexcept {
+        if (!m_folderSession.isActive() && m_folderSession.sessionId() == 0) {
+            return false;
+        }
+        outEvent.deckId = m_id;
+        outEvent.folderSessionId = m_folderSession.sessionId();
+        outEvent.folderPath = m_folderSession.folderPath();
+        outEvent.trackIndex = m_folderSession.currentIndex();
+        outEvent.totalTracks = m_folderSession.totalTracks();
+        const auto* cur = m_folderSession.currentTrack();
+        outEvent.currentTrackPath = cur ? cur->path : std::string();
+        outEvent.reason = reason;
+        outEvent.detail = detail;
+        outEvent.errorCode = errorCode;
+        outCb = m_folderSessionEndCallback;
+        m_folderSession.stopSession();
+        return static_cast<bool>(outCb) && outEvent.folderSessionId != 0;
+    }
+
+    static void emitFolderSessionEnd(bool shouldEmit,
+                                     const FolderSessionEndCallback& cb,
+                                     const FolderSessionEndEvent& ev) noexcept {
+        if (!shouldEmit || !cb) return;
+        try {
+            cb(ev);
+        } catch (...) {
+        }
+    }
+
+    bool stopLocked(const std::string& reason,
+                    const std::string& detail,
+                    int32_t errorCode,
+                    FolderSessionEndEvent& outEvent,
+                    FolderSessionEndCallback& outCb) noexcept {
         m_playbackGeneration.fetch_add(1, std::memory_order_acq_rel);
         m_needsFolderAdvance.store(false, std::memory_order_release);
         m_pausedByNormalSwitch.store(false, std::memory_order_release);
         m_decodeErrorNotified.store(false, std::memory_order_release);
         discardPendingOverflow();
-        m_folderSession.stopSession(); // v3.7 §2.7.3: Stop terminates and discards Folder Session while preserving loaded track context
+        const bool emitEnd = captureAndStopSessionLocked(reason, detail, errorCode, outEvent, outCb); // v3.7 §2.7.3: Stop terminates and discards Folder Session while preserving loaded track context
         m_currentTrackPathHash.store(0, std::memory_order_release);
         m_state.store(TransportState::Stopped, std::memory_order_release);
         m_worker.stop();
+        return emitEnd;
     }
 
     char m_id;
@@ -1205,6 +1316,7 @@ private:
     mutable std::mutex m_controlMutex;
     std::function<void()> m_preTransitionHook;
     ErrorLogCallback m_errorLogCallback;
+    FolderSessionEndCallback m_folderSessionEndCallback;
     std::string m_lastFolderSessionError;
     EofNotificationQueue m_eofQueue;
     session::FolderSession m_folderSession;

@@ -94,8 +94,8 @@ public:
         if (mode == SwitchingMode::Comparative) {
             // Comparative mode (Section 2.3 & 2.7.5):
             // Terminate any active Folder Session on comparative-switched decks while keeping loaded track context
-            src->terminateFolderSession();
-            tgt->terminateFolderSession();
+            src->terminateFolderSession("comparative_switch");
+            tgt->terminateFolderSession("comparative_switch");
 
             // Calculate equivalent time position from source deck
             double currentTimeSec = 0.0;
