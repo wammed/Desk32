@@ -16,54 +16,83 @@
 class AlgorithmicReverb
 {
 public:
+    static constexpr size_t NUM_COMBS = 8;
+    static constexpr size_t NUM_ALLPASSES = 4;
     static constexpr size_t MAX_COMB_SIZE = 8192;
     static constexpr size_t MAX_ALLPASS_SIZE = 4096;
     static constexpr size_t MAX_PREDELAY_SIZE = 19200; // 100 ms at 192 kHz
+
+    // Schroeder / Freeverb-style gain staging and parameter mapping:
+    // - Map user roomSize [0, 1] -> combFeedback [0.38, 0.985] with a perceptual curve
+    //   instead of passing raw roomSize.
+    // - Scale damping [0, 1] -> [0, 0.45] so 100% damping warms the tail rather than muting feedback.
+    // - Normalize 8 parallel combs by 1/NUM_COMBS and attenuate comb bank input by
+    //   COMB_INPUT_DRIVE * sqrt(1 - fb^2) so steady-state RMS stays balanced without clipping.
+    static constexpr double MIN_COMB_FEEDBACK = 0.38;
+    static constexpr double MAX_COMB_FEEDBACK = 0.985;
+    static constexpr double MAX_COMB_DAMP = 0.45;
+    static constexpr double COMB_INPUT_DRIVE = 1.4;
+    static constexpr double INV_NUM_COMBS = 1.0 / static_cast<double>(NUM_COMBS);
+
+    [[nodiscard]] static constexpr double mapRoomSizeToFeedback(double roomSize) noexcept {
+        const double r = std::clamp(roomSize, 0.0, 1.0);
+        const double shaped = (0.35 * r) + (0.65 * r * r);
+        return MIN_COMB_FEEDBACK + (MAX_COMB_FEEDBACK - MIN_COMB_FEEDBACK) * shaped;
+    }
+
+    [[nodiscard]] static constexpr double mapDampingCoefficient(double damp) noexcept {
+        return std::clamp(damp, 0.0, 1.0) * MAX_COMB_DAMP;
+    }
+
+    [[nodiscard]] static inline double computeCombInputGain(double combFeedback) noexcept {
+        const double fb = std::clamp(combFeedback, 0.0, MAX_COMB_FEEDBACK);
+        return COMB_INPUT_DRIVE * std::sqrt(std::max(1e-6, 1.0 - (fb * fb)));
+    }
 
     struct CombFilter {
         alignas(64) std::array<double, MAX_COMB_SIZE> buffer{};
         size_t size = 1116;
         size_t index = 0;
-        double feedback = 0.8;
-        double damp = 0.2;
+        double feedback = 0.7945;
+        double damp = 0.135;
         double filterStore = 0.0;
         double energy = 0.0; // Strictly O(1) buffer energy tracking
 
         void init(size_t len, double fb, double d) {
             size = std::clamp(len, size_t(16), MAX_COMB_SIZE);
             index = 0;
-            feedback = std::clamp(fb, 0.0, 0.98);
+            feedback = std::clamp(fb, 0.0, MAX_COMB_FEEDBACK);
             damp = std::clamp(d, 0.0, 1.0);
             filterStore = 0.0;
             energy = 0.0;
             buffer.fill(0.0);
         }
 
-        inline double process(double input) {
-            double output = buffer[index];
+        inline double process(double input) noexcept {
+            const double output = buffer[index];
             filterStore = (output * (1.0 - damp)) + (filterStore * damp);
-            double newVal = input + (filterStore * feedback);
-            double diff = (newVal * newVal) - (output * output);
+            const double newVal = input + (filterStore * feedback);
+            const double diff = (newVal * newVal) - (output * output);
             energy += diff;
             if (energy < 1e-15 || !std::isfinite(energy)) {
                 energy = 0.0;
             }
             buffer[index] = newVal;
-            index = (index + 1) % size;
+            if (++index >= size) index = 0;
             return output;
         }
 
-        inline double process(double input, double fb, double d) {
-            double output = buffer[index];
+        inline double process(double input, double fb, double d) noexcept {
+            const double output = buffer[index];
             filterStore = (output * (1.0 - d)) + (filterStore * d);
-            double newVal = input + (filterStore * fb);
-            double diff = (newVal * newVal) - (output * output);
+            const double newVal = input + (filterStore * fb);
+            const double diff = (newVal * newVal) - (output * output);
             energy += diff;
             if (energy < 1e-15 || !std::isfinite(energy)) {
                 energy = 0.0;
             }
             buffer[index] = newVal;
-            index = (index + 1) % size;
+            if (++index >= size) index = 0;
             return output;
         }
 
@@ -105,17 +134,18 @@ public:
             buffer.fill(0.0);
         }
 
-        inline double process(double input) {
-            double bufOut = buffer[index];
-            double output = -input + bufOut;
-            double newVal = input + (bufOut * feedback);
-            double diff = (newVal * newVal) - (bufOut * bufOut);
+        inline double process(double input) noexcept {
+            const double bufOut = buffer[index];
+            const double newVal = input + (bufOut * feedback);
+            // True unity-gain Schroeder allpass: |H(e^jw)| == 1 across all frequencies
+            const double output = bufOut - (newVal * feedback);
+            const double diff = (newVal * newVal) - (bufOut * bufOut);
             energy += diff;
             if (energy < 1e-15 || !std::isfinite(energy)) {
                 energy = 0.0;
             }
             buffer[index] = newVal;
-            index = (index + 1) % size;
+            if (++index >= size) index = 0;
             return output;
         }
 
@@ -144,6 +174,9 @@ public:
         double sampleRate = 48000.0;
         double roomSize = 0.7;
         double damp = 0.3;
+        double combFeedback = mapRoomSizeToFeedback(0.7);
+        double combDamp = mapDampingCoefficient(0.3);
+        double combInputGain = computeCombInputGain(mapRoomSizeToFeedback(0.7));
         double wet = 0.2;
         double dry = 0.8;
         double predelayMs = 0.0;
@@ -174,11 +207,12 @@ public:
             }
             m_predelayBuffer = other.m_predelayBuffer;
             m_predelayWritePos = other.m_predelayWritePos;
-            for (size_t i = 0; i < 4; ++i) {
+            m_predelayEnergy = other.m_predelayEnergy;
+            for (size_t i = 0; i < NUM_COMBS; ++i) {
                 m_combsLeft[i] = other.m_combsLeft[i];
                 m_combsRight[i] = other.m_combsRight[i];
             }
-            for (size_t i = 0; i < 2; ++i) {
+            for (size_t i = 0; i < NUM_ALLPASSES; ++i) {
                 m_allPassLeft[i] = other.m_allPassLeft[i];
                 m_allPassRight[i] = other.m_allPassRight[i];
             }
@@ -196,8 +230,11 @@ public:
 
         auto p = std::make_unique<Params>();
         p->sampleRate = sampleRate;
-        p->roomSize = std::clamp(roomSize, 0.1, 0.98);
+        p->roomSize = std::clamp(roomSize, 0.0, 1.0);
         p->damp = std::clamp(damp, 0.0, 1.0);
+        p->combFeedback = mapRoomSizeToFeedback(p->roomSize);
+        p->combDamp = mapDampingCoefficient(p->damp);
+        p->combInputGain = computeCombInputGain(p->combFeedback);
         p->wet = std::clamp(wetLevel, 0.0, 1.0);
         p->dry = 1.0 - p->wet;
         p->predelayMs = std::clamp(predelayMs, 0.0, 100.0);
@@ -209,6 +246,9 @@ public:
 
         m_roomSize = p->roomSize;
         m_damp = p->damp;
+        m_combFeedback = p->combFeedback;
+        m_combDamp = p->combDamp;
+        m_combInputGain = p->combInputGain;
         m_wet = p->wet;
         m_dry = p->dry;
         m_predelayMs = p->predelayMs;
@@ -219,33 +259,32 @@ public:
         if (rateChanged) {
             const double scale = sampleRate / 44100.0;
 
-            const size_t combLengths[4] = {
-                static_cast<size_t>(1116 * scale),
-                static_cast<size_t>(1188 * scale),
-                static_cast<size_t>(1277 * scale),
-                static_cast<size_t>(1356 * scale)
+            static constexpr size_t combLengths[NUM_COMBS] = {
+                1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617
             };
-            const size_t allPassLengths[2] = {
-                static_cast<size_t>(225 * scale),
-                static_cast<size_t>(556 * scale)
+            static constexpr size_t allPassLengths[NUM_ALLPASSES] = {
+                556, 441, 341, 225
             };
+            const size_t stereoSpread = static_cast<size_t>(23.0 * scale);
 
-            for (size_t i = 0; i < 4; ++i) {
-                m_combsLeft[i].init(combLengths[i], p->roomSize, p->damp);
-                m_combsRight[i].init(combLengths[i] + static_cast<size_t>(23 * scale), p->roomSize, p->damp);
+            for (size_t i = 0; i < NUM_COMBS; ++i) {
+                const size_t len = static_cast<size_t>(static_cast<double>(combLengths[i]) * scale);
+                m_combsLeft[i].init(len, p->combFeedback, p->combDamp);
+                m_combsRight[i].init(len + stereoSpread, p->combFeedback, p->combDamp);
             }
 
-            for (size_t i = 0; i < 2; ++i) {
-                m_allPassLeft[i].init(allPassLengths[i], 0.5);
-                m_allPassRight[i].init(allPassLengths[i] + static_cast<size_t>(17 * scale), 0.5);
+            for (size_t i = 0; i < NUM_ALLPASSES; ++i) {
+                const size_t len = static_cast<size_t>(static_cast<double>(allPassLengths[i]) * scale);
+                m_allPassLeft[i].init(len, 0.5);
+                m_allPassRight[i].init(len + stereoSpread, 0.5);
             }
         } else {
             // Update parameter gains in-place without zeroing active audio delay buffers (P0-07)
-            for (size_t i = 0; i < 4; ++i) {
-                m_combsLeft[i].feedback = p->roomSize;
-                m_combsLeft[i].damp = p->damp;
-                m_combsRight[i].feedback = p->roomSize;
-                m_combsRight[i].damp = p->damp;
+            for (size_t i = 0; i < NUM_COMBS; ++i) {
+                m_combsLeft[i].feedback = p->combFeedback;
+                m_combsLeft[i].damp = p->combDamp;
+                m_combsRight[i].feedback = p->combFeedback;
+                m_combsRight[i].damp = p->combDamp;
             }
         }
 
@@ -255,6 +294,8 @@ public:
     [[nodiscard]] double sampleRate() const noexcept { return m_sampleRate; }
     [[nodiscard]] double roomSize() const noexcept { return m_roomSize; }
     [[nodiscard]] double damping() const noexcept { return m_damp; }
+    [[nodiscard]] double combFeedback() const noexcept { return m_combFeedback; }
+    [[nodiscard]] double combInputGain() const noexcept { return m_combInputGain; }
     [[nodiscard]] double wetLevel() const noexcept { return m_wet; }
     [[nodiscard]] double predelayMs() const noexcept { return m_predelayMs; }
     [[nodiscard]] bool isTailPreserving() const noexcept { return m_tailPreserving; }
@@ -340,10 +381,10 @@ public:
 
     /// Acoustic physical decay lower bound (1.5 * RT60 frames) to reach -80 dB safely (P0-22).
     [[nodiscard]] size_t theoreticalDecayFrames() const noexcept {
-        double g = std::clamp(m_roomSize, 0.1, 0.98);
-        double tau = 0.03; // ~30ms average comb loop
-        double rt60Sec = -3.0 * tau / std::log10(g);
-        double decaySec = std::clamp(rt60Sec * 1.5, 0.5, 9.0);
+        const double g = std::clamp(m_combFeedback, MIN_COMB_FEEDBACK, MAX_COMB_FEEDBACK);
+        const double tau = 0.031; // ~31ms average comb loop across 1116..1617 @ 44.1kHz
+        const double rt60Sec = -3.0 * tau / std::log10(g);
+        const double decaySec = std::clamp(rt60Sec * 1.5, 0.5, 9.0);
         return static_cast<size_t>(decaySec * m_sampleRate);
     }
 
@@ -355,7 +396,7 @@ public:
         m_predelayBuffer = other.m_predelayBuffer;
         m_predelayWritePos = other.m_predelayWritePos;
         m_predelayEnergy = other.m_predelayEnergy;
-        for (size_t i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < NUM_COMBS; ++i) {
             const size_t cLenL = std::min(m_combsLeft[i].size, other.m_combsLeft[i].size);
             for (size_t s = 0; s < cLenL; ++s) {
                 m_combsLeft[i].buffer[s] = other.m_combsLeft[i].buffer[s];
@@ -372,7 +413,7 @@ public:
             m_combsRight[i].filterStore = other.m_combsRight[i].filterStore;
             m_combsRight[i].energy = other.m_combsRight[i].energy;
         }
-        for (size_t i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < NUM_ALLPASSES; ++i) {
             const size_t aLenL = std::min(m_allPassLeft[i].size, other.m_allPassLeft[i].size);
             for (size_t s = 0; s < aLenL; ++s) {
                 m_allPassLeft[i].buffer[s] = other.m_allPassLeft[i].buffer[s];
@@ -425,42 +466,32 @@ public:
         }
 
         // Pre-delay ring buffer
-        double inMono = (left + right) * 0.5;
-        double delayedInput = 0.0;
-
-        if (active) {
-            size_t readPos = (m_predelayWritePos + MAX_PREDELAY_SIZE - p->predelaySamples) % MAX_PREDELAY_SIZE;
-            delayedInput = m_predelayBuffer[readPos];
-            double diff = (inMono * inMono) - (delayedInput * delayedInput);
-            m_predelayEnergy += diff;
-            if (m_predelayEnergy < 1e-15 || !std::isfinite(m_predelayEnergy)) {
-                m_predelayEnergy = 0.0;
-            }
-            m_predelayBuffer[m_predelayWritePos] = inMono;
-            m_predelayWritePos = (m_predelayWritePos + 1) % MAX_PREDELAY_SIZE;
-        } else {
-            // Tail-preserving Bypass: zero input enters reverb network, allowing tail to ring out
-            size_t readPos = (m_predelayWritePos + MAX_PREDELAY_SIZE - p->predelaySamples) % MAX_PREDELAY_SIZE;
-            delayedInput = m_predelayBuffer[readPos];
-            double diff = 0.0 - (delayedInput * delayedInput);
-            m_predelayEnergy += diff;
-            if (m_predelayEnergy < 1e-15 || !std::isfinite(m_predelayEnergy)) {
-                m_predelayEnergy = 0.0;
-            }
-            m_predelayBuffer[m_predelayWritePos] = 0.0;
-            m_predelayWritePos = (m_predelayWritePos + 1) % MAX_PREDELAY_SIZE;
+        const size_t readPos = m_predelayWritePos >= p->predelaySamples
+                                   ? (m_predelayWritePos - p->predelaySamples)
+                                   : (m_predelayWritePos + MAX_PREDELAY_SIZE - p->predelaySamples);
+        const double delayedInput = m_predelayBuffer[readPos];
+        const double predelayWrite = active ? ((left + right) * 0.5) : 0.0;
+        const double pdDiff = (predelayWrite * predelayWrite) - (delayedInput * delayedInput);
+        m_predelayEnergy += pdDiff;
+        if (m_predelayEnergy < 1e-15 || !std::isfinite(m_predelayEnergy)) {
+            m_predelayEnergy = 0.0;
         }
+        m_predelayBuffer[m_predelayWritePos] = predelayWrite;
+        if (++m_predelayWritePos >= MAX_PREDELAY_SIZE) m_predelayWritePos = 0;
 
-        // Parallel Comb Filters
+        // Parallel Comb Filters (attenuated input drive + 1/NUM_COMBS sum normalization)
+        const double combIn = delayedInput * p->combInputGain;
         double outCombL = 0.0;
         double outCombR = 0.0;
-        for (size_t i = 0; i < 4; ++i) {
-            outCombL += m_combsLeft[i].process(delayedInput, p->roomSize, p->damp);
-            outCombR += m_combsRight[i].process(delayedInput, p->roomSize, p->damp);
+        for (size_t i = 0; i < NUM_COMBS; ++i) {
+            outCombL += m_combsLeft[i].process(combIn, p->combFeedback, p->combDamp);
+            outCombR += m_combsRight[i].process(combIn, p->combFeedback, p->combDamp);
         }
+        outCombL *= INV_NUM_COMBS;
+        outCombR *= INV_NUM_COMBS;
 
         // Series All-Pass Filters
-        for (size_t i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < NUM_ALLPASSES; ++i) {
             outCombL = m_allPassLeft[i].process(outCombL);
             outCombR = m_allPassRight[i].process(outCombR);
         }
@@ -481,9 +512,12 @@ public:
     }
 
 private:
-    double m_sampleRate = 48000.0;
+    double m_sampleRate = 0.0; // Uninitialized so first configure(48000.0) always initializes delay lengths
     double m_roomSize = 0.7;
     double m_damp = 0.3;
+    double m_combFeedback = mapRoomSizeToFeedback(0.7);
+    double m_combDamp = mapDampingCoefficient(0.3);
+    double m_combInputGain = computeCombInputGain(mapRoomSizeToFeedback(0.7));
     double m_wet = 0.2;
     double m_dry = 0.8;
     double m_predelayMs = 0.0;
@@ -495,10 +529,10 @@ private:
     std::atomic<bool> m_enabled{false};
     std::atomic<bool> m_hasInvalidState{false};
 
-    CombFilter m_combsLeft[4];
-    CombFilter m_combsRight[4];
-    AllPassFilter m_allPassLeft[2];
-    AllPassFilter m_allPassRight[2];
+    CombFilter m_combsLeft[NUM_COMBS];
+    CombFilter m_combsRight[NUM_COMBS];
+    AllPassFilter m_allPassLeft[NUM_ALLPASSES];
+    AllPassFilter m_allPassRight[NUM_ALLPASSES];
 
     alignas(64) std::array<double, MAX_PREDELAY_SIZE> m_predelayBuffer{};
 

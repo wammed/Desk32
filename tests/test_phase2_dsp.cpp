@@ -240,6 +240,7 @@ private slots:
     void testMasterGainPostTapIsolation();
     void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
     void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
+    void testReverbGainStagingCombCountAndStability();
     void cleanupTestCase();
 
 private:
@@ -4003,6 +4004,105 @@ void TestPhase2Dsp::testHpfLpfClickFreeEnableDisableCrossfade()
     QCOMPARE(s_audioThreadAllocationCount.load(), size_t(0));
     QVERIFY2(pipeMaxStep < maxExpectedStep,
              qPrintable(QString("Pipeline HPF ON step too large: %1 >= %2").arg(pipeMaxStep).arg(maxExpectedStep)));
+}
+
+void TestPhase2Dsp::testReverbGainStagingCombCountAndStability()
+{
+    QCOMPARE(AlgorithmicReverb::NUM_COMBS, size_t(8));
+    QCOMPARE(AlgorithmicReverb::NUM_ALLPASSES, size_t(4));
+
+    const double sr = 48000.0;
+
+    // 1. Parameter mapping sanity: roomSize [0, 1] maps smoothly to feedback < 1.0,
+    //    and getter preserves normalized roomSize without raw 1:1 comb blowout.
+    {
+        AlgorithmicReverb rev;
+        rev.configure(sr, 0.8, 0.3, 0.6, 0.0, true, true);
+        QCOMPARE(rev.roomSize(), 0.8);
+        QVERIFY(rev.combFeedback() > 0.8 && rev.combFeedback() < AlgorithmicReverb::MAX_COMB_FEEDBACK);
+        QVERIFY(rev.combInputGain() > 0.0 && rev.combInputGain() < 1.0);
+    }
+
+    // 2. Sustained low-frequency (50 Hz) and mid-frequency (1 kHz) headroom across roomSize & wet
+    //    (Previously unnormalized 4-comb summing reached >10x gain and clipped into harsh noise.)
+    struct GainCase {
+        double roomSize;
+        double wet;
+        double freqHz;
+        double amp;
+    };
+    const GainCase cases[] = {
+        {0.7, 0.2, 50.0, 0.8},
+        {0.8, 0.6, 50.0, 0.8},
+        {0.8, 1.0, 50.0, 0.8},
+        {0.95, 1.0, 50.0, 0.8},
+        {0.8, 0.6, 1000.0, 0.8},
+        {0.95, 1.0, 1000.0, 0.8}
+    };
+    for (const auto& c : cases) {
+        AlgorithmicReverb rev;
+        rev.configure(sr, c.roomSize, 0.3, c.wet, 0.0, true, true);
+        double maxAbs = 0.0;
+        double sumSq = 0.0;
+        const size_t total = 96000;
+        const size_t measureStart = 48000;
+        for (size_t n = 0; n < total; ++n) {
+            const double x = c.amp * std::sin(2.0 * std::numbers::pi * c.freqHz * static_cast<double>(n) / sr);
+            double l = x, r = x;
+            rev.process(l, r);
+            if (n >= measureStart) {
+                maxAbs = std::max(maxAbs, std::max(std::abs(l), std::abs(r)));
+                sumSq += 0.5 * (l * l + r * r);
+            }
+        }
+        const double rms = std::sqrt(sumSq / static_cast<double>(total - measureStart));
+        QVERIFY2(maxAbs < 1.0,
+                 qPrintable(QString("Reverb clipped at room=%1 wet=%2 freq=%3Hz maxAbs=%4")
+                                .arg(c.roomSize).arg(c.wet).arg(c.freqHz).arg(maxAbs)));
+        QVERIFY2(rms > 0.02,
+                 qPrintable(QString("Reverb wet output too weak at room=%1 wet=%2 freq=%3Hz rms=%4")
+                                .arg(c.roomSize).arg(c.wet).arg(c.freqHz).arg(rms)));
+    }
+
+    // 3. Multi-tone / broadband wet RMS stays balanced (~0.2..0.7x) at 100% wet across room sizes
+    for (double room : {0.2, 0.7, 0.95}) {
+        AlgorithmicReverb rev;
+        rev.configure(sr, room, 0.3, 1.0, 0.0, true, true);
+        double inSq = 0.0, outSq = 0.0;
+        uint32_t rng = 0x12345678u;
+        const size_t total = 96000;
+        const size_t measureStart = 48000;
+        for (size_t n = 0; n < total; ++n) {
+            rng = rng * 1664525u + 1013904223u;
+            const double white = (static_cast<double>(rng) / 2147483648.0) - 1.0;
+            const double x = 0.5 * white;
+            double l = x, r = x;
+            rev.process(l, r);
+            if (n >= measureStart) {
+                inSq += x * x;
+                outSq += 0.5 * (l * l + r * r);
+            }
+        }
+        const double ratio = std::sqrt(outSq / inSq);
+        QVERIFY2(ratio > 0.15 && ratio < 0.85,
+                 qPrintable(QString("Broadband wet/dry RMS ratio out of balanced range at room=%1: %2")
+                                .arg(room).arg(ratio)));
+    }
+
+    // 4. Damping = 1.0 does not mute comb feedback (MAX_COMB_DAMP < 1.0)
+    {
+        AlgorithmicReverb rev;
+        rev.configure(sr, 0.8, 1.0, 1.0, 0.0, true, true);
+        double l = 1.0, r = 1.0;
+        rev.process(l, r);
+        double tailEnergy = 0.0;
+        for (int i = 0; i < 4096; ++i) {
+            double tl = 0.0, tr = 0.0;
+            rev.process(tl, tr);
+            tailEnergy += tl * tl + tr * tr;
+        }
+        QVERIFY2(tailEnergy > 1e-4, "Damping=1.0 muted reverb tail completely");
+    }
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)
