@@ -116,14 +116,10 @@ public:
             tgt->play();
         } else {
             // Normal mode (Section 2.3 & §2.7.5):
-            // Non-Folder-Session decks maintain each deck's independent transport state and position.
-            // Folder Session decks pause and retain session state/position when deselected, and resume when reselected (§2.7.5).
-            if (src->folderSession().isActive() && src->isPlaying()) {
-                src->pause();
-                src->setPausedByNormalSwitch(true);
-            }
+            // Only the active deck advances playback; any other playing deck pauses and preserves its position.
+            // Folder Session decks additionally auto-resume when reselected (§2.7.5).
+            pauseOtherDecks(tgt, true);
             if (tgt->folderSession().isActive() && tgt->wasPausedByNormalSwitch()) {
-                pauseOtherDecks(tgt, true);
                 tgt->setPausedByNormalSwitch(false);
                 tgt->play();
             }

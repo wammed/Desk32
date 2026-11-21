@@ -2405,6 +2405,8 @@ void EngineController::quickSwitchAB() {
     emit activeDeckChanged(act);
     emit deckStateChanged("A");
     emit deckStateChanged("B");
+    emit deckStateChanged("C");
+    emit deckStateChanged("D");
     emit diagnosticsChanged();
     if (res.hadSeek) {
       const auto *tgtDeck = m_deckManager->deck(res.targetDeck);

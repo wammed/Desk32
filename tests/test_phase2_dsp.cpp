@@ -3751,6 +3751,12 @@ void TestPhase2Dsp::testAutoPauseOtherDeckOnPlay()
     QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Paused);
     QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
 
+    // Switch-only (Normal mode) A -> B without pressing Play -> Deck A must auto-pause and Deck B stays Paused
+    ctrl.switchDeck("B", 0);
+    QCOMPARE(ctrl.activeDeckId(), QString("B"));
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Paused);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Paused);
+
     // Folder Session on A -> Play B pauses A -> Switch back to A resumes A & pauses B
     QDir fsDir(tempDir.filePath("folder"));
     QVERIFY(QDir().mkpath(fsDir.path()));

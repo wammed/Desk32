@@ -259,21 +259,23 @@ void TestReferenceDecks::testSwitchingDualModesAndQuickAB()
     QCOMPARE(manager.deck('A')->state(), TransportState::Paused); // Deck A paused
     QCOMPARE(manager.deck('B')->state(), TransportState::Playing); // Deck B now playing
 
-    // 2. Switch back in Mode 2 (ParallelSolo / Normal): Transport state of Deck A (Paused) MUST be preserved!
+    // 2. Switch back in Mode 2 (Normal): Transport state of Deck A (Paused) MUST be preserved,
+    //    and non-selected Deck B MUST auto-pause per §2.7.5!
     res = manager.switchDeck('A', SwitchingMode::ParallelSolo);
     QVERIFY(res.success);
     QCOMPARE(manager.activeDeckId(), 'A');
     QCOMPARE(manager.deck('A')->state(), TransportState::Paused); // Deck A remains Paused per Section 2.3!
-    QCOMPARE(manager.deck('B')->state(), TransportState::Playing); // Deck B continues playing in background!
+    QCOMPARE(manager.deck('B')->state(), TransportState::Paused); // Non-selected Deck B auto-pauses per §2.7.5!
 
-    // Start Deck A, then switch to Deck B: both decks remain Playing in Normal mode!
+    // Start Deck A, then switch to Deck B in Normal mode without pressing Play on B:
+    // Deck A MUST auto-pause and Deck B preserves its Paused state!
     manager.deck('A')->play();
     QCOMPARE(manager.deck('A')->state(), TransportState::Playing);
     res = manager.switchDeck('B', SwitchingMode::ParallelSolo);
     QVERIFY(res.success);
     QCOMPARE(manager.activeDeckId(), 'B');
-    QCOMPARE(manager.deck('A')->state(), TransportState::Playing); // Deck A continues Playing
-    QCOMPARE(manager.deck('B')->state(), TransportState::Playing); // Deck B continues Playing
+    QCOMPARE(manager.deck('A')->state(), TransportState::Paused); // Deck A auto-pauses on switch
+    QCOMPARE(manager.deck('B')->state(), TransportState::Paused); // Deck B preserves its Paused state
 }
 
 void TestReferenceDecks::testDeckLockProtectionAndTransportPermission()
