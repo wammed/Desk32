@@ -1767,11 +1767,14 @@ ApplicationWindow {
                                 ]
 
                                 Rectangle {
+                                    id: geqBandItem
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     color: "#0d0f12"
                                     border.color: "#1c2128"
                                     radius: 2
+
+                                    property bool bandEnabled: EngineController.isGeqBandEnabled(index)
 
                                     MouseArea {
                                         anchors.fill: parent
@@ -1787,12 +1790,40 @@ ApplicationWindow {
                                         anchors.margins: 4
                                         spacing: 2
 
+                                        // 仮配置: 個別バンド ON/OFF トグルボタン
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            Layout.preferredHeight: 16
+                                            radius: 2
+                                            color: geqBandItem.bandEnabled ? "#0e2a33" : "#181b20"
+                                            border.color: geqBandItem.bandEnabled ? "#00E5FF" : "#37474f"
+
+                                            Label {
+                                                anchors.centerIn: parent
+                                                text: geqBandItem.bandEnabled ? "ON" : "OFF"
+                                                font.pixelSize: 8
+                                                font.bold: true
+                                                font.family: "Monospace"
+                                                color: geqBandItem.bandEnabled ? "#00E5FF" : "#606c7a"
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    EngineController.setGeqBandEnabled(index, !geqBandItem.bandEnabled);
+                                                    eqCanvas.requestPaint();
+                                                }
+                                            }
+                                        }
+
                                         Label {
                                             Layout.alignment: Qt.AlignHCenter
                                             text: (geqSlider.value > 0 ? "+" : "") + geqSlider.value.toFixed(1)
                                             font.pixelSize: 9
                                             font.family: "Monospace"
                                             color: geqSlider.value !== 0 ? "#00E5FF" : "#606c7a"
+                                            opacity: geqBandItem.bandEnabled ? 1.0 : 0.35
 
                                             MouseArea {
                                                 anchors.fill: parent
@@ -1812,6 +1843,7 @@ ApplicationWindow {
                                             orientation: Qt.Vertical
                                             from: -12.0
                                             to: 12.0
+                                            opacity: geqBandItem.bandEnabled ? 1.0 : 0.35
                                             value: EngineController.getGeqBandGain(index)
                                             onMoved: {
                                                 EngineController.setGeqBandGain(index, value);
@@ -1822,6 +1854,7 @@ ApplicationWindow {
                                                 target: EngineController
                                                 function onGeqParametersChanged() {
                                                     geqSlider.value = EngineController.getGeqBandGain(index);
+                                                    geqBandItem.bandEnabled = EngineController.isGeqBandEnabled(index);
                                                 }
                                             }
                                         }
@@ -1831,7 +1864,7 @@ ApplicationWindow {
                                             text: modelData
                                             font.pixelSize: 9
                                             font.family: "Monospace"
-                                            color: "#808c99"
+                                            color: geqBandItem.bandEnabled ? "#808c99" : "#4b5563"
                                         }
                                     }
                                 }
