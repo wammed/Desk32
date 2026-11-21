@@ -45,7 +45,7 @@ void TestStep4DeckSessionLog::testItem16SeekLatencyMeasurement()
 
     for (int i = 0; i < iterations; ++i) {
         auto t0 = std::chrono::steady_clock::now();
-        manager.deck('A')->seek(static_cast<uint64_t>(i * 4800)); // Seek within first few seconds
+        manager.deck('A')->seek(static_cast<int64_t>(i) * 4800); // Seek within first few seconds
         std::vector<double> buf(256 * 2);
         manager.deck('A')->renderBlock(buf.data(), 256);
         auto t1 = std::chrono::steady_clock::now();
@@ -63,7 +63,7 @@ void TestStep4DeckSessionLog::testItem16SeekLatencyMeasurement()
 
     for (int i = 0; i < iterations; ++i) {
         auto t0 = std::chrono::steady_clock::now();
-        manager.deck('A')->seek(static_cast<uint64_t>(48000 * 240 + i * 480)); // Seek to 4 minutes
+        manager.deck('A')->seek(static_cast<int64_t>(48000) * 240 + static_cast<int64_t>(i) * 480); // Seek to 4 minutes
         // Simulate disk seek & frame decode latency (2-5 ms)
         std::this_thread::sleep_for(std::chrono::microseconds(2500));
         std::vector<double> buf(256 * 2);

@@ -632,14 +632,14 @@ void TestPhase2Dsp::testPcmRingBufferConcurrentSPSCAndUnderrun()
     QCOMPARE(readEmpty, size_t(0));
 
     // 2. Multithreaded SPSC test: Producer writes 20,000 frames, Consumer reads them
-    const size_t totalFrames = 20000;
+    constexpr size_t totalFrames = 20000;
     std::atomic<bool> producerDone{false};
     std::vector<double> consumedL;
     consumedL.reserve(totalFrames);
     std::vector<double> consumedR;
     consumedR.reserve(totalFrames);
 
-    std::thread producer([&ring, &producerDone, totalFrames]() {
+    std::thread producer([&ring, &producerDone]() {
         size_t written = 0;
         std::vector<double> chunkL(128);
         std::vector<double> chunkR(128);
@@ -658,7 +658,7 @@ void TestPhase2Dsp::testPcmRingBufferConcurrentSPSCAndUnderrun()
         producerDone.store(true, std::memory_order_release);
     });
 
-    std::thread consumer([&ring, &producerDone, &consumedL, &consumedR, totalFrames]() {
+    std::thread consumer([&ring, &producerDone, &consumedL, &consumedR]() {
         std::vector<double> blockL(256);
         std::vector<double> blockR(256);
         while (consumedL.size() < totalFrames) {
