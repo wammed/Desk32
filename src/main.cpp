@@ -1,237 +1,276 @@
-#include <QGuiApplication>
-#include <QQmlApplicationEngine>
-#include <QQuickWindow>
-#include <QSGRendererInterface>
-#include <QOpenGLContext>
-#include <QOpenGLFunctions>
-#include <QVulkanInstance>
-#include <QVulkanFunctions>
+#include "core/EngineController.hpp"
+#include "core/LanguageManager.hpp"
+#include "core/log/LogErrorCodes.hpp"
+#include "core/log/LogService.hpp"
+#include "engine/render/RenderEngine.hpp"
+#include "engine/render/RenderSequenceManager.hpp"
+#include "engine/workspace/WorkspaceManager.hpp"
 #include <QFile>
+#include <QGuiApplication>
 #include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
+#include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QQuickWindow>
+#include <QSGRendererInterface>
+#include <QVulkanFunctions>
+#include <QVulkanInstance>
 #include <vector>
-#include "core/LanguageManager.hpp"
-#include "core/EngineController.hpp"
-#include "core/log/LogService.hpp"
-#include "core/log/LogErrorCodes.hpp"
-#include "engine/workspace/WorkspaceManager.hpp"
 
 namespace {
 struct VulkanProbeResult {
-    bool available = false;
-    QString reason;
-    int vkResult = 0;
+  bool available = false;
+  QString reason;
+  int vkResult = 0;
 };
 
 VulkanProbeResult probeVulkanAvailable() {
-    QVulkanInstance probeInst;
-    if (!probeInst.create()) {
-        return {false, QStringLiteral("instance_create_failed"), static_cast<int>(probeInst.errorCode())};
-    }
-    QVulkanFunctions* funcs = probeInst.functions();
-    if (!funcs) {
-        return {false, QStringLiteral("functions_unavailable"), 0};
-    }
-    uint32_t devCount = 0;
-    const VkResult res = funcs->vkEnumeratePhysicalDevices(probeInst.vkInstance(), &devCount, nullptr);
-    if (res != VK_SUCCESS || devCount == 0) {
-        return {false, QStringLiteral("no_physical_devices"), static_cast<int>(res)};
-    }
-    return {true, QString(), static_cast<int>(res)};
+  QVulkanInstance probeInst;
+  if (!probeInst.create()) {
+    return {false, QStringLiteral("instance_create_failed"),
+            static_cast<int>(probeInst.errorCode())};
+  }
+  QVulkanFunctions *funcs = probeInst.functions();
+  if (!funcs) {
+    return {false, QStringLiteral("functions_unavailable"), 0};
+  }
+  uint32_t devCount = 0;
+  const VkResult res = funcs->vkEnumeratePhysicalDevices(probeInst.vkInstance(),
+                                                         &devCount, nullptr);
+  if (res != VK_SUCCESS || devCount == 0) {
+    return {false, QStringLiteral("no_physical_devices"),
+            static_cast<int>(res)};
+  }
+  return {true, QString(), static_cast<int>(res)};
 }
 
 QString graphicsApiToString(QSGRendererInterface::GraphicsApi api) {
-    switch (api) {
-        case QSGRendererInterface::Software: return QStringLiteral("Software");
-        case QSGRendererInterface::OpenVG:   return QStringLiteral("OpenVG");
-        case QSGRendererInterface::OpenGL:   return QStringLiteral("OpenGL");
-        case QSGRendererInterface::Direct3D11: return QStringLiteral("Direct3D11");
-        case QSGRendererInterface::Vulkan:   return QStringLiteral("Vulkan");
-        case QSGRendererInterface::Metal:    return QStringLiteral("Metal");
-        case QSGRendererInterface::Direct3D12: return QStringLiteral("Direct3D12");
-        default: return QStringLiteral("Unknown");
-    }
+  switch (api) {
+  case QSGRendererInterface::Software:
+    return QStringLiteral("Software");
+  case QSGRendererInterface::OpenVG:
+    return QStringLiteral("OpenVG");
+  case QSGRendererInterface::OpenGL:
+    return QStringLiteral("OpenGL");
+  case QSGRendererInterface::Direct3D11:
+    return QStringLiteral("Direct3D11");
+  case QSGRendererInterface::Vulkan:
+    return QStringLiteral("Vulkan");
+  case QSGRendererInterface::Metal:
+    return QStringLiteral("Metal");
+  case QSGRendererInterface::Direct3D12:
+    return QStringLiteral("Direct3D12");
+  default:
+    return QStringLiteral("Unknown");
+  }
 }
 
-QString detectGpuName(QQuickWindow* win, QSGRendererInterface::GraphicsApi api) {
-    if (api == QSGRendererInterface::Vulkan) {
-        QVulkanInstance* vkInst = win ? win->vulkanInstance() : nullptr;
-        if (!vkInst && win && win->rendererInterface()) {
-            vkInst = static_cast<QVulkanInstance*>(
-                win->rendererInterface()->getResource(win, QSGRendererInterface::VulkanInstanceResource));
-        }
-        if (vkInst && vkInst->isValid()) {
-            if (QVulkanFunctions* funcs = vkInst->functions()) {
-                VkPhysicalDevice physDev = VK_NULL_HANDLE;
-                if (win && win->rendererInterface()) {
-                    if (void* rawPhys = win->rendererInterface()->getResource(
-                            win, QSGRendererInterface::PhysicalDeviceResource)) {
-                        physDev = *static_cast<VkPhysicalDevice*>(rawPhys);
-                    }
-                }
-                if (physDev == VK_NULL_HANDLE && vkInst->vkInstance() != VK_NULL_HANDLE) {
-                    uint32_t devCount = 0;
-                    if (funcs->vkEnumeratePhysicalDevices(vkInst->vkInstance(), &devCount, nullptr) == VK_SUCCESS
-                        && devCount > 0) {
-                        std::vector<VkPhysicalDevice> devs(devCount, VK_NULL_HANDLE);
-                        if (funcs->vkEnumeratePhysicalDevices(vkInst->vkInstance(), &devCount, devs.data()) == VK_SUCCESS
-                            && !devs.empty()) {
-                            physDev = devs.front();
-                        }
-                    }
-                }
-                if (physDev != VK_NULL_HANDLE) {
-                    VkPhysicalDeviceProperties props{};
-                    funcs->vkGetPhysicalDeviceProperties(physDev, &props);
-                    const QString name = QString::fromUtf8(props.deviceName).trimmed();
-                    if (!name.isEmpty()) {
-                        return name;
-                    }
-                }
-            }
-        }
-    } else if (api == QSGRendererInterface::OpenGL) {
-        if (auto* ctx = QOpenGLContext::currentContext()) {
-            if (auto* funcs = ctx->functions()) {
-                const GLubyte* renderer = funcs->glGetString(GL_RENDERER);
-                if (renderer) {
-                    return QString::fromUtf8(reinterpret_cast<const char*>(renderer));
-                }
-            }
-        }
+QString detectGpuName(QQuickWindow *win,
+                      QSGRendererInterface::GraphicsApi api) {
+  if (api == QSGRendererInterface::Vulkan) {
+    QVulkanInstance *vkInst = win ? win->vulkanInstance() : nullptr;
+    if (!vkInst && win && win->rendererInterface()) {
+      vkInst =
+          static_cast<QVulkanInstance *>(win->rendererInterface()->getResource(
+              win, QSGRendererInterface::VulkanInstanceResource));
     }
-    // Lightweight DRM uevent fallback on Linux (zero external dependencies)
-    for (int cardIdx = 0; cardIdx < 4; ++cardIdx) {
-        QFile uevent(QStringLiteral("/sys/class/drm/card%1/device/uevent").arg(cardIdx));
-        if (uevent.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QString driver;
-            QString pciId;
-            while (!uevent.atEnd()) {
-                const QString line = QString::fromUtf8(uevent.readLine()).trimmed();
-                if (line.startsWith(QStringLiteral("DRIVER="))) driver = line.mid(7);
-                else if (line.startsWith(QStringLiteral("PCI_ID="))) pciId = line.mid(7);
-            }
-            if (!driver.isEmpty() || !pciId.isEmpty()) {
-                return QStringLiteral("%1 (%2)").arg(driver.isEmpty() ? QStringLiteral("drm") : driver,
-                                                     pciId.isEmpty() ? QStringLiteral("unknown") : pciId);
-            }
+    if (vkInst && vkInst->isValid()) {
+      if (QVulkanFunctions *funcs = vkInst->functions()) {
+        VkPhysicalDevice physDev = VK_NULL_HANDLE;
+        if (win && win->rendererInterface()) {
+          if (void *rawPhys = win->rendererInterface()->getResource(
+                  win, QSGRendererInterface::PhysicalDeviceResource)) {
+            physDev = *static_cast<VkPhysicalDevice *>(rawPhys);
+          }
         }
+        if (physDev == VK_NULL_HANDLE &&
+            vkInst->vkInstance() != VK_NULL_HANDLE) {
+          uint32_t devCount = 0;
+          if (funcs->vkEnumeratePhysicalDevices(vkInst->vkInstance(), &devCount,
+                                                nullptr) == VK_SUCCESS &&
+              devCount > 0) {
+            std::vector<VkPhysicalDevice> devs(devCount, VK_NULL_HANDLE);
+            if (funcs->vkEnumeratePhysicalDevices(vkInst->vkInstance(),
+                                                  &devCount,
+                                                  devs.data()) == VK_SUCCESS &&
+                !devs.empty()) {
+              physDev = devs.front();
+            }
+          }
+        }
+        if (physDev != VK_NULL_HANDLE) {
+          VkPhysicalDeviceProperties props{};
+          funcs->vkGetPhysicalDeviceProperties(physDev, &props);
+          const QString name = QString::fromUtf8(props.deviceName).trimmed();
+          if (!name.isEmpty()) {
+            return name;
+          }
+        }
+      }
     }
-    return QStringLiteral("unknown");
+  } else if (api == QSGRendererInterface::OpenGL) {
+    if (auto *ctx = QOpenGLContext::currentContext()) {
+      if (auto *funcs = ctx->functions()) {
+        const GLubyte *renderer = funcs->glGetString(GL_RENDERER);
+        if (renderer) {
+          return QString::fromUtf8(reinterpret_cast<const char *>(renderer));
+        }
+      }
+    }
+  }
+  // Lightweight DRM uevent fallback on Linux (zero external dependencies)
+  for (int cardIdx = 0; cardIdx < 4; ++cardIdx) {
+    QFile uevent(
+        QStringLiteral("/sys/class/drm/card%1/device/uevent").arg(cardIdx));
+    if (uevent.open(QIODevice::ReadOnly | QIODevice::Text)) {
+      QString driver;
+      QString pciId;
+      while (!uevent.atEnd()) {
+        const QString line = QString::fromUtf8(uevent.readLine()).trimmed();
+        if (line.startsWith(QStringLiteral("DRIVER=")))
+          driver = line.mid(7);
+        else if (line.startsWith(QStringLiteral("PCI_ID=")))
+          pciId = line.mid(7);
+      }
+      if (!driver.isEmpty() || !pciId.isEmpty()) {
+        return QStringLiteral("%1 (%2)").arg(
+            driver.isEmpty() ? QStringLiteral("drm") : driver,
+            pciId.isEmpty() ? QStringLiteral("unknown") : pciId);
+      }
+    }
+  }
+  return QStringLiteral("unknown");
 }
 } // namespace
 
-int main(int argc, char *argv[])
-{
-    // High DPI scaling is handled automatically by Qt 6
-    QGuiApplication app(argc, argv);
+int main(int argc, char *argv[]) {
+  // High DPI scaling is handled automatically by Qt 6
+  QGuiApplication app(argc, argv);
 
-    app.setApplicationName("Desk32");
-    app.setApplicationDisplayName("Desk32");
-    app.setOrganizationName("wammed");
-    app.setWindowIcon(QIcon(":/Desk32/images/Desk32-Icon.svg"));
+  app.setApplicationName("Desk32");
+  app.setApplicationDisplayName("Desk32");
+  app.setOrganizationName("wammed");
+  app.setWindowIcon(QIcon(":/Desk32/images/Desk32-Icon.svg"));
 
-    const bool hasEnvBackendOverride = !qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")
-                                    || !qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND");
-    VulkanProbeResult vkProbe{};
-    bool fellBackToOpenGL = false;
-    if (!hasEnvBackendOverride) {
-        vkProbe = probeVulkanAvailable();
-        if (vkProbe.available) {
-            QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
-        } else {
-            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
-            fellBackToOpenGL = true;
-        }
+  const bool hasEnvBackendOverride =
+      !qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND") ||
+      !qEnvironmentVariableIsEmpty("QT_QUICK_BACKEND");
+  VulkanProbeResult vkProbe{};
+  bool fellBackToOpenGL = false;
+  if (!hasEnvBackendOverride) {
+    vkProbe = probeVulkanAvailable();
+    if (vkProbe.available) {
+      QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
+    } else {
+      QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+      fellBackToOpenGL = true;
     }
+  }
 
-    QQuickStyle::setStyle("Basic");
+  QQuickStyle::setStyle("Basic");
 
-    QQmlApplicationEngine engine;
+  QQmlApplicationEngine engine;
 
-    // Initialize bilingual language manager
-    LanguageManager::instance().init(&app, &engine);
+  // Initialize bilingual language manager
+  LanguageManager::instance().init(&app, &engine);
 
-    // Initialize Engine Controller & Subsystems
-    desk32::core::EngineController::instance().initialize();
+  // Initialize Engine Controller & Subsystems
+  desk32::core::EngineController::instance().initialize();
 
-    if (fellBackToOpenGL) {
-        QJsonObject det;
-        det.insert(QStringLiteral("stage"), QStringLiteral("vulkan_probe"));
-        det.insert(QStringLiteral("reason"), vkProbe.reason);
-        det.insert(QStringLiteral("vk_result"), vkProbe.vkResult);
-        det.insert(QStringLiteral("fallback_backend"), QStringLiteral("OpenGL"));
-        desk32::core::log::LogService::instance().log(
-            QStringLiteral("Session"),
-            QStringLiteral("GraphicsFallback"),
-            QStringLiteral("Warning"),
-            QStringLiteral("Vulkan unavailable (%1); falling back to OpenGL.").arg(vkProbe.reason),
-            QStringLiteral("System"),
-            QStringLiteral("Desk32"),
-            QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
-            QString(),
-            QString(),
-            desk32::core::log::ErrorCode::VulkanFallbackToOpenGL
-        );
-    }
+  if (fellBackToOpenGL) {
+    QJsonObject det;
+    det.insert(QStringLiteral("stage"), QStringLiteral("vulkan_probe"));
+    det.insert(QStringLiteral("reason"), vkProbe.reason);
+    det.insert(QStringLiteral("vk_result"), vkProbe.vkResult);
+    det.insert(QStringLiteral("fallback_backend"), QStringLiteral("OpenGL"));
+    desk32::core::log::LogService::instance().log(
+        QStringLiteral("Session"), QStringLiteral("GraphicsFallback"),
+        QStringLiteral("Warning"),
+        QStringLiteral("Vulkan unavailable (%1); falling back to OpenGL.")
+            .arg(vkProbe.reason),
+        QStringLiteral("System"), QStringLiteral("Desk32"),
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(), QString(),
+        desk32::core::log::ErrorCode::VulkanFallbackToOpenGL);
+  }
 
-    // Expose Singletons to QML
-    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager", &LanguageManager::instance());
-    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController", &desk32::core::EngineController::instance());
-    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LogService", &desk32::core::log::LogService::instance());
-    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "WorkspaceManager", &desk32::engine::workspace::WorkspaceManager::instance());
+  // Expose Singletons to QML
+  qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager",
+                               &LanguageManager::instance());
+  qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController",
+                               &desk32::core::EngineController::instance());
+  qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LogService",
+                               &desk32::core::log::LogService::instance());
+  qmlRegisterSingletonInstance(
+      "Desk32.Core", 1, 0, "WorkspaceManager",
+      &desk32::engine::workspace::WorkspaceManager::instance());
 
-    const QUrl url(QStringLiteral("qrc:/Desk32/qml/Main.qml"));
-    QObject::connect(&engine, &QQmlApplicationEngine::objectCreated,
-                     &app, [url](QObject *obj, const QUrl &objUrl) {
+  const QUrl url(QStringLiteral("qrc:/Desk32/qml/Main.qml"));
+  QObject::connect(
+      &engine, &QQmlApplicationEngine::objectCreated, &app,
+      [url](QObject *obj, const QUrl &objUrl) {
         if (!obj && url == objUrl)
-            QCoreApplication::exit(-1);
-    }, Qt::QueuedConnection);
+          QCoreApplication::exit(-1);
+      },
+      Qt::QueuedConnection);
 
-    engine.load(url);
+  engine.load(url);
 
-    if (!engine.rootObjects().isEmpty()) {
-        if (auto* win = qobject_cast<QQuickWindow*>(engine.rootObjects().first())) {
-            QObject::connect(win, &QQuickWindow::sceneGraphInitialized, &app, [win]() {
-                const auto api = win->rendererInterface()->graphicsApi();
-                const QString backend = graphicsApiToString(api);
-                const QString gpu = detectGpuName(win, api);
-                QMetaObject::invokeMethod(&desk32::core::EngineController::instance(),
-                                          [backend, gpu]() {
-                    desk32::core::EngineController::instance().recordSessionStart(backend, gpu);
-                }, Qt::QueuedConnection);
-            }, Qt::DirectConnection);
+  if (!engine.rootObjects().isEmpty()) {
+    if (auto *win =
+            qobject_cast<QQuickWindow *>(engine.rootObjects().first())) {
+      QObject::connect(
+          win, &QQuickWindow::sceneGraphInitialized, &app,
+          [win]() {
+            const auto api = win->rendererInterface()->graphicsApi();
+            const QString backend = graphicsApiToString(api);
+            const QString gpu = detectGpuName(win, api);
+            QMetaObject::invokeMethod(
+                &desk32::core::EngineController::instance(),
+                [backend, gpu]() {
+                  desk32::core::EngineController::instance().recordSessionStart(
+                      backend, gpu);
+                },
+                Qt::QueuedConnection);
+          },
+          Qt::DirectConnection);
 
-            QObject::connect(win, &QQuickWindow::sceneGraphError, &app,
-                             [](QQuickWindow::SceneGraphError error, const QString& message) {
-                QJsonObject det;
-                det.insert(QStringLiteral("stage"), QStringLiteral("scene_graph_init"));
-                det.insert(QStringLiteral("qt_scene_graph_error"), static_cast<int>(error));
-                det.insert(QStringLiteral("error_message"), message);
-                desk32::core::log::LogService::instance().log(
-                    QStringLiteral("Session"),
-                    QStringLiteral("SceneGraphError"),
-                    QStringLiteral("Failed"),
-                    QStringLiteral("Scene graph initialization failed: %1").arg(message),
-                    QStringLiteral("System"),
-                    QStringLiteral("Desk32"),
-                    QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
-                    QString(),
-                    QString(),
-                    desk32::core::log::ErrorCode::SceneGraphInitError
-                );
-                desk32::core::log::LogService::instance().flush();
-            });
-        }
+      QObject::connect(
+          win, &QQuickWindow::sceneGraphError, &app,
+          [](QQuickWindow::SceneGraphError error, const QString &message) {
+            QJsonObject det;
+            det.insert(QStringLiteral("stage"),
+                       QStringLiteral("scene_graph_init"));
+            det.insert(QStringLiteral("qt_scene_graph_error"),
+                       static_cast<int>(error));
+            det.insert(QStringLiteral("error_message"), message);
+            desk32::core::log::LogService::instance().log(
+                QStringLiteral("Session"), QStringLiteral("SceneGraphError"),
+                QStringLiteral("Failed"),
+                QStringLiteral("Scene graph initialization failed: %1")
+                    .arg(message),
+                QStringLiteral("System"), QStringLiteral("Desk32"),
+                QString::fromUtf8(
+                    QJsonDocument(det).toJson(QJsonDocument::Compact)),
+                QString(), QString(),
+                desk32::core::log::ErrorCode::SceneGraphInitError);
+            desk32::core::log::LogService::instance().flush();
+          });
     }
+  }
 
-    QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, []() {
-        desk32::engine::workspace::WorkspaceManager::instance().closeWorkspaceForShutdown();
-        desk32::core::EngineController::instance().recordSessionEnd(QStringLiteral("normal_quit"));
-        desk32::core::log::LogService::instance().flush();
-    });
+  QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, []() {
+    desk32::engine::render::RenderEngine::instance().stop();
+    desk32::engine::render::RenderSequenceManager::instance().close();
+    desk32::engine::workspace::WorkspaceManager::instance()
+        .closeWorkspaceForShutdown();
+    desk32::core::EngineController::instance().recordSessionEnd(
+        QStringLiteral("normal_quit"));
+    desk32::core::log::LogService::instance().stop();
+  });
 
-    return app.exec();
+  return app.exec();
 }

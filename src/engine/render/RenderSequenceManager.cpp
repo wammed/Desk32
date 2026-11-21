@@ -1,4 +1,5 @@
 #include "RenderSequenceManager.hpp"
+#include <QCoreApplication>
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QStandardPaths>
@@ -38,7 +39,7 @@ void RenderSequenceManager::closeLocked() {
         m_db.close();
     }
     m_db = QSqlDatabase();
-    if (QSqlDatabase::contains(m_connectionName)) {
+    if (!m_connectionName.isEmpty() && QCoreApplication::instance() && QSqlDatabase::contains(m_connectionName)) {
         QSqlDatabase::removeDatabase(m_connectionName);
     }
     m_initialized = false;

@@ -1941,7 +1941,11 @@ void TestAudioPipeline::testAudioPipelineWorstCaseRealtimeConditions()
     // Audio deadline for 4096 frames @ 192kHz is (4096 / 192000) = 21,333 microseconds (21.33 ms)
     // Under native Release, should finish well within 15 ms
 #if !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__) && !defined(__SANITIZE_UNDEFINED__) && !defined(DESK32_SANITIZE_UNDEFINED)
-    QVERIFY(avgBlockNanos < 15000000); // 15 ms max (deadline = 21.33 ms)
+#if defined(NDEBUG)
+    QVERIFY(avgBlockNanos < 15000000); // 15 ms max in native Release (deadline = 21.33 ms)
+#else
+    QVERIFY(avgBlockNanos < 30000000); // 30 ms budget in unoptimized Debug (-O0) on shared CI runners
+#endif
 #endif
 
     pipeline.reclaimRetiredMemory();

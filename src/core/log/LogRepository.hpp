@@ -1,6 +1,7 @@
 #pragma once
 
 #include "LogEvent.hpp"
+#include <QCoreApplication>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSqlError>
@@ -124,7 +125,7 @@ public:
             m_db.close();
         }
         m_db = QSqlDatabase();
-        if (!m_connectionName.isEmpty() && QSqlDatabase::contains(m_connectionName)) {
+        if (!m_connectionName.isEmpty() && QCoreApplication::instance() && QSqlDatabase::contains(m_connectionName)) {
             QSqlDatabase::removeDatabase(m_connectionName);
         }
     }
