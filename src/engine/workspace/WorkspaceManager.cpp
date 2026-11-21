@@ -2152,6 +2152,7 @@ bool WorkspaceManager::editFileTagsFromUi(const QString& relativePath, const QVa
     optInt("totalTracks", meta.totalTracks);
     optInt("discNumber", meta.discNumber);
     optInt("totalDiscs", meta.totalDiscs);
+    optStr("date", meta.dateOrYear);
     optStr("dateOrYear", meta.dateOrYear);
     optStr("genre", meta.genre);
     optStr("composer", meta.composer);

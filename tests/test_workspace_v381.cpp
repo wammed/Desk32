@@ -431,6 +431,31 @@ void TestWorkspaceV381::testTagEditingCowCheckpointsDiffAuditionRollbackGc()
     m2.trackNumber = 2;
     QVERIFY2(ws.editFileTags("master_piece.flac", m2, err), qPrintable(err));
 
+    // Verify UI tag roundtrip (editFileTagsFromUi -> getFileDetails/getWorkspaceFiles metadata map)
+    QVariantMap uiTags;
+    uiTags["title"] = QStringLiteral("First Movement (Remastered)");
+    uiTags["artist"] = QStringLiteral("Studio Ensemble");
+    uiTags["album"] = QStringLiteral("Session One");
+    uiTags["trackNumber"] = 2;
+    uiTags["dateOrYear"] = QStringLiteral("2026");
+    uiTags["genre"] = QStringLiteral("Classical");
+    QVERIFY2(ws.editFileTagsFromUi("master_piece.flac", uiTags), qPrintable(ws.lastError()));
+
+    const QVariantMap detailsAfterUi = ws.getFileDetails("master_piece.flac");
+    const QVariantMap detailsMeta = detailsAfterUi.value("metadata").toMap();
+    QCOMPARE(detailsMeta.value("title").toString(), QString("First Movement (Remastered)"));
+    QCOMPARE(detailsMeta.value("artist").toString(), QString("Studio Ensemble"));
+    QCOMPARE(detailsMeta.value("album").toString(), QString("Session One"));
+    QCOMPARE(detailsMeta.value("trackNumber").toInt(), 2);
+    QCOMPARE(detailsMeta.value("dateOrYear").toString(), QString("2026"));
+    QCOMPARE(detailsMeta.value("genre").toString(), QString("Classical"));
+
+    const QVariantList filesAfterUi = ws.getWorkspaceFiles("");
+    QCOMPARE(filesAfterUi.size(), 1);
+    const QVariantMap listMeta = filesAfterUi.first().toMap().value("metadata").toMap();
+    QCOMPARE(listMeta.value("title").toString(), QString("First Movement (Remastered)"));
+    QCOMPARE(listMeta.value("artist").toString(), QString("Studio Ensemble"));
+
     QString save2Id;
     QVERIFY2(ws.createSave("Take 2", save2Id, err), qPrintable(err));
     QVERIFY(!save2Id.isEmpty());

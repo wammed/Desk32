@@ -37,14 +37,21 @@ Rectangle {
         savesList = WorkspaceManager.hasOpenWorkspace ? WorkspaceManager.getSaves() : []
         if (selectedFileRel.length > 0 && WorkspaceManager.hasOpenWorkspace) {
             selectedFileDetails = WorkspaceManager.getFileDetails(selectedFileRel)
-            editTitleField.text = selectedFileDetails.title || ""
-            editArtistField.text = selectedFileDetails.artist || ""
-            editAlbumField.text = selectedFileDetails.album || ""
-            editTrackNumField.text = selectedFileDetails.trackNumber > 0 ? String(selectedFileDetails.trackNumber) : ""
-            editDateField.text = selectedFileDetails.date || ""
-            editGenreField.text = selectedFileDetails.genre || ""
+            var meta = selectedFileDetails.metadata || ({})
+            editTitleField.text = meta.title || ""
+            editArtistField.text = meta.artist || ""
+            editAlbumField.text = meta.album || ""
+            editTrackNumField.text = meta.trackNumber > 0 ? String(meta.trackNumber) : ""
+            editDateField.text = meta.dateOrYear || ""
+            editGenreField.text = meta.genre || ""
         } else {
             selectedFileDetails = ({})
+            editTitleField.text = ""
+            editArtistField.text = ""
+            editAlbumField.text = ""
+            editTrackNumField.text = ""
+            editDateField.text = ""
+            editGenreField.text = ""
         }
     }
 
@@ -305,7 +312,10 @@ Rectangle {
                                 Label {
                                     Layout.fillWidth: true; elide: Text.ElideRight
                                     font.pixelSize: 9; color: "#90A4AE"
-                                    text: (modelData.title || "-") + " / " + (modelData.artist || "-") + "  [" + (modelData.sha256 ? modelData.sha256.slice(0, 10) : "") + "]"
+                                    text: ((modelData.metadata && modelData.metadata.title) ? modelData.metadata.title : "-")
+                                        + " / "
+                                        + ((modelData.metadata && modelData.metadata.artist) ? modelData.metadata.artist : "-")
+                                        + "  [" + (modelData.sha256 ? modelData.sha256.slice(0, 10) : "") + "]"
                                 }
                             }
                             Button {
@@ -356,8 +366,8 @@ Rectangle {
                                     title: editTitleField.text,
                                     artist: editArtistField.text,
                                     album: editAlbumField.text,
-                                    trackNumber: parseInt(editTrackNumField.text) || 0,
-                                    date: editDateField.text,
+                                    trackNumber: parseInt(editTrackNumField.text, 10) || 0,
+                                    dateOrYear: editDateField.text,
                                     genre: editGenreField.text
                                 }
                                 if (WorkspaceManager.editFileTagsFromUi(wsRoot.selectedFileRel, m)) {
