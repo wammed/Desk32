@@ -28,7 +28,9 @@ struct LogFilter {
     std::string parentOperationId;
     std::string target;
     std::string searchText;
-    int limit = 100;
+    std::string sessionId;
+    bool playbackHistoryOnly = false;
+    int limit = 0;
     int offset = 0;
 };
 
@@ -120,6 +122,10 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_db.isOpen()) {
             m_db.close();
+        }
+        m_db = QSqlDatabase();
+        if (!m_connectionName.isEmpty() && QSqlDatabase::contains(m_connectionName)) {
+            QSqlDatabase::removeDatabase(m_connectionName);
         }
     }
 
@@ -446,7 +452,7 @@ public:
     }
 
     /// Export logs to JSONL file (Section 10.5: 1 line per event, preserving structured information)
-    bool exportToJsonl(const QString& filePath, const LogFilter& filter = {}, int limit = 10000) {
+    bool exportToJsonl(const QString& filePath, const LogFilter& filter = {}, int limit = 0) {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_db.isOpen()) return false;
 
@@ -456,18 +462,42 @@ public:
             return false;
         }
 
-        QString sql = "SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset, "
-                      "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
-                      "FROM operation_logs WHERE 1=1";
-        QList<QVariant> binds;
-        appendFilterConditions(filter, sql, binds);
+        int effectiveLimit = 0;
+        if (filter.limit > 0 && limit > 0) {
+            effectiveLimit = std::min(filter.limit, limit);
+        } else if (filter.limit > 0) {
+            effectiveLimit = filter.limit;
+        } else if (limit > 0) {
+            effectiveLimit = limit;
+        }
 
-        const int effectiveLimit = (filter.limit > 0 && filter.limit < limit) ? filter.limit : limit;
-        sql += " ORDER BY event_id ASC LIMIT ?";
-        binds.append(effectiveLimit);
-        if (filter.offset > 0) {
-            sql += " OFFSET ?";
-            binds.append(filter.offset);
+        QList<QVariant> binds;
+        QString sql;
+        if (effectiveLimit > 0) {
+            QString innerSql = "SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset, "
+                               "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
+                               "FROM operation_logs WHERE 1=1";
+            appendFilterConditions(filter, innerSql, binds);
+            innerSql += " ORDER BY event_id DESC LIMIT ?";
+            binds.append(effectiveLimit);
+            if (filter.offset > 0) {
+                innerSql += " OFFSET ?";
+                binds.append(filter.offset);
+            }
+            sql = QStringLiteral(
+                "SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset, "
+                "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
+                "FROM (%1) AS recent_events ORDER BY event_id ASC").arg(innerSql);
+        } else {
+            sql = "SELECT event_id, operation_id, parent_operation_id, timestamp_utc, local_utc_offset, "
+                  "category, operation, status, target_type, target, message, error_code, details_json, duration_ms "
+                  "FROM operation_logs WHERE 1=1";
+            appendFilterConditions(filter, sql, binds);
+            sql += " ORDER BY event_id ASC";
+            if (filter.offset > 0) {
+                sql += " LIMIT -1 OFFSET ?";
+                binds.append(filter.offset);
+            }
         }
 
         QSqlQuery q(m_db);
@@ -546,14 +576,25 @@ public:
     [[nodiscard]] std::string lastError() const { return m_lastError; }
 
 private:
+    static QString normalizeUtcBound(const std::string& utc, bool isUpperBound) {
+        QString s = QString::fromStdString(utc).trimmed();
+        // Expand second-precision UTC ("YYYY-MM-DDTHH:MM:SSZ") so string comparison
+        // against millisecond-precision DB timestamps ("...SS.sssZ") is inclusive.
+        if (s.size() == 20 && s.endsWith(QLatin1Char('Z')) && !s.contains(QLatin1Char('.'))) {
+            s.chop(1);
+            s += isUpperBound ? QStringLiteral(".999Z") : QStringLiteral(".000Z");
+        }
+        return s;
+    }
+
     static void appendFilterConditions(const LogFilter& filter, QString& sql, QList<QVariant>& binds) {
         if (!filter.fromUtc.empty()) {
             sql += " AND timestamp_utc >= ?";
-            binds.append(QString::fromStdString(filter.fromUtc));
+            binds.append(normalizeUtcBound(filter.fromUtc, false));
         }
         if (!filter.toUtc.empty()) {
             sql += " AND timestamp_utc <= ?";
-            binds.append(QString::fromStdString(filter.toUtc));
+            binds.append(normalizeUtcBound(filter.toUtc, true));
         }
         if (!filter.category.empty()) {
             sql += " AND category = ?";
@@ -574,6 +615,17 @@ private:
         if (!filter.target.empty()) {
             sql += " AND target LIKE ?";
             binds.append("%" + QString::fromStdString(filter.target) + "%");
+        }
+        if (!filter.sessionId.empty()) {
+            sql += " AND details_json LIKE ?";
+            binds.append("%" + QString::fromStdString(filter.sessionId) + "%");
+        }
+        if (filter.playbackHistoryOnly) {
+            sql += " AND status = 'Success' AND ("
+                   "(category = 'Transport' AND operation IN ('Play', 'AutoAdvance'))"
+                   " OR (category = 'Deck' AND operation = 'LoadTrack')"
+                   " OR (category = 'FolderSession' AND operation IN ('StartSession', 'AutoAdvance'))"
+                   ")";
         }
         if (!filter.searchText.empty()) {
             sql += " AND (message LIKE ? OR details_json LIKE ? OR target LIKE ? OR category LIKE ? OR CAST(error_code AS TEXT) LIKE ? OR operation_id LIKE ?)";

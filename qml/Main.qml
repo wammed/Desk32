@@ -2773,10 +2773,8 @@ ApplicationWindow {
                         highlighted: true
                         onClicked: {
                             var path = "/tmp/desk32_log_export_" + Date.now() + ".jsonl"
-                            var f = logTable.buildFilter(100000)
-                            var ok = (Object.keys(f).length > 1)
-                                ? LogService.exportFilteredToJsonl(path, f)
-                                : LogService.exportToJsonl(path)
+                            var f = logTable.buildFilter(0)
+                            var ok = LogService.exportFilteredToJsonl(path, f)
                             if (ok) {
                                 exportNotice.text = qsTr("Exported to %1").arg(path)
                             }
@@ -2907,13 +2905,20 @@ ApplicationWindow {
                             if (statusFilter.currentIndex > 0) filter["status"] = statusFilter.currentText
                             if (fromUtcField.text.length > 0) filter["fromUtc"] = fromUtcField.text.trim()
                             if (toUtcField.text.length > 0) filter["toUtc"] = toUtcField.text.trim()
-                            if (thisSessionBtn.checked && searchField.text.length === 0) {
-                                filter["searchText"] = LogService.sessionId()
-                            } else if (searchField.text.length > 0) {
-                                filter["searchText"] = searchField.text
-                            }
+                            if (thisSessionBtn.checked) filter["sessionId"] = LogService.sessionId()
+                            if (playbackHistoryBtn.checked) filter["playbackHistoryOnly"] = true
+                            if (searchField.text.length > 0) filter["searchText"] = searchField.text
                             filter["limit"] = limitCount
                             return filter
+                        }
+
+                        function parseDetailsJson(raw) {
+                            if (!raw || raw.length === 0) return {}
+                            try {
+                                return JSON.parse(raw)
+                            } catch (e) {
+                                return raw
+                            }
                         }
 
                         function formatDetailsJson(raw) {
@@ -2923,6 +2928,29 @@ ApplicationWindow {
                             } catch (e) {
                                 return raw
                             }
+                        }
+
+                        function formatEventJson(ev) {
+                            if (!ev) return "{}"
+                            var status = ev.status || ""
+                            var obj = {
+                                event_id: ev.eventId !== undefined ? ev.eventId : 0,
+                                operation_id: ev.operationId || "",
+                                parent_operation_id: (ev.parentOperationId && ev.parentOperationId.length > 0)
+                                    ? ev.parentOperationId : null,
+                                timestamp_utc: ev.timestampUtc || "",
+                                local_utc_offset: ev.localUtcOffset || "",
+                                category: ev.category || "",
+                                operation: ev.operation || "",
+                                status: status,
+                                target_type: ev.targetType || "",
+                                target: ev.target || "",
+                                message: ev.message || "",
+                                error_code: ev.errorCode !== undefined ? ev.errorCode : 0,
+                                duration_ms: ev.durationMs !== undefined ? ev.durationMs : 0.0,
+                                details_json: parseDetailsJson(ev.detailsJson)
+                            }
+                            return JSON.stringify(obj, null, 2)
                         }
 
                         function refresh() {
@@ -2949,12 +2977,6 @@ ApplicationWindow {
                                 return
                             }
                             var rows = LogService.fetchLogs(buildFilter(300))
-                            if (thisSessionBtn.checked && searchField.text.length > 0) {
-                                var sid = LogService.sessionId()
-                                rows = rows.filter(function(r) {
-                                    return r.detailsJson && r.detailsJson.indexOf(sid) !== -1
-                                })
-                            }
                             model = rows
                         }
 
@@ -3093,9 +3115,9 @@ ApplicationWindow {
                                     visible: !!logTable.selectedEvent
                                     text: qsTr("Copy JSON")
                                     onClicked: {
-                                        var formatted = logTable.formatDetailsJson(logTable.selectedEvent.detailsJson)
+                                        var formatted = logTable.formatEventJson(logTable.selectedEvent)
                                         EngineController.copyToClipboard(formatted)
-                                        exportNotice.text = qsTr("Copied formatted details_json to clipboard")
+                                        exportNotice.text = qsTr("Copied event JSON to clipboard")
                                     }
                                 }
                             }

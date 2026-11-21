@@ -23,6 +23,7 @@ private slots:
     void testRealtimeQueueOverflowSafety();
     void testStructuredJsonlExport();
     void testQueryFilterAndSearch();
+    void testExportLatestEventsLimit();
     void testSys05OperationRetentionAndCascadePurge();
     void testXdgStatePathJsonlFilterParityAndOrphanPurge();
     void cleanupTestCase();
@@ -338,6 +339,106 @@ void TestLogService::testQueryFilterAndSearch()
     QCOMPARE(searchLogs[0].category, std::string("ExternalInsert"));
 
     repo.close();
+}
+
+void TestLogService::testExportLatestEventsLimit()
+{
+    QString dbPath = m_tempDir.path() + "/test_export_all_and_filtered.db";
+    QString jsonlAllPath = m_tempDir.path() + "/export_all.jsonl";
+    QString jsonlFilteredPath = m_tempDir.path() + "/export_filtered.jsonl";
+    QString jsonlSessionSearchPath = m_tempDir.path() + "/export_session_search.jsonl";
+    QString jsonlLatestLimitPath = m_tempDir.path() + "/export_latest_limit.jsonl";
+
+    LogService service;
+    QVERIFY(service.start(dbPath));
+
+    for (int i = 1; i <= 250; ++i) {
+        const bool isFailedRender = (i % 50 == 0);
+        service.log(
+            isFailedRender ? QStringLiteral("Render") : QStringLiteral("Deck"),
+            isFailedRender ? QStringLiteral("RenderTrack") : QStringLiteral("LoadTrack"),
+            isFailedRender ? QStringLiteral("Failed") : QStringLiteral("Success"),
+            QStringLiteral("Event %1").arg(i),
+            QStringLiteral("Deck"),
+            QStringLiteral("Deck A"),
+            QStringLiteral("{\"seq\":%1}").arg(i)
+        );
+    }
+    service.flush();
+    QCOMPARE(service.countEvents(), 250);
+
+    // 1. Default exportToJsonl() should export ALL 250 events in chronological order
+    QVERIFY(service.exportToJsonl(jsonlAllPath));
+    {
+        QFile file(jsonlAllPath);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = file.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        QCOMPARE(lines.size(), 250);
+
+        const QJsonObject firstObj = QJsonDocument::fromJson(lines.first()).object();
+        const QJsonObject lastObj = QJsonDocument::fromJson(lines.last()).object();
+        QCOMPARE(firstObj["message"].toString(), QString("Event 1"));
+        QCOMPARE(lastObj["message"].toString(), QString("Event 250"));
+    }
+
+    // 2. Filtered export with limit=0 (as used by UI Export JSONL) should export ONLY matching events
+    QVariantMap filter;
+    filter["category"] = QStringLiteral("Render");
+    filter["status"] = QStringLiteral("Failed");
+    filter["limit"] = 0;
+    QVERIFY(service.exportFilteredToJsonl(jsonlFilteredPath, filter));
+    {
+        QFile file(jsonlFilteredPath);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = file.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        QCOMPARE(lines.size(), 5); // 50, 100, 150, 200, 250
+        for (const QByteArray& line : lines) {
+            const QJsonObject obj = QJsonDocument::fromJson(line).object();
+            QCOMPARE(obj["category"].toString(), QString("Render"));
+            QCOMPARE(obj["status"].toString(), QString("Failed"));
+        }
+    }
+
+    // 3. Combined sessionId + searchText + playbackHistoryOnly filtering
+    QVariantMap sessionSearchFilter;
+    sessionSearchFilter["sessionId"] = service.sessionId();
+    sessionSearchFilter["searchText"] = QStringLiteral("Event 20");
+    sessionSearchFilter["playbackHistoryOnly"] = true;
+    sessionSearchFilter["limit"] = 0;
+    QVERIFY(service.exportFilteredToJsonl(jsonlSessionSearchPath, sessionSearchFilter));
+    {
+        QFile file(jsonlSessionSearchPath);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = file.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        // Matches Deck/LoadTrack/Success with "Event 20*" (excludes Event 200 which is Render/Failed)
+        // Event 20, Event 201..209 -> 10 events
+        QCOMPARE(lines.size(), 10);
+        for (const QByteArray& line : lines) {
+            const QJsonObject obj = QJsonDocument::fromJson(line).object();
+            QCOMPARE(obj["category"].toString(), QString("Deck"));
+            QCOMPARE(obj["operation"].toString(), QString("LoadTrack"));
+            QVERIFY(obj["message"].toString().startsWith(QStringLiteral("Event 20")));
+        }
+    }
+
+    // 4. Positive limit exports the latest N events (not oldest) in chronological order
+    QVariantMap limitFilter;
+    limitFilter["limit"] = 120;
+    QVERIFY(service.exportFilteredToJsonl(jsonlLatestLimitPath, limitFilter));
+    {
+        QFile file(jsonlLatestLimitPath);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = file.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        QCOMPARE(lines.size(), 120);
+        QCOMPARE(QJsonDocument::fromJson(lines.first()).object()["message"].toString(), QString("Event 131"));
+        QCOMPARE(QJsonDocument::fromJson(lines.last()).object()["message"].toString(), QString("Event 250"));
+    }
+
+    service.stop();
 }
 
 void TestLogService::testSys05OperationRetentionAndCascadePurge()

@@ -8,10 +8,13 @@
 #include <QJsonObject>
 #include <QUuid>
 #include <chrono>
+#include <atomic>
 
 namespace desk32::core::log {
 
 namespace {
+std::atomic<uint64_t> g_connSeq{0};
+
 QString generateSessionId() {
     return QStringLiteral("sess-") +
            QString::number(QDateTime::currentMSecsSinceEpoch()) +
@@ -77,7 +80,8 @@ bool LogService::start(const QString& dbPath) {
     }
 
     // Initialize query repository for main/GUI thread reads
-    m_queryRepo = std::make_unique<LogRepository>("Desk32LogQueryConn");
+    const uint64_t seq = g_connSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+    m_queryRepo = std::make_unique<LogRepository>(QStringLiteral("Desk32LogQueryConn_%1").arg(seq));
     if (!m_queryRepo->open(m_dbPath)) {
         return false;
     }
@@ -144,8 +148,13 @@ void LogService::flush() {
 
 void LogService::workerLoop() {
     // Dedicated worker SQLite connection
-    m_workerRepo = std::make_unique<LogRepository>("Desk32LogWorkerConn");
+    const uint64_t seq = g_connSeq.fetch_add(1, std::memory_order_relaxed) + 1;
+    m_workerRepo = std::make_unique<LogRepository>(QStringLiteral("Desk32LogWorkerConn_%1").arg(seq));
     if (!m_workerRepo->open(m_dbPath)) {
+        std::lock_guard<std::mutex> lock(m_cvMutex);
+        m_running.store(false);
+        m_flushRequested.store(false);
+        m_flushCv.notify_all();
         return;
     }
 
@@ -307,6 +316,8 @@ LogFilter toLogFilter(const QVariantMap& filterMap) {
     if (filterMap.contains("parentOperationId")) filter.parentOperationId = filterMap.value("parentOperationId").toString().toStdString();
     if (filterMap.contains("target")) filter.target = filterMap.value("target").toString().toStdString();
     if (filterMap.contains("searchText")) filter.searchText = filterMap.value("searchText").toString().toStdString();
+    if (filterMap.contains("sessionId")) filter.sessionId = filterMap.value("sessionId").toString().toStdString();
+    if (filterMap.contains("playbackHistoryOnly")) filter.playbackHistoryOnly = filterMap.value("playbackHistoryOnly").toBool();
     if (filterMap.contains("limit")) filter.limit = filterMap.value("limit").toInt();
     if (filterMap.contains("offset")) filter.offset = filterMap.value("offset").toInt();
     return filter;
