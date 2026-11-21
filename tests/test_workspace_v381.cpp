@@ -851,8 +851,9 @@ void TestWorkspaceV381::testPhase4GapFixesRenameRollbackExternalReloadTargetedSt
     QVERIFY(ctrl.loadTrack("A", wsDir + "/track_one.wav"));
     QVERIFY(ctrl.loadTrack("B", wsDir + "/track_two.wav"));
     ctrl.play("A");
-    ctrl.play("B");
     QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+    ctrl.play("B");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Paused);
     QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Playing);
 
     QVERIFY2(ws.renameWorkspaceFile("track_one.wav", "renamed_targeted.wav", err), qPrintable(err));

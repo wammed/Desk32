@@ -234,6 +234,7 @@ private slots:
     void testSeekObservabilityLogging();
     void testSessionAndFolderObservabilityLogging();
     void testAutoAdvanceLoggingAndNoDoubleAdvance();
+    void testAutoPauseOtherDeckOnPlay();
     void testMasterGainPostTapIsolation();
     void testPhase2GapFixesBitPerfectGeqListeningMetersAndSmoothing();
     void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
@@ -3679,6 +3680,97 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
     const QVariantMap importRep = ctrl.getLastPresetImportReport();
     QVERIFY(importRep["truncated"].toBool());
     QCOMPARE(importRep["overflowLeftBands"].toInt(), 4);
+}
+
+void TestPhase2Dsp::testAutoPauseOtherDeckOnPlay()
+{
+    auto& ctrl = desk32::core::EngineController::instance();
+    if (!ctrl.deckManager()) {
+        QVERIFY(ctrl.initialize(true));
+    }
+
+    QTemporaryDir tempDir;
+    QVERIFY(tempDir.isValid());
+    auto writeWav = [](const QString& path) {
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly)) return false;
+        const uint32_t sr = 48000;
+        const uint16_t ch = 2;
+        const uint16_t bits = 16;
+        const uint32_t frames = 4800;
+        const uint32_t dataSize = frames * ch * (bits / 8);
+        const uint32_t riffSize = 36 + dataSize;
+        QByteArray hdr;
+        hdr.append("RIFF", 4);
+        hdr.append(reinterpret_cast<const char*>(&riffSize), 4);
+        hdr.append("WAVEfmt ", 8);
+        const uint32_t fmtSize = 16;
+        const uint16_t pcmFmt = 1;
+        const uint32_t byteRate = sr * ch * (bits / 8);
+        const uint16_t blockAlign = ch * (bits / 8);
+        hdr.append(reinterpret_cast<const char*>(&fmtSize), 4);
+        hdr.append(reinterpret_cast<const char*>(&pcmFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&ch), 2);
+        hdr.append(reinterpret_cast<const char*>(&sr), 4);
+        hdr.append(reinterpret_cast<const char*>(&byteRate), 4);
+        hdr.append(reinterpret_cast<const char*>(&blockAlign), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2);
+        hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSize), 4);
+        f.write(hdr);
+        f.write(QByteArray(static_cast<int>(dataSize), '\0'));
+        f.close();
+        return true;
+    };
+
+    const QString wavA = tempDir.filePath("a.wav");
+    const QString wavB = tempDir.filePath("b.wav");
+    QVERIFY(writeWav(wavA));
+    QVERIFY(writeWav(wavB));
+
+    ctrl.setDeckLocked("A", false);
+    ctrl.setDeckLocked("B", false);
+    ctrl.setSwitchingMode(0); // Normal mode
+    QVERIFY(ctrl.loadTrack("A", wavA));
+    QVERIFY(ctrl.loadTrack("B", wavB));
+
+    // Play Deck A -> Deck A is Playing
+    ctrl.play("A");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Stopped);
+
+    // Play Deck B while Deck A is playing -> Deck A must auto-pause and Deck B becomes active & Playing
+    ctrl.play("B");
+    QCOMPARE(ctrl.activeDeckId(), QString("B"));
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Paused);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Playing);
+
+    // Play Deck A while Deck B is playing -> Deck B must auto-pause
+    ctrl.play("A");
+    QCOMPARE(ctrl.activeDeckId(), QString("A"));
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Paused);
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+
+    // Folder Session on A -> Play B pauses A -> Switch back to A resumes A & pauses B
+    QDir fsDir(tempDir.filePath("folder"));
+    QVERIFY(QDir().mkpath(fsDir.path()));
+    QVERIFY(writeWav(fsDir.filePath("01.wav")));
+    QVERIFY(writeWav(fsDir.filePath("02.wav")));
+    QVERIFY(ctrl.startFolderSession("A", fsDir.path(), {"01.wav", "02.wav"}));
+    ctrl.play("A");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+
+    ctrl.play("B");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Paused);
+    QVERIFY(ctrl.deckManager()->deck('A')->wasPausedByNormalSwitch());
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Playing);
+
+    ctrl.switchDeck("A", 0);
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+    QCOMPARE(ctrl.deckManager()->deck('B')->state(), desk32::engine::deck::TransportState::Paused);
+
+    ctrl.stop("A");
+    ctrl.stop("B");
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)

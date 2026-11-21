@@ -112,6 +112,7 @@ public:
             seekResult = tgt->seekWithResult(targetFrame);
             seekDurationMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - seekStart).count();
             hadSeek = true;
+            pauseOtherDecks(tgt, false);
             tgt->play();
         } else {
             // Normal mode (Section 2.3 & §2.7.5):
@@ -122,6 +123,7 @@ public:
                 src->setPausedByNormalSwitch(true);
             }
             if (tgt->folderSession().isActive() && tgt->wasPausedByNormalSwitch()) {
+                pauseOtherDecks(tgt, true);
                 tgt->setPausedByNormalSwitch(false);
                 tgt->play();
             }
@@ -158,6 +160,7 @@ public:
             setGraphRate(targetRate);
         }
 
+        pauseOtherDecks(tgt, false);
         tgt->play();
         m_previousDeckId.store(sourceId, std::memory_order_relaxed);
         m_activeDeckId.store(targetId, std::memory_order_relaxed);
@@ -228,6 +231,17 @@ public:
     }
 
 private:
+    void pauseOtherDecks(const ReferenceDeck* target, bool markFolderSwitch) {
+        for (auto& d : m_decks) {
+            if (d && d.get() != target && d->isPlaying()) {
+                d->pause();
+                if (markFolderSwitch && d->folderSession().isActive()) {
+                    d->setPausedByNormalSwitch(true);
+                }
+            }
+        }
+    }
+
     std::atomic<double> m_graphRate{48000.0};
     std::atomic<char> m_activeDeckId{'A'};
     std::atomic<char> m_previousDeckId{'B'};

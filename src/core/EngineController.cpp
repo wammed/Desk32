@@ -2160,6 +2160,40 @@ void EngineController::play(const QString &deckId) {
     if (m_deckManager->activeDeckId() != id) {
       switchDeck(deckId, m_switchingMode);
     }
+    // Auto-pause any other playing deck so simultaneous dual-deck playback does not occur.
+    for (char otherId : {'A', 'B', 'C', 'D'}) {
+      if (otherId == id)
+        continue;
+      if (auto *other = m_deckManager->deck(otherId)) {
+        if (other->isPlaying()) {
+          other->pause();
+          emit deckStateChanged(QString(otherId));
+          const auto oInfo = other->trackInfo();
+          const double oSr = oInfo.sampleRate;
+          const double oPosMs =
+              (oSr > 0.0) ? (static_cast<double>(other->playhead()) * 1000.0 / oSr)
+                          : 0.0;
+          const double oDurMs =
+              (oSr > 0.0)
+                  ? (static_cast<double>(oInfo.totalFrames) * 1000.0 / oSr)
+                  : 0.0;
+          QJsonObject oDet;
+          oDet.insert(QStringLiteral("deck"), QString(otherId));
+          oDet.insert(QStringLiteral("trigger"), QStringLiteral("auto_pause"));
+          oDet.insert(QStringLiteral("reason_deck"), deckId);
+          oDet.insert(QStringLiteral("path"), QString::fromStdString(oInfo.path));
+          oDet.insert(QStringLiteral("position_ms"), oPosMs);
+          oDet.insert(QStringLiteral("duration_ms_track"), oDurMs);
+          log::LogService::instance().log(
+              "Transport", "Pause", "Success",
+              QString("Deck %1 auto-paused (playback started on Deck %2)")
+                  .arg(QString(otherId), deckId),
+              "Deck", QString(otherId),
+              QString::fromUtf8(
+                  QJsonDocument(oDet).toJson(QJsonDocument::Compact)));
+        }
+      }
+    }
     followActiveDeckSampleRateIfDirectMode();
     d->play();
     emit deckStateChanged(deckId);

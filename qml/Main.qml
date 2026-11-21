@@ -256,7 +256,9 @@ ApplicationWindow {
                 // LEFT WING: Reference Decks A-D (approx 480px width)
                 Rectangle {
                     Layout.preferredWidth: 480
+                    Layout.minimumWidth: 440
                     Layout.fillHeight: true
+                    clip: true
                     color: "#14171a"
                     border.color: "#242930"
                     border.width: 1
@@ -265,19 +267,21 @@ ApplicationWindow {
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 12
-                        spacing: 8
+                        spacing: 6
 
                         // Section Header & Quick A/B Controls
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 8
+                            spacing: 6
                             Label {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                elide: Text.ElideRight
                                 text: qsTr("REFERENCE DECKS (4 SLOTS)")
                                 font.bold: true
                                 font.pixelSize: 12
                                 color: "#00E5FF"
                             }
-                            Item { Layout.fillWidth: true }
                             // 4-Deck Direct Switch Buttons: A, B, C, D
                             RowLayout {
                                 spacing: 4
@@ -285,6 +289,8 @@ ApplicationWindow {
                                     model: ["A", "B", "C", "D"]
                                     Button {
                                         text: modelData
+                                        leftPadding: 4
+                                        rightPadding: 4
                                         Layout.preferredWidth: 28
                                         Layout.preferredHeight: 26
                                         font.bold: true
@@ -294,15 +300,25 @@ ApplicationWindow {
                                     }
                                 }
                             }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
                             Button {
                                 text: qsTr("Quick A/B")
                                 font.pixelSize: 11
+                                leftPadding: 8
+                                rightPadding: 8
+                                Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                 Layout.preferredHeight: 26
                                 highlighted: true
                                 onClicked: EngineController.quickSwitchAB()
                             }
                             ComboBox {
                                 id: modeCombo
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 100
                                 Layout.preferredHeight: 26
                                 model: [qsTr("Normal (Hold)"), qsTr("Comparative (Sync)")]
                                 currentIndex: EngineController.switchingMode
@@ -317,6 +333,7 @@ ApplicationWindow {
                                 id: deckBox
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
+                                clip: true
 
                                 property bool isActive: EngineController.activeDeckId === modelData
                                 property var deckState: EngineController.getDeckState(modelData)
@@ -420,6 +437,9 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("Load")
                                             font.pixelSize: 10
+                                            leftPadding: 6
+                                            rightPadding: 6
+                                            Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                             Layout.preferredHeight: 24
                                             enabled: !deckBox.deckState || !deckBox.deckState.isLocked
                                             onClicked: {
@@ -432,6 +452,9 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("Folder")
                                             font.pixelSize: 10
+                                            leftPadding: 6
+                                            rightPadding: 6
+                                            Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                             Layout.preferredHeight: 24
                                             enabled: !deckBox.deckState || !deckBox.deckState.isLocked
                                             onClicked: {
@@ -444,6 +467,9 @@ ApplicationWindow {
                                         Button {
                                             text: (deckBox.deckState && deckBox.deckState.isLocked) ? qsTr("LOCKED") : qsTr("LOCK")
                                             font.pixelSize: 10
+                                            leftPadding: 6
+                                            rightPadding: 6
+                                            Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                             Layout.preferredHeight: 24
                                             highlighted: !!(deckBox.deckState && deckBox.deckState.isLocked)
                                             onClicked: EngineController.setDeckLocked(modelData, !(deckBox.deckState && deckBox.deckState.isLocked))
@@ -453,6 +479,9 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("->WS")
                                             font.pixelSize: 9
+                                            leftPadding: 6
+                                            rightPadding: 6
+                                            Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                             Layout.preferredHeight: 24
                                             enabled: WorkspaceManager.hasOpenWorkspace && !!(deckBox.deckState && deckBox.deckState.path && deckBox.deckState.path.length > 0)
                                             onClicked: EngineController.copyDeckTrackToWorkspace(modelData)
@@ -462,6 +491,9 @@ ApplicationWindow {
                                         Button {
                                             text: qsTr("Select")
                                             font.pixelSize: 10
+                                            leftPadding: 6
+                                            rightPadding: 6
+                                            Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                             Layout.preferredHeight: 24
                                             visible: !deckBox.isActive
                                             onClicked: EngineController.switchDeck(modelData, EngineController.switchingMode)
@@ -476,6 +508,7 @@ ApplicationWindow {
                                         // Track Title or File Name
                                         Label {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: (deckBox.deckState && deckBox.deckState.path) ?
                                                   ((deckBox.deckState.title && deckBox.deckState.title.length > 0) ? deckBox.deckState.title : deckBox.deckState.path.split('/').pop()) :
                                                   qsTr("No audio loaded - Ready for audition")
@@ -488,6 +521,7 @@ ApplicationWindow {
                                         // Artist & Album (if available)
                                         Label {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             visible: !!(deckBox.deckState && deckBox.deckState.artist && deckBox.deckState.artist.length > 0)
                                             text: (deckBox.deckState && deckBox.deckState.artist) ?
                                                   (deckBox.deckState.artist + ((deckBox.deckState.album && deckBox.deckState.album.length > 0) ? " — " + deckBox.deckState.album : "")) : ""
@@ -574,6 +608,8 @@ ApplicationWindow {
                                         spacing: 6
                                         Button {
                                             text: "▶"
+                                            leftPadding: 4
+                                            rightPadding: 4
                                             Layout.preferredWidth: 32
                                             Layout.preferredHeight: 26
                                             highlighted: !!(deckBox.deckState && deckBox.deckState.state === 1)
@@ -581,6 +617,8 @@ ApplicationWindow {
                                         }
                                         Button {
                                             text: "❚❚"
+                                            leftPadding: 4
+                                            rightPadding: 4
                                             Layout.preferredWidth: 32
                                             Layout.preferredHeight: 26
                                             highlighted: !!(deckBox.deckState && deckBox.deckState.state === 2)
@@ -588,6 +626,8 @@ ApplicationWindow {
                                         }
                                         Button {
                                             text: "■"
+                                            leftPadding: 4
+                                            rightPadding: 4
                                             Layout.preferredWidth: 32
                                             Layout.preferredHeight: 26
                                             onClicked: EngineController.stop(modelData)
@@ -595,6 +635,7 @@ ApplicationWindow {
                                         Slider {
                                             id: deckSlider
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 80
                                             from: 0
                                             to: (deckBox.deckState && deckBox.deckState.totalFrames > 0) ? deckBox.deckState.totalFrames : 100
                                             property bool dragMoved: false
@@ -648,17 +689,24 @@ ApplicationWindow {
                                                 color: "#808c99"
                                                 elide: Text.ElideMiddle
                                                 Layout.fillWidth: true
+                                                Layout.minimumWidth: 20
                                             }
 
                                             Button {
                                                 text: qsTr("Prev")
                                                 font.pixelSize: 10
+                                                leftPadding: 8
+                                                rightPadding: 8
+                                                Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                                 Layout.preferredHeight: 20
                                                 onClicked: EngineController.retreatFolderPrevious(modelData)
                                             }
                                             Button {
                                                 text: qsTr("Next")
                                                 font.pixelSize: 10
+                                                leftPadding: 8
+                                                rightPadding: 8
+                                                Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
                                                 Layout.preferredHeight: 20
                                                 onClicked: EngineController.advanceFolderNext(modelData)
                                             }
@@ -673,22 +721,22 @@ ApplicationWindow {
                                             text: qsTr("Off:%1").arg(deckBox.deckState ? deckBox.deckState.offsetFrames : 0)
                                             font.pixelSize: 9; font.family: "Monospace"; color: "#78909C"
                                         }
-                                        Button { text: "-1k"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 28
+                                        Button { text: "-1k"; font.pixelSize: 8; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 28
                                             onClicked: EngineController.setDeckOffsetFrames(modelData, (deckBox.deckState ? deckBox.deckState.offsetFrames : 0) - 1000) }
-                                        Button { text: "0"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                        Button { text: "0"; font.pixelSize: 8; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
                                             onClicked: EngineController.setDeckOffsetFrames(modelData, 0) }
-                                        Button { text: "+1k"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 28
+                                        Button { text: "+1k"; font.pixelSize: 8; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 28
                                             onClicked: EngineController.setDeckOffsetFrames(modelData, (deckBox.deckState ? deckBox.deckState.offsetFrames : 0) + 1000) }
                                         Item { Layout.fillWidth: true }
                                         Label {
                                             text: qsTr("Trim:%1dB").arg((deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0).toFixed(1))
                                             font.pixelSize: 9; font.family: "Monospace"; color: "#80DEEA"
                                         }
-                                        Button { text: "-"; font.pixelSize: 9; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                        Button { text: "-"; font.pixelSize: 9; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) - 0.5) }
-                                        Button { text: "0"; font.pixelSize: 8; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                        Button { text: "0"; font.pixelSize: 8; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, 0.0) }
-                                        Button { text: "+"; font.pixelSize: 9; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                        Button { text: "+"; font.pixelSize: 9; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) + 0.5) }
                                     }
                                 }
