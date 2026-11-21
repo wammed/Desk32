@@ -202,6 +202,10 @@ public:
         std::lock_guard<std::mutex> lock(m_trackMutex);
         m_inTransitionHook = std::move(hook);
     }
+    void setBeforeDecodeChunkHook(std::function<void(uint64_t)> hook) {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        m_beforeDecodeChunkHook = std::move(hook);
+    }
 #endif
 
     // Lock-free / Seqlock instrumentation readers (Control Thread / Tests)
@@ -285,6 +289,7 @@ private:
     std::function<void(uint64_t)> m_preCommitHook;
 #ifdef DESK32_ENABLE_TEST_HOOKS
     std::function<void(uint64_t)> m_inTransitionHook;
+    std::function<void(uint64_t)> m_beforeDecodeChunkHook;
 #endif
 
     // Instrumentation state (RT-safe: SPSC ring for Audio->Control, Seqlock for Worker->Control)

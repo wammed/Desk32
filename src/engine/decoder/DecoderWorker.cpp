@@ -1096,6 +1096,16 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
 }
 
 void DecoderWorker::doDecodeChunk() {
+#ifdef DESK32_ENABLE_TEST_HOOKS
+  std::function<void(uint64_t)> beforeDecodeHookCopy;
+  {
+    std::lock_guard<std::mutex> lock(m_trackMutex);
+    beforeDecodeHookCopy = m_beforeDecodeChunkHook;
+  }
+  if (beforeDecodeHookCopy) {
+    beforeDecodeHookCopy(m_workerPerf.totalChunksDecoded);
+  }
+#endif
   const int64_t chunkStartNs = steadyNowNs();
   auto recordChunkEnd = [this, chunkStartNs]() noexcept {
     const int64_t endNs = steadyNowNs();

@@ -6,8 +6,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <fstream>
+#include <mutex>
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -151,25 +153,167 @@ void TestUnderrunInvestigation::testCandidateADeterministicRace() {
 }
 
 void TestUnderrunInvestigation::testGenuineUnderrunStillDetected() {
-    // Verify genuine underrun during active playback (post-Open, non-EOF) is still detected
+    // Verify genuine underrun during active playback (post-Open, non-EOF) and post-starvation recovery
+    // deterministically using a test-only producer supply gate (no timing/sleep dependence).
+    struct SupplyGate {
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool stalled{false};
+        bool allowProceed{false};
+        bool resumed{false};
+        bool abort{false};
+
+        void onBeforeChunk(uint64_t chunkIdx) {
+            if (chunkIdx < 4) {
+                // Allow Open prefill (chunks 0..3) to populate the ring buffer normally.
+                return;
+            }
+            if (chunkIdx == 4) {
+                std::unique_lock<std::mutex> lock(mtx);
+                stalled = true;
+                cv.notify_all();
+                cv.wait_for(lock, std::chrono::seconds(10), [this]() {
+                    return allowProceed || abort;
+                });
+                return;
+            }
+            if (chunkIdx == 6) {
+                // Chunks 4 and 5 have completed decoding and written PCM to the ring buffer.
+                std::lock_guard<std::mutex> lock(mtx);
+                resumed = true;
+                cv.notify_all();
+            }
+        }
+
+        bool waitUntilStalled() {
+            std::unique_lock<std::mutex> lock(mtx);
+            return cv.wait_for(lock, std::chrono::seconds(10), [this]() {
+                return stalled || abort;
+            }) && stalled;
+        }
+
+        void resumeSupply() {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                allowProceed = true;
+            }
+            cv.notify_all();
+        }
+
+        bool waitUntilResumed() {
+            std::unique_lock<std::mutex> lock(mtx);
+            return cv.wait_for(lock, std::chrono::seconds(10), [this]() {
+                return resumed || abort;
+            }) && resumed;
+        }
+
+        void releaseForTeardown() {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                abort = true;
+                allowProceed = true;
+            }
+            cv.notify_all();
+        }
+    };
+
     ReferenceDeck deck('A');
+    SupplyGate gate;
+
+    struct HookGuard {
+        ReferenceDeck& deckRef;
+        SupplyGate& gateRef;
+        ~HookGuard() {
+            gateRef.releaseForTeardown();
+            deckRef.worker().setBeforeDecodeChunkHook(nullptr);
+            deckRef.stop();
+        }
+    } cleanup{deck, gate};
+
     const std::string longWav = (m_tempDir.path() + "/track_long_44k.wav").toStdString();
     QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+
+    // Install supply gate before loadTrack so worker stalls deterministically after Open prefill (before chunk 4).
+    deck.worker().setBeforeDecodeChunkHook([&gate](uint64_t chunkIdx) {
+        gate.onBeforeChunk(chunkIdx);
+    });
+
     QVERIFY(deck.loadTrack(longWav, 48000.0));
-    deck.play();
+    QVERIFY(gate.waitUntilStalled());
 
-    // Drain ring buffer completely in a single large read while track is active and not EOF
-    std::vector<double> outL(262144, 0.0), outR(262144, 0.0);
-    const size_t read = deck.worker().readAudioBlock(outL.data(), outR.data(), 262144);
-    QVERIFY(read < 262144);
+    QVERIFY(deck.isOpen());
     QVERIFY(!deck.worker().isEof());
-    QVERIFY(deck.worker().underrunCount() >= 1);
+    QVERIFY(deck.worker().ringBuffer().availableRead() > 0);
 
+    deck.play();
+    QVERIFY(deck.isPlaying());
+    QVERIFY(deck.worker().isPlaying());
+
+    // 1. Drain the prefilled ring buffer with normal audio blocks until an underrun is observed.
+    constexpr size_t blockFrames = 1024;
+    std::vector<double> outL(blockFrames, 0.0), outR(blockFrames, 0.0);
+    bool sawPartialUnderrun = false;
+    for (int i = 0; i < 64; ++i) {
+        const size_t read = deck.renderBlock(outL.data(), outR.data(), blockFrames);
+        if (read < blockFrames) {
+            sawPartialUnderrun = true;
+            break;
+        }
+    }
+    QVERIFY(sawPartialUnderrun);
+
+    // 2. Render one more block while supply is still stalled to confirm continued playback detects underrun.
+    const size_t emptyRead = deck.renderBlock(outL.data(), outR.data(), blockFrames);
+    QCOMPARE(emptyRead, size_t(0));
+
+    // 3. Verify Worker is NOT EOF, playback request remains active, and underrun snapshots are accurate.
+    QVERIFY(!deck.worker().isEof());
+    QVERIFY(!deck.worker().isEofDelivered());
+    QVERIFY(deck.isPlaying());
+    QVERIFY(deck.worker().isPlaying());
+    QVERIFY(deck.worker().underrunCount() >= uint64_t(2));
+
+    std::vector<UnderrunSnapshot> snaps;
     UnderrunSnapshot snap{};
-    QVERIFY(deck.worker().popUnderrunSnapshot(snap));
-    QVERIFY(snap.isOpenAtEntry);
-    QVERIFY(snap.isPlayingAtEntry);
-    QVERIFY(!snap.isEofAtCheck);
+    while (deck.worker().popUnderrunSnapshot(snap)) {
+        snaps.push_back(snap);
+    }
+    QVERIFY(snaps.size() >= size_t(2));
+    for (const auto& s : snaps) {
+        QVERIFY(s.isOpenAtEntry);
+        QVERIFY(s.isPlayingAtEntry);
+        QVERIFY(!s.isEofAtCheck);
+        QVERIFY(s.isOpenAtUnderrun);
+        QVERIFY(s.isPlayingAtUnderrun);
+        QVERIFY(s.readFrames < s.requestedFrames);
+    }
+    QCOMPARE(snaps.back().readFrames, uint64_t(0));
+    QCOMPARE(snaps.back().ringAvailBeforeRead, uint64_t(0));
+
+    // 4. Resume data supply and verify recovery without additional underruns.
+    const uint64_t underrunsBeforeRecovery = deck.worker().underrunCount();
+    gate.resumeSupply();
+    QVERIFY(gate.waitUntilResumed());
+
+    QVERIFY(!deck.worker().isEof());
+    QVERIFY(deck.isPlaying());
+    QVERIFY(deck.worker().isPlaying());
+    QVERIFY(deck.worker().ringBuffer().availableRead() >= blockFrames);
+
+    std::fill(outL.begin(), outL.end(), 0.0);
+    std::fill(outR.begin(), outR.end(), 0.0);
+    const size_t recoveredRead = deck.renderBlock(outL.data(), outR.data(), blockFrames);
+    QCOMPARE(recoveredRead, blockFrames);
+    QCOMPARE(deck.worker().underrunCount(), underrunsBeforeRecovery);
+    QVERIFY(!deck.worker().isEof());
+
+    double peak = 0.0;
+    for (size_t i = 0; i < recoveredRead; ++i) {
+        peak = std::max(peak, std::max(std::abs(outL[i]), std::abs(outR[i])));
+    }
+    QVERIFY(peak > 0.01);
+
+    deck.worker().setBeforeDecodeChunkHook(nullptr);
     deck.stop();
 }
 
