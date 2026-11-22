@@ -1,4 +1,5 @@
 #include "EngineController.hpp"
+#include "core/SettingsManager.hpp"
 #include "core/log/LogErrorCodes.hpp"
 #include "engine/workspace/WorkspaceManager.hpp"
 #include "git_version.hpp"
@@ -97,8 +98,7 @@ bool EngineController::initialize(bool offlineMode) {
 
   for (char cid : {'A', 'B', 'C', 'D'}) {
     if (auto *d = m_deckManager->deck(cid)) {
-      d->setErrorLogCallback([this, cid](const std::string &act,
-                                         int32_t code,
+      d->setErrorLogCallback([this, cid](const std::string &act, int32_t code,
                                          const std::string &target,
                                          const std::string &msg) {
         log::LogService::instance().log(
@@ -117,14 +117,12 @@ bool EngineController::initialize(bool offlineMode) {
             const QString trackPath =
                 QString::fromStdString(ev.currentTrackPath);
             const bool isNormalEnd =
-                (ev.reason == "end_of_folder" ||
-                 ev.reason == "user_stop" ||
+                (ev.reason == "end_of_folder" || ev.reason == "user_stop" ||
                  ev.reason == "deck_locked" ||
                  ev.reason == "comparative_switch" ||
                  ev.reason == "track_replaced" ||
                  ev.reason == "new_folder_session" ||
-                 ev.reason == "track_closed" ||
-                 ev.reason == "app_shutdown");
+                 ev.reason == "track_closed" || ev.reason == "app_shutdown");
             const QString statusStr =
                 (ev.errorCode != 0) ? QStringLiteral("Failed")
                                     : (isNormalEnd ? QStringLiteral("Info")
@@ -149,10 +147,10 @@ bool EngineController::initialize(bool offlineMode) {
             }
 
             log::LogService::instance().log(
-                QStringLiteral("FolderSession"),
-                QStringLiteral("EndSession"),
+                QStringLiteral("FolderSession"), QStringLiteral("EndSession"),
                 statusStr,
-                QString("Folder session ended in Deck %1 (reason: %2, track %3/%4)")
+                QString(
+                    "Folder session ended in Deck %1 (reason: %2, track %3/%4)")
                     .arg(deckStr, reasonStr)
                     .arg(ev.totalTracks > 0 ? ev.trackIndex + 1 : 0)
                     .arg(ev.totalTracks),
@@ -167,16 +165,19 @@ bool EngineController::initialize(bool offlineMode) {
   }
 
   auto canonPath = [](const std::string &p) -> QString {
-    if (p.empty()) return QString();
+    if (p.empty())
+      return QString();
     std::error_code ec;
     const auto cp = std::filesystem::weakly_canonical(p, ec);
     return ec ? QString::fromStdString(p) : QString::fromStdString(cp.string());
   };
 
-  // Wire targeted workspace playback-stop guard (only stops decks matching affectedPaths)
+  // Wire targeted workspace playback-stop guard (only stops decks matching
+  // affectedPaths)
   engine::workspace::WorkspaceManager::instance().setStopPlaybackCallback(
       [this, canonPath](const QStringList &affectedPaths) {
-        if (!m_deckManager) return;
+        if (!m_deckManager)
+          return;
         QStringList canonAffected;
         canonAffected.reserve(affectedPaths.size());
         for (const QString &ap : affectedPaths) {
@@ -186,7 +187,8 @@ bool EngineController::initialize(bool offlineMode) {
           if (auto *d = m_deckManager->deck(cid)) {
             const QString loadedCanon = canonPath(d->trackInfo().path);
             if (canonAffected.isEmpty() ||
-                (!loadedCanon.isEmpty() && canonAffected.contains(loadedCanon))) {
+                (!loadedCanon.isEmpty() &&
+                 canonAffected.contains(loadedCanon))) {
               d->stop("workspace_file_changed");
               emit deckStateChanged(QString(cid));
             }
@@ -197,7 +199,8 @@ bool EngineController::initialize(bool offlineMode) {
   // Wire workspace Stage-2 external modification metadata reload callback
   engine::workspace::WorkspaceManager::instance().setMetadataReloadCallback(
       [this, canonPath](const QStringList &modifiedAbsPaths) {
-        if (!m_deckManager || modifiedAbsPaths.isEmpty()) return;
+        if (!m_deckManager || modifiedAbsPaths.isEmpty())
+          return;
         QStringList canonMod;
         canonMod.reserve(modifiedAbsPaths.size());
         for (const QString &mp : modifiedAbsPaths) {
@@ -240,7 +243,8 @@ bool EngineController::initialize(bool offlineMode) {
   m_uiListeningCorrection.setEnabled(true);
   m_uiListeningCorrection.applyPreset("Monitor Flat");
 
-  // Phase 3: External Insert Node (Default to OFF / Bypassed) + PipeWire Transport
+  // Phase 3: External Insert Node (Default to OFF / Bypassed) + PipeWire
+  // Transport
   m_calActive = false;
   m_calSettleTicks = 0;
   m_calCompletedProbes = 0;
@@ -249,7 +253,8 @@ bool EngineController::initialize(bool offlineMode) {
   }
   m_insertNode = std::make_shared<engine::insert::ExternalInsertNode>(
       "External Insert", engine::pipeline::NodeAffiliation::RenderCommon);
-  m_insertTransport = std::make_shared<engine::insert::PipeWireInsertTransport>();
+  m_insertTransport =
+      std::make_shared<engine::insert::PipeWireInsertTransport>();
   m_insertTransport->setSimulationMode(offlineMode);
   m_insertNode->bridge().setTransport(m_insertTransport);
   m_insertNode->bridge().setRequireLiveTransport(true);
@@ -316,11 +321,23 @@ bool EngineController::initialize(bool offlineMode) {
   m_gainSmootherR.reset(m_masterGainR.load(std::memory_order_relaxed));
 
   // 5. Initialize Native PipeWire AudioOutput
+  const bool hasSettings = SettingsManager::instance().isLoaded();
+  const uint32_t initSampleRate =
+      hasSettings ? static_cast<uint32_t>(std::llround(std::clamp(
+                        SettingsManager::instance().audioFixedSampleRate(),
+                        8000.0, 768000.0)))
+                  : 48000u;
+  const uint32_t initBufferFrames =
+      hasSettings
+          ? static_cast<uint32_t>(std::clamp(
+                SettingsManager::instance().audioBufferFrames(), 16, 16384))
+          : 256u;
+
   m_audioOutput = std::make_unique<engine::backend::PipeWireAudioOutput>();
   if (offlineMode) {
     m_audioOutput->setOfflineSimulationMode(true);
   }
-  bool initOk = m_audioOutput->initialize(48000, 256);
+  bool initOk = m_audioOutput->initialize(initSampleRate, initBufferFrames);
   if (!initOk) {
     log::LogService::instance().start();
     QJsonObject det;
@@ -336,22 +353,54 @@ bool EngineController::initialize(bool offlineMode) {
     return false;
   }
 
-  // Wire format-aware real-time audio callback (§3.4, §4.3, strictly ZERO RT allocs)
-  m_audioControlManager = std::make_unique<engine::backend::AudioControlManager>(
-      std::make_unique<engine::backend::PipeWireControlAdapter>(m_audioOutput.get()));
+  // Wire format-aware real-time audio callback (§3.4, §4.3, strictly ZERO RT
+  // allocs)
+  m_audioControlManager =
+      std::make_unique<engine::backend::AudioControlManager>(
+          std::make_unique<engine::backend::PipeWireControlAdapter>(
+              m_audioOutput.get()));
+
+  if (hasSettings) {
+    const QString savedDevice = SettingsManager::instance().audioTargetDevice();
+    if (!savedDevice.isEmpty()) {
+      std::string devErr;
+      if (!m_audioControlManager->selectOutputDevice(savedDevice.toStdString(),
+                                                     &devErr)) {
+        m_audioControlManager->selectOutputDevice("default");
+      }
+    }
+    const QString savedFmt =
+        SettingsManager::instance().audioPcmFormat().trimmed().toUpper();
+    using engine::backend::OutputPcmFormat;
+    OutputPcmFormat fmt = OutputPcmFormat::F32LE;
+    if (savedFmt == QStringLiteral("S24_32LE") ||
+        savedFmt == QStringLiteral("S24_32")) {
+      fmt = OutputPcmFormat::S24_32LE;
+    } else if (savedFmt == QStringLiteral("S16LE") ||
+               savedFmt == QStringLiteral("S16")) {
+      fmt = OutputPcmFormat::S16LE;
+    } else if (savedFmt == QStringLiteral("S32LE") ||
+               savedFmt == QStringLiteral("S32")) {
+      fmt = OutputPcmFormat::S32LE;
+    }
+    m_audioControlManager->setPreferredPcmFormat(fmt);
+  }
 
   m_audioOutput->setRawPcmAudioCallback(
       [this](void *outInterleaved, size_t frames,
              engine::backend::OutputPcmFormat fmt) {
         using engine::backend::OutputPcmFormat;
         const size_t frameBytes =
-            static_cast<size_t>(engine::backend::outputPcmFormatBytesPerSample(fmt)) * 2u;
+            static_cast<size_t>(
+                engine::backend::outputPcmFormatBytesPerSample(fmt)) *
+            2u;
         if (!m_deckManager || !m_pipeline) {
           std::memset(outInterleaved, 0, frames * frameBytes);
           return;
         }
 
-        engine::format::SampleFormat sampleFmt = engine::format::SampleFormat::Float32;
+        engine::format::SampleFormat sampleFmt =
+            engine::format::SampleFormat::Float32;
         switch (fmt) {
         case OutputPcmFormat::F32LE:
           sampleFmt = engine::format::SampleFormat::Float32;
@@ -367,7 +416,8 @@ bool EngineController::initialize(bool offlineMode) {
           break;
         }
 
-        const int curRoute = m_outputRoutingMode.load(std::memory_order_relaxed);
+        const int curRoute =
+            m_outputRoutingMode.load(std::memory_order_relaxed);
         m_pipeline->setOutputMode(
             curRoute == 1 ? engine::routing::OutputPathMode::RenderMonitorPath
                           : engine::routing::OutputPathMode::ListeningPath);
@@ -376,7 +426,8 @@ bool EngineController::initialize(bool offlineMode) {
         size_t offset = 0;
         while (remaining > 0) {
           const size_t chunk = std::min(remaining, size_t(4096));
-          m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(), chunk);
+          m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(),
+                                           chunk);
 
           const bool isMuted = m_masterMute.load(std::memory_order_relaxed);
           m_gainSmootherL.setTarget(
@@ -388,11 +439,12 @@ bool EngineController::initialize(bool offlineMode) {
               activeD ? activeD->levelMatchLinearGain() : 1.0;
           const bool directBypass =
               m_directModeEnabled.load(std::memory_order_acquire);
-          const bool formatUsesDither =
-              (fmt == OutputPcmFormat::S24_32LE || fmt == OutputPcmFormat::S16LE);
+          const bool formatUsesDither = (fmt == OutputPcmFormat::S24_32LE ||
+                                         fmt == OutputPcmFormat::S16LE);
           if (m_audioOutput) {
             m_audioOutput->setDitherActiveState(
-                formatUsesDither && m_pipeline->liveDitherEnabled() && !directBypass);
+                formatUsesDither && m_pipeline->liveDitherEnabled() &&
+                !directBypass);
           }
 
           uint8_t *chunkOut =
@@ -752,7 +804,33 @@ bool EngineController::initialize(bool offlineMode) {
       "Desk32 Studio Console engine initialized successfully.", "System",
       "PipeWire");
 
+  applyInitialSettingsIfLoaded();
+
   return true;
+}
+
+void EngineController::applyInitialSettingsIfLoaded() {
+  auto &sm = SettingsManager::instance();
+  if (!sm.isLoaded()) {
+    return;
+  }
+  m_applyingInitialSettings = true;
+
+  const double savedRate = sm.audioFixedSampleRate();
+  if (savedRate >= 8000.0 && savedRate <= 768000.0 &&
+      std::abs(savedRate - graphSampleRate()) > 0.5) {
+    setFixedGraphSampleRate(savedRate);
+  } else {
+    m_fixedGraphSampleRate.store(savedRate, std::memory_order_relaxed);
+  }
+  setLiveDitherEnabled(sm.liveDitherEnabled());
+  setDirectModeEnabled(sm.directModeDefault());
+  setListeningPreset(sm.listeningPreset());
+  setReverbLimits(sm.reverbMaxTailSeconds(), sm.reverbMaxProcessingMs());
+  setExternalInsertPosition(sm.externalInsertPosition());
+  setExternalInsertDisconnectPolicy(sm.externalInsertDisconnectPolicy());
+
+  m_applyingInitialSettings = false;
 }
 
 void EngineController::recordSessionStart(const QString &graphicsBackend,
@@ -1108,7 +1186,8 @@ void EngineController::checkAudioHealthAndGraph() {
         QString(), QString(), log::ErrorCode::LogQueueOverflow, 0.0);
   }
 
-  // 5 & 6. External Insert DisconnectPolicy::StopPlayback & live graph disconnect/mismatch polling (§8.3)
+  // 5 & 6. External Insert DisconnectPolicy::StopPlayback & live graph
+  // disconnect/mismatch polling (§8.3)
   pollExternalInsertHealth();
 }
 
@@ -1132,7 +1211,8 @@ void EngineController::pollExternalInsertHealth() {
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("StopPlaybackPolicy"),
         QStringLiteral("Warning"),
-        QStringLiteral("External Insert disconnected with StopPlayback policy: stopped active deck playback."),
+        QStringLiteral("External Insert disconnected with StopPlayback policy: "
+                       "stopped active deck playback."),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
@@ -1154,7 +1234,8 @@ void EngineController::pollExternalInsertHealth() {
       (st == engine::insert::InsertState::Connected ||
        st == engine::insert::InsertState::Active);
 
-  if (rtDisconnected || (activeOrConnected && m_insertTransport->consumeGraphDisconnectEvent())) {
+  if (rtDisconnected ||
+      (activeOrConnected && m_insertTransport->consumeGraphDisconnectEvent())) {
     if (m_calActive) {
       finishHardwareCalibration(false, true);
     }
@@ -1162,8 +1243,7 @@ void EngineController::pollExternalInsertHealth() {
     syncExternalInsertBypassToPipeline(true);
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("GraphDisconnect"),
-        QStringLiteral("Warning"),
-        QString::fromStdString(bridge.lastError()),
+        QStringLiteral("Warning"), QString::fromStdString(bridge.lastError()),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
@@ -1171,18 +1251,19 @@ void EngineController::pollExternalInsertHealth() {
     emit externalInsertStatusChanged();
     emit diagnosticsChanged();
   } else if (rtMismatch ||
-             (activeOrConnected &&
-              (m_insertTransport->hasRateMismatch() ||
-               m_insertTransport->hasBufferMismatch()))) {
+             (activeOrConnected && (m_insertTransport->hasRateMismatch() ||
+                                    m_insertTransport->hasBufferMismatch()))) {
     if (m_calActive) {
       finishHardwareCalibration(false, true);
     }
-    const bool isRate = rtMismatch ? rtMismatchIsRate : m_insertTransport->hasRateMismatch();
+    const bool isRate =
+        rtMismatch ? rtMismatchIsRate : m_insertTransport->hasRateMismatch();
     const auto diag = m_insertTransport->diagnostics();
-    const std::string detail = diag.errorDetail.empty()
-                                   ? (isRate ? "PipeWire insert sample rate mismatch"
-                                             : "PipeWire insert buffer quantum mismatch")
-                                   : diag.errorDetail;
+    const std::string detail =
+        diag.errorDetail.empty()
+            ? (isRate ? "PipeWire insert sample rate mismatch"
+                      : "PipeWire insert buffer quantum mismatch")
+            : diag.errorDetail;
     bridge.handleTransportMismatch(
         isRate ? engine::insert::InsertState::RateMismatch
                : engine::insert::InsertState::BufferMismatch,
@@ -1190,9 +1271,9 @@ void EngineController::pollExternalInsertHealth() {
     syncExternalInsertBypassToPipeline(true);
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"),
-        isRate ? QStringLiteral("RateMismatch") : QStringLiteral("BufferMismatch"),
-        QStringLiteral("Warning"),
-        QString::fromStdString(detail),
+        isRate ? QStringLiteral("RateMismatch")
+               : QStringLiteral("BufferMismatch"),
+        QStringLiteral("Warning"), QString::fromStdString(detail),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
@@ -1338,7 +1419,8 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
     return;
   const bool directOn = m_directModeEnabled.load(std::memory_order_acquire);
   double targetRateD = m_fixedGraphSampleRate.load(std::memory_order_relaxed);
-  if (targetRateD <= 0.0) targetRateD = 48000.0;
+  if (targetRateD <= 0.0)
+    targetRateD = 48000.0;
   if (directOn) {
     auto *active = m_deckManager->activeDeck();
     if (!active || active->trackInfo().sampleRate <= 0.0) {
@@ -1354,9 +1436,11 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
       (targetRate != currentRequested ||
        std::abs(m_deckManager->graphRate() - targetRateD) > 0.5)) {
     double silenceMs = 0.0;
-    const bool ok = m_audioControlManager
-                        ? m_audioControlManager->renegotiateSampleRate(targetRate, silenceMs)
-                        : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
+    const bool ok =
+        m_audioControlManager
+            ? m_audioControlManager->renegotiateSampleRate(targetRate,
+                                                           silenceMs)
+            : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
     m_deckManager->setGraphRate(targetRateD);
     if (m_pipeline) {
       m_pipeline->setGraphSampleRate(targetRateD);
@@ -1367,7 +1451,8 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
       const auto st = m_insertNode->bridge().state();
       if ((st == engine::insert::InsertState::Connected ||
            st == engine::insert::InsertState::Active) &&
-          std::abs(m_insertNode->bridge().config().sampleRate - targetRateD) > 0.5) {
+          std::abs(m_insertNode->bridge().config().sampleRate - targetRateD) >
+              0.5) {
         m_insertNode->bridge().handleTransportMismatch(
             engine::insert::InsertState::RateMismatch,
             "Sample rate mismatch after graph rate change");
@@ -1396,6 +1481,9 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
   if (sampleRate < 8000.0 || sampleRate > 768000.0)
     return false;
   m_fixedGraphSampleRate.store(sampleRate, std::memory_order_relaxed);
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setAudioFixedSampleRate(sampleRate);
+  }
   if (m_directModeEnabled.load(std::memory_order_acquire)) {
     // Store fixed rate preference for when Direct Mode is turned off
     emit diagnosticsChanged();
@@ -1406,9 +1494,10 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
 
   const uint32_t targetRate = static_cast<uint32_t>(std::llround(sampleRate));
   double silenceMs = 0.0;
-  const bool ok = m_audioControlManager
-                      ? m_audioControlManager->renegotiateSampleRate(targetRate, silenceMs)
-                      : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
+  const bool ok =
+      m_audioControlManager
+          ? m_audioControlManager->renegotiateSampleRate(targetRate, silenceMs)
+          : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
   m_deckManager->setGraphRate(sampleRate);
   if (m_pipeline) {
     m_pipeline->setGraphSampleRate(sampleRate);
@@ -1419,7 +1508,8 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
     const auto st = m_insertNode->bridge().state();
     if ((st == engine::insert::InsertState::Connected ||
          st == engine::insert::InsertState::Active) &&
-        std::abs(m_insertNode->bridge().config().sampleRate - sampleRate) > 0.5) {
+        std::abs(m_insertNode->bridge().config().sampleRate - sampleRate) >
+            0.5) {
       m_insertNode->bridge().handleTransportMismatch(
           engine::insert::InsertState::RateMismatch,
           "Sample rate mismatch after fixed graph rate change");
@@ -1430,8 +1520,7 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
   emit graphSampleRateChanged(sampleRate);
   emit diagnosticsChanged();
   log::LogService::instance().log(
-      QStringLiteral("AudioEngine"),
-      QStringLiteral("FixedSampleRateChange"),
+      QStringLiteral("AudioEngine"), QStringLiteral("FixedSampleRateChange"),
       ok ? QStringLiteral("Success") : QStringLiteral("Warning"),
       QString("Fixed graph sample rate set to %1 Hz (silence: %2 ms)")
           .arg(targetRate)
@@ -1500,8 +1589,8 @@ QVariantList EngineController::enumerateOutputDevices() const {
     m["isDefault"] = d.isDefault;
     m["sampleRate"] = static_cast<int>(d.sampleRate);
     m["channels"] = static_cast<int>(d.channels);
-    m["nativeFormat"] = QString::fromUtf8(
-        engine::backend::outputPcmFormatName(d.nativeFormat));
+    m["nativeFormat"] =
+        QString::fromUtf8(engine::backend::outputPcmFormatName(d.nativeFormat));
     list.append(m);
   }
   return list;
@@ -1525,6 +1614,9 @@ bool EngineController::selectOutputDevice(const QString &deviceIdOrName) {
         QStringLiteral("Success"),
         QString("Selected audio output device: %1").arg(deviceIdOrName),
         QStringLiteral("Device"), deviceIdOrName);
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setAudioTargetDevice(deviceIdOrName);
+    }
   }
   emit diagnosticsChanged();
   return ok;
@@ -1541,11 +1633,16 @@ bool EngineController::setOutputBufferFrames(int bufferFrames) {
     return false;
   const bool ok = m_audioControlManager->applyLatencySetting(
       static_cast<uint32_t>(bufferFrames), graphSampleRate());
+  if (ok && SettingsManager::instance().isLoaded() &&
+      !m_applyingInitialSettings) {
+    SettingsManager::instance().setAudioBufferFrames(bufferFrames);
+  }
   if (ok && m_insertNode) {
     const auto st = m_insertNode->bridge().state();
     if ((st == engine::insert::InsertState::Connected ||
          st == engine::insert::InsertState::Active) &&
-        m_insertNode->bridge().config().bufferSize != static_cast<size_t>(bufferFrames)) {
+        m_insertNode->bridge().config().bufferSize !=
+            static_cast<size_t>(bufferFrames)) {
       m_insertNode->bridge().handleTransportMismatch(
           engine::insert::InsertState::BufferMismatch,
           "Buffer size mismatch after output quantum change");
@@ -1574,14 +1671,18 @@ void EngineController::setOutputPcmFormat(const QString &formatName) {
   if (m_pipeline) {
     m_pipeline->invalidateLevel1Measurement();
   }
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setAudioPcmFormat(
+        QString::fromUtf8(engine::backend::outputPcmFormatName(fmt)));
+  }
   emit diagnosticsChanged();
 }
 
 QString EngineController::outputPcmFormat() const {
   if (!m_audioOutput)
     return QStringLiteral("F32LE");
-  return QString::fromUtf8(engine::backend::outputPcmFormatName(
-      m_audioOutput->negotiatedFormat()));
+  return QString::fromUtf8(
+      engine::backend::outputPcmFormatName(m_audioOutput->negotiatedFormat()));
 }
 
 void EngineController::setLiveDitherEnabled(bool enabled) {
@@ -1593,6 +1694,9 @@ void EngineController::setLiveDitherEnabled(bool enabled) {
     const bool directBypass =
         m_directModeEnabled.load(std::memory_order_acquire);
     m_audioOutput->setDitherActiveState(enabled && !directBypass);
+  }
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setLiveDitherEnabled(enabled);
   }
   emit diagnosticsChanged();
 }
@@ -1619,6 +1723,9 @@ void EngineController::updateSourceBitDepthFromActiveDeck() {
 void EngineController::setDirectModeEnabled(bool enabled) {
   const bool prev =
       m_directModeEnabled.exchange(enabled, std::memory_order_acq_rel);
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setDirectModeDefault(enabled);
+  }
   if (prev != enabled) {
     if (m_pipeline) {
       m_pipeline->invalidateLevel1Measurement();
@@ -1643,8 +1750,8 @@ int EngineController::directModeStatus() const {
 }
 
 int EngineController::bitPerfectStatus() const {
-  // 0 = Unknown / Indeterminate, 1 = NotVerified (processing/resampling/dither/truncation
-  // active), 2 = Verified
+  // 0 = Unknown / Indeterminate, 1 = NotVerified
+  // (processing/resampling/dither/truncation active), 2 = Verified
   const auto *dm = m_deckManager.get();
   const auto *active = dm ? dm->activeDeck() : nullptr;
   const bool hasOpenTrack = active && active->isOpen();
@@ -1671,8 +1778,10 @@ int EngineController::bitPerfectStatus() const {
     }
 
     const int routeMode = m_outputRoutingMode.load(std::memory_order_relaxed);
-    if ((routeMode == 0 && (listeningMuted() || std::abs(listeningVolume() - 1.0) > 1e-6)) ||
-        (routeMode == 1 && (renderMonitorMuted() || std::abs(renderMonitorVolume() - 1.0) > 1e-6))) {
+    if ((routeMode == 0 &&
+         (listeningMuted() || std::abs(listeningVolume() - 1.0) > 1e-6)) ||
+        (routeMode == 1 && (renderMonitorMuted() ||
+                            std::abs(renderMonitorVolume() - 1.0) > 1e-6))) {
       return 1;
     }
 
@@ -1720,24 +1829,25 @@ int EngineController::bitPerfectStatus() const {
   const uint64_t requiredGen = m_pipeline ? m_pipeline->level1Generation() : 0;
   const auto telem = m_pipeline ? m_pipeline->currentTelemetry()
                                 : engine::pipeline::DspTelemetry{};
-  const bool level1Lossless = m_pipeline &&
-                              (telem.processedFrameCount > 0) &&
-                              (telem.level1Generation == requiredGen) &&
-                              (telem.level1DirectBypassActive == directBypass) &&
-                              telem.level1SamplesIdentical &&
-                              telem.level1OutputPcmLossless;
+  const bool level1Lossless =
+      m_pipeline && (telem.processedFrameCount > 0) &&
+      (telem.level1Generation == requiredGen) &&
+      (telem.level1DirectBypassActive == directBypass) &&
+      telem.level1SamplesIdentical && telem.level1OutputPcmLossless;
   if (dmStatus == 2 && hasOpenTrack && level1Lossless) {
     return 2;
   }
   if (!directBypass && hasOpenTrack && level1Lossless) {
-    return 2; // Level 1 software bit-perfect verified even when Direct Mode is OFF (§3.4)
+    return 2; // Level 1 software bit-perfect verified even when Direct Mode is
+              // OFF (§3.4)
   }
 
   return 0;
 }
 
 int EngineController::bitPerfectModeState() const {
-  // 0 = Unsupported, 1 = Indeterminate, 2 = NotVerified, 3 = Verified, 4 = Direct
+  // 0 = Unsupported, 1 = Indeterminate, 2 = NotVerified, 3 = Verified, 4 =
+  // Direct
   if (!m_audioOutput ||
       m_audioOutput->state() == engine::backend::StreamState::Unconnected ||
       m_audioOutput->state() == engine::backend::StreamState::Error) {
@@ -1768,11 +1878,16 @@ int EngineController::bitPerfectModeState() const {
 
 QString EngineController::bitPerfectModeStateText() const {
   switch (bitPerfectModeState()) {
-  case 0: return QStringLiteral("Unsupported");
-  case 1: return QStringLiteral("Indeterminate");
-  case 2: return QStringLiteral("NotVerified");
-  case 3: return QStringLiteral("Verified");
-  case 4: return QStringLiteral("Direct");
+  case 0:
+    return QStringLiteral("Unsupported");
+  case 1:
+    return QStringLiteral("Indeterminate");
+  case 2:
+    return QStringLiteral("NotVerified");
+  case 3:
+    return QStringLiteral("Verified");
+  case 4:
+    return QStringLiteral("Direct");
   }
   return QStringLiteral("Indeterminate");
 }
@@ -1785,11 +1900,12 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   report["legacyStatus"] = bitPerfectStatus();
 
   const uint64_t requiredGen = m_pipeline ? m_pipeline->level1Generation() : 0;
-  const auto telem = m_pipeline ? m_pipeline->currentTelemetry() : engine::pipeline::DspTelemetry{};
-  const bool level1Fresh = telem.processedFrameCount > 0 && telem.level1Generation == requiredGen;
-  const bool level1Pass =
-      level1Fresh && telem.level1SamplesIdentical &&
-      telem.level1OutputPcmLossless;
+  const auto telem = m_pipeline ? m_pipeline->currentTelemetry()
+                                : engine::pipeline::DspTelemetry{};
+  const bool level1Fresh =
+      telem.processedFrameCount > 0 && telem.level1Generation == requiredGen;
+  const bool level1Pass = level1Fresh && telem.level1SamplesIdentical &&
+                          telem.level1OutputPcmLossless;
   QVariantMap level1;
   level1["internalSamplesIdentical"] = telem.level1SamplesIdentical;
   level1["outputPcmLossless"] = telem.level1OutputPcmLossless;
@@ -1802,11 +1918,14 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   level1["inputHashHex"] = QStringLiteral("0x%1").arg(
       static_cast<qulonglong>(telem.level1InputHash), 16, 16, QLatin1Char('0'));
   level1["outputHashHex"] = QStringLiteral("0x%1").arg(
-      static_cast<qulonglong>(telem.level1OutputHash), 16, 16, QLatin1Char('0'));
+      static_cast<qulonglong>(telem.level1OutputHash), 16, 16,
+      QLatin1Char('0'));
   level1["hashMatched"] = (telem.processedFrameCount > 0) &&
                           (telem.level1InputHash == telem.level1OutputHash);
-  level1["verifiedBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1VerifiedBlocks() : 0);
-  level1["totalBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1TotalBlocks() : 0);
+  level1["verifiedBlocks"] = static_cast<qulonglong>(
+      m_pipeline ? m_pipeline->level1VerifiedBlocks() : 0);
+  level1["totalBlocks"] =
+      static_cast<qulonglong>(m_pipeline ? m_pipeline->level1TotalBlocks() : 0);
   level1["status"] = level1Pass
                          ? QStringLiteral("Verified")
                          : (!level1Fresh ? QStringLiteral("Indeterminate")
@@ -1818,9 +1937,13 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   const bool hasTrack = active && active->isOpen();
   const double trackRate = hasTrack ? active->trackInfo().sampleRate : 0.0;
   const double gRate = graphSampleRate();
-  const bool noResample = hasTrack && trackRate > 0.0 && std::abs(trackRate - gRate) <= 0.5;
-  const auto diag = m_audioOutput ? m_audioOutput->diagnostics() : engine::backend::StreamDiagnostics{};
-  const bool backendOk = m_audioOutput && diag.directModeStatus == engine::backend::DirectModeStatus::Active;
+  const bool noResample =
+      hasTrack && trackRate > 0.0 && std::abs(trackRate - gRate) <= 0.5;
+  const auto diag = m_audioOutput ? m_audioOutput->diagnostics()
+                                  : engine::backend::StreamDiagnostics{};
+  const bool backendOk =
+      m_audioOutput &&
+      diag.directModeStatus == engine::backend::DirectModeStatus::Active;
 
   QVariantMap level2;
   level2["backendStatus"] = backendStatusText();
@@ -1840,7 +1963,8 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   level2["status"] = (backendOk && noResample && diag.outputFormatLossless &&
                       !diag.ditherActive && bitPerfectStatus() == 2)
                          ? QStringLiteral("Verified")
-                         : ((diag.directModeStatus == engine::backend::DirectModeStatus::Disabled ||
+                         : ((diag.directModeStatus ==
+                                 engine::backend::DirectModeStatus::Disabled ||
                              !diag.outputFormatLossless)
                                 ? QStringLiteral("NotVerified")
                                 : QStringLiteral("Indeterminate"));
@@ -1850,8 +1974,10 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   level3["status"] = QStringLiteral("NotVerified");
   level3["unverifiable"] = true;
   level3["externalHardwareCaptureRequired"] = true;
-  level3["statusText"] = QStringLiteral("Unverifiable (External hardware capture required)");
-  level3["message"] = QStringLiteral("Level 3 verification requires external hardware loopback capture comparison.");
+  level3["statusText"] =
+      QStringLiteral("Unverifiable (External hardware capture required)");
+  level3["message"] = QStringLiteral("Level 3 verification requires external "
+                                     "hardware loopback capture comparison.");
   report["level3"] = level3;
 
   return report;
@@ -1880,17 +2006,18 @@ void EngineController::checkBitPerfectVerificationTransition() {
   m_lastLoggedBitPerfectModeState = modeState;
 
   const QVariantMap report = getBitPerfectVerificationReport();
-  const QString modeText = report.value(QStringLiteral("modeStateText")).toString();
+  const QString modeText =
+      report.value(QStringLiteral("modeStateText")).toString();
   const QVariantMap l1 = report.value(QStringLiteral("level1")).toMap();
   const QVariantMap l2 = report.value(QStringLiteral("level2")).toMap();
   const QString json = QString::fromUtf8(
       QJsonDocument::fromVariant(report).toJson(QJsonDocument::Compact));
 
   log::LogService::instance().log(
-      QStringLiteral("AudioEngine"),
-      QStringLiteral("BitPerfectVerified"),
+      QStringLiteral("AudioEngine"), QStringLiteral("BitPerfectVerified"),
       QStringLiteral("Success"),
-      QString("Bit-Perfect verification entered %1 (L1=%2, %3/%4 blocks, maxDiff=%5; L2=%6, %7 %8 Hz; L3=Unverifiable)")
+      QString("Bit-Perfect verification entered %1 (L1=%2, %3/%4 blocks, "
+              "maxDiff=%5; L2=%6, %7 %8 Hz; L3=Unverifiable)")
           .arg(modeText)
           .arg(l1.value(QStringLiteral("status")).toString())
           .arg(l1.value(QStringLiteral("verifiedBlocks")).toULongLong())
@@ -1899,9 +2026,7 @@ void EngineController::checkBitPerfectVerificationTransition() {
           .arg(l2.value(QStringLiteral("status")).toString())
           .arg(l2.value(QStringLiteral("negotiatedFormat")).toString())
           .arg(l2.value(QStringLiteral("actualRate")).toInt()),
-      QStringLiteral("AudioEngine"),
-      QStringLiteral("BitPerfect"),
-      json);
+      QStringLiteral("AudioEngine"), QStringLiteral("BitPerfect"), json);
 }
 
 int EngineController::backendStatus() const {
@@ -2400,7 +2525,8 @@ void EngineController::play(const QString &deckId) {
     if (m_deckManager->activeDeckId() != id) {
       switchDeck(deckId, m_switchingMode);
     }
-    // Auto-pause any other playing deck so simultaneous dual-deck playback does not occur.
+    // Auto-pause any other playing deck so simultaneous dual-deck playback does
+    // not occur.
     for (char otherId : {'A', 'B', 'C', 'D'}) {
       if (otherId == id)
         continue;
@@ -2411,8 +2537,9 @@ void EngineController::play(const QString &deckId) {
           const auto oInfo = other->trackInfo();
           const double oSr = oInfo.sampleRate;
           const double oPosMs =
-              (oSr > 0.0) ? (static_cast<double>(other->playhead()) * 1000.0 / oSr)
-                          : 0.0;
+              (oSr > 0.0)
+                  ? (static_cast<double>(other->playhead()) * 1000.0 / oSr)
+                  : 0.0;
           const double oDurMs =
               (oSr > 0.0)
                   ? (static_cast<double>(oInfo.totalFrames) * 1000.0 / oSr)
@@ -2421,7 +2548,8 @@ void EngineController::play(const QString &deckId) {
           oDet.insert(QStringLiteral("deck"), QString(otherId));
           oDet.insert(QStringLiteral("trigger"), QStringLiteral("auto_pause"));
           oDet.insert(QStringLiteral("reason_deck"), deckId);
-          oDet.insert(QStringLiteral("path"), QString::fromStdString(oInfo.path));
+          oDet.insert(QStringLiteral("path"),
+                      QString::fromStdString(oInfo.path));
           oDet.insert(QStringLiteral("position_ms"), oPosMs);
           oDet.insert(QStringLiteral("duration_ms_track"), oDurMs);
           log::LogService::instance().log(
@@ -2702,26 +2830,47 @@ bool EngineController::copyDeckTrackToWorkspace(const QString &deckId) {
   if (!m_deckManager || deckId.isEmpty())
     return false;
   auto &wsMgr = engine::workspace::WorkspaceManager::instance();
-  if (!wsMgr.hasOpenWorkspace())
+  if (!wsMgr.hasOpenWorkspace()) {
+    emit deckWorkspaceImportFinished(
+        deckId, false, QStringLiteral("Failed"),
+        QStringLiteral("No workspace is open (Read-Only mode)."));
     return false;
+  }
 
   char id = deckId.toUpper().at(0).toLatin1();
   auto *d = m_deckManager->deck(id);
-  if (!d || d->trackInfo().path.empty())
+  if (!d || d->trackInfo().path.empty()) {
+    emit deckWorkspaceImportFinished(
+        deckId, false, QStringLiteral("Failed"),
+        QString("Deck %1 has no track loaded.").arg(deckId));
     return false;
+  }
 
   const QString srcPath = QString::fromStdString(d->trackInfo().path);
   if (wsMgr.isPathInsideOpenWorkspace(srcPath, false)) {
-    log::LogService::instance().log(
-        "Workspace", "CopyDeckTrack", "Info",
-        QString("Skipped self-copy: Deck %1 track is already inside the open workspace (%2)")
-            .arg(deckId, srcPath),
-        "Deck", deckId);
+    const QString msg = QString("Skipped self-copy: Deck %1 track is already "
+                                "inside the open workspace (%2)")
+                            .arg(deckId, srcPath);
+    log::LogService::instance().log("Workspace", "CopyDeckTrack", "Info", msg,
+                                    "Deck", deckId);
+    emit deckWorkspaceImportFinished(deckId, false, QStringLiteral("SelfCopy"),
+                                     msg);
     return false;
   }
   const auto res = wsMgr.importFile(srcPath);
-  return res.status == engine::workspace::ImportResultStatus::Imported ||
-         res.status == engine::workspace::ImportResultStatus::SkippedIdentical;
+  using engine::workspace::ImportResultStatus;
+  const bool ok = res.status == ImportResultStatus::Imported ||
+                  res.status == ImportResultStatus::SkippedIdentical;
+  const QString statusText =
+      (res.status == ImportResultStatus::Imported)
+          ? QStringLiteral("Imported")
+          : ((res.status == ImportResultStatus::SkippedIdentical)
+                 ? QStringLiteral("Skipped")
+                 : ((res.status == ImportResultStatus::Conflict)
+                        ? QStringLiteral("Conflict")
+                        : QStringLiteral("Failed")));
+  emit deckWorkspaceImportFinished(deckId, ok, statusText, res.message);
+  return ok;
 }
 
 void EngineController::setDeckOffsetFrames(const QString &deckId,
@@ -2774,7 +2923,8 @@ double EngineController::getTrackMeasuredRmsDb(const QString &deckId) const {
   if (!d || !d->isOpen() || d->trackInfo().path.empty())
     return -96.0;
   double rmsDb = -96.0;
-  engine::deck::ReferenceDeck::measureTrackRmsDb(d->trackInfo().path, 0.0, 10.0, rmsDb);
+  engine::deck::ReferenceDeck::measureTrackRmsDb(d->trackInfo().path, 0.0, 10.0,
+                                                 rmsDb);
   return rmsDb;
 }
 
@@ -2805,7 +2955,8 @@ void logAutoLevelMatchLufs(const QString &refId, const QString &tgtId,
   desk32::core::log::LogService::instance().log(
       QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
       QStringLiteral("Success"),
-      QString("Measured level match %1 -> %2: %3 dB (Ref: %4 LUFS, Target: %5 LUFS)")
+      QString("Measured level match %1 -> %2: %3 dB (Ref: %4 LUFS, Target: %5 "
+              "LUFS)")
           .arg(refId, tgtId)
           .arg(deltaDb, 0, 'f', 2)
           .arg(refLufs, 0, 'f', 2)
@@ -2816,11 +2967,13 @@ void logAutoLevelMatchLufs(const QString &refId, const QString &tgtId,
 }
 } // namespace
 
-double EngineController::measureAndApplyDeckLevelMatch(
-    const QString &referenceDeckId, const QString &targetDeckId) {
+double
+EngineController::measureAndApplyDeckLevelMatch(const QString &referenceDeckId,
+                                                const QString &targetDeckId) {
   if (!m_deckManager || referenceDeckId.isEmpty() || targetDeckId.isEmpty())
     return 0.0;
-  auto *refDeck = m_deckManager->deck(referenceDeckId.toUpper().at(0).toLatin1());
+  auto *refDeck =
+      m_deckManager->deck(referenceDeckId.toUpper().at(0).toLatin1());
   auto *tgtDeck = m_deckManager->deck(targetDeckId.toUpper().at(0).toLatin1());
   if (!refDeck || !tgtDeck || !refDeck->isOpen() || !tgtDeck->isOpen())
     return 0.0;
@@ -2828,8 +2981,10 @@ double EngineController::measureAndApplyDeckLevelMatch(
   const auto t0 = std::chrono::steady_clock::now();
   double refLufs = -70.0;
   double tgtLufs = -70.0;
-  if (!engine::deck::ReferenceDeck::measureTrackLufs(refDeck->trackInfo().path, refLufs) ||
-      !engine::deck::ReferenceDeck::measureTrackLufs(tgtDeck->trackInfo().path, tgtLufs))
+  if (!engine::deck::ReferenceDeck::measureTrackLufs(refDeck->trackInfo().path,
+                                                     refLufs) ||
+      !engine::deck::ReferenceDeck::measureTrackLufs(tgtDeck->trackInfo().path,
+                                                     tgtLufs))
     return 0.0;
   const double durationMs = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - t0)
@@ -2837,8 +2992,8 @@ double EngineController::measureAndApplyDeckLevelMatch(
 
   const double deltaDb = std::clamp(refLufs - tgtLufs, -24.0, 24.0);
   setDeckLevelMatchDb(targetDeckId, deltaDb);
-  logAutoLevelMatchLufs(referenceDeckId, targetDeckId, deltaDb, refLufs, tgtLufs,
-                        durationMs);
+  logAutoLevelMatchLufs(referenceDeckId, targetDeckId, deltaDb, refLufs,
+                        tgtLufs, durationMs);
   return deltaDb;
 }
 
@@ -2851,14 +3006,16 @@ void EngineController::startAutoLevelMatch(const QString &referenceDeckId,
     m_levelMatchThread.join();
   }
   if (!m_deckManager || referenceDeckId.isEmpty()) {
-    emit levelMatchCompleted(false, QStringLiteral("Reference deck is not available"));
+    emit levelMatchCompleted(false,
+                             QStringLiteral("Reference deck is not available"));
     return;
   }
 
   const QString refIdNorm = referenceDeckId.toUpper().left(1);
   auto *refDeck = m_deckManager->deck(refIdNorm.at(0).toLatin1());
   if (!refDeck || !refDeck->isOpen() || refDeck->trackInfo().path.empty()) {
-    emit levelMatchCompleted(false, QStringLiteral("Reference deck has no loaded track"));
+    emit levelMatchCompleted(
+        false, QStringLiteral("Reference deck has no loaded track"));
     return;
   }
   const std::string refPath = refDeck->trackInfo().path;
@@ -2870,16 +3027,20 @@ void EngineController::startAutoLevelMatch(const QString &referenceDeckId,
   std::vector<TargetSpec> targets;
   targets.reserve(static_cast<size_t>(targetDeckIds.size()));
   for (const QString &rawId : targetDeckIds) {
-    if (rawId.isEmpty()) continue;
+    if (rawId.isEmpty())
+      continue;
     const QString normId = rawId.toUpper().left(1);
-    if (normId == refIdNorm) continue;
+    if (normId == refIdNorm)
+      continue;
     auto *td = m_deckManager->deck(normId.at(0).toLatin1());
-    if (!td || !td->isOpen() || td->trackInfo().path.empty()) continue;
+    if (!td || !td->isOpen() || td->trackInfo().path.empty())
+      continue;
     targets.push_back(TargetSpec{normId, td->trackInfo().path});
   }
 
   if (targets.empty()) {
-    emit levelMatchCompleted(false, QStringLiteral("No loaded target decks to match"));
+    emit levelMatchCompleted(false,
+                             QStringLiteral("No loaded target decks to match"));
     return;
   }
 
@@ -2887,89 +3048,92 @@ void EngineController::startAutoLevelMatch(const QString &referenceDeckId,
   m_levelMatchInProgress.store(true, std::memory_order_release);
   emit levelMatchStateChanged();
 
-  m_levelMatchThread = std::thread([this, refIdNorm, refPath,
-                                    targets = std::move(targets)]() {
-    struct TargetResult {
-      QString id;
-      std::string path;
-      double lufs{-70.0};
-      bool ok{false};
-    };
+  m_levelMatchThread =
+      std::thread([this, refIdNorm, refPath, targets = std::move(targets)]() {
+        struct TargetResult {
+          QString id;
+          std::string path;
+          double lufs{-70.0};
+          bool ok{false};
+        };
 
-    const auto tStart = std::chrono::steady_clock::now();
-    double refLufs = -70.0;
-    const bool refOk = engine::deck::ReferenceDeck::measureTrackLufs(
-        refPath, refLufs, &m_levelMatchCancel);
+        const auto tStart = std::chrono::steady_clock::now();
+        double refLufs = -70.0;
+        const bool refOk = engine::deck::ReferenceDeck::measureTrackLufs(
+            refPath, refLufs, &m_levelMatchCancel);
 
-    std::vector<TargetResult> results;
-    if (refOk && !m_levelMatchCancel.load(std::memory_order_acquire)) {
-      results.reserve(targets.size());
-      for (const auto &tgt : targets) {
-        if (m_levelMatchCancel.load(std::memory_order_acquire)) break;
-        double tgtLufs = -70.0;
-        const bool ok = engine::deck::ReferenceDeck::measureTrackLufs(
-            tgt.path, tgtLufs, &m_levelMatchCancel);
-        results.push_back(TargetResult{tgt.id, tgt.path, tgtLufs, ok});
-      }
-    }
-    const double totalDurationMs =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - tStart)
-            .count();
+        std::vector<TargetResult> results;
+        if (refOk && !m_levelMatchCancel.load(std::memory_order_acquire)) {
+          results.reserve(targets.size());
+          for (const auto &tgt : targets) {
+            if (m_levelMatchCancel.load(std::memory_order_acquire))
+              break;
+            double tgtLufs = -70.0;
+            const bool ok = engine::deck::ReferenceDeck::measureTrackLufs(
+                tgt.path, tgtLufs, &m_levelMatchCancel);
+            results.push_back(TargetResult{tgt.id, tgt.path, tgtLufs, ok});
+          }
+        }
+        const double totalDurationMs =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - tStart)
+                .count();
 
-    QMetaObject::invokeMethod(
-        this,
-        [this, refIdNorm, refPath, refOk, refLufs, totalDurationMs,
-         results = std::move(results)]() {
-          const bool cancelled =
-              m_levelMatchCancel.load(std::memory_order_acquire);
-          int appliedCount = 0;
+        QMetaObject::invokeMethod(
+            this,
+            [this, refIdNorm, refPath, refOk, refLufs, totalDurationMs,
+             results = std::move(results)]() {
+              const bool cancelled =
+                  m_levelMatchCancel.load(std::memory_order_acquire);
+              int appliedCount = 0;
 
-          if (!cancelled && refOk && m_deckManager) {
-            const auto *refDeckNow =
-                m_deckManager->deck(refIdNorm.at(0).toLatin1());
-            if (refDeckNow && refDeckNow->isOpen() &&
-                refDeckNow->trackInfo().path == refPath) {
-              for (const auto &r : results) {
-                if (!r.ok) continue;
-                const auto *tgtDeckNow =
-                    m_deckManager->deck(r.id.at(0).toLatin1());
-                if (!tgtDeckNow || !tgtDeckNow->isOpen() ||
-                    tgtDeckNow->trackInfo().path != r.path) {
-                  continue;
+              if (!cancelled && refOk && m_deckManager) {
+                const auto *refDeckNow =
+                    m_deckManager->deck(refIdNorm.at(0).toLatin1());
+                if (refDeckNow && refDeckNow->isOpen() &&
+                    refDeckNow->trackInfo().path == refPath) {
+                  for (const auto &r : results) {
+                    if (!r.ok)
+                      continue;
+                    const auto *tgtDeckNow =
+                        m_deckManager->deck(r.id.at(0).toLatin1());
+                    if (!tgtDeckNow || !tgtDeckNow->isOpen() ||
+                        tgtDeckNow->trackInfo().path != r.path) {
+                      continue;
+                    }
+                    const double deltaDb =
+                        std::clamp(refLufs - r.lufs, -24.0, 24.0);
+                    setDeckLevelMatchDb(r.id, deltaDb);
+                    logAutoLevelMatchLufs(refIdNorm, r.id, deltaDb, refLufs,
+                                          r.lufs, totalDurationMs);
+                    ++appliedCount;
+                  }
                 }
-                const double deltaDb =
-                    std::clamp(refLufs - r.lufs, -24.0, 24.0);
-                setDeckLevelMatchDb(r.id, deltaDb);
-                logAutoLevelMatchLufs(refIdNorm, r.id, deltaDb, refLufs, r.lufs,
-                                      totalDurationMs);
-                ++appliedCount;
+              } else if (!cancelled && !refOk) {
+                log::LogService::instance().log(
+                    QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
+                    QStringLiteral("Error"),
+                    QString("Auto level match failed for reference Deck %1")
+                        .arg(refIdNorm),
+                    QStringLiteral("Deck"), refIdNorm);
               }
-            }
-          } else if (!cancelled && !refOk) {
-            log::LogService::instance().log(
-                QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
-                QStringLiteral("Error"),
-                QString("Auto level match failed for reference Deck %1")
-                    .arg(refIdNorm),
-                QStringLiteral("Deck"), refIdNorm);
-          }
 
-          m_levelMatchInProgress.store(false, std::memory_order_release);
-          emit levelMatchStateChanged();
-          if (!cancelled) {
-            const QString summary =
-                appliedCount > 0
-                    ? QString("Matched %1 deck(s) to Deck %2 (%3 LUFS)")
-                          .arg(appliedCount)
-                          .arg(refIdNorm)
-                          .arg(refLufs, 0, 'f', 2)
-                    : QStringLiteral("Auto level match failed or returned silence");
-            emit levelMatchCompleted(appliedCount > 0, summary);
-          }
-        },
-        Qt::QueuedConnection);
-  });
+              m_levelMatchInProgress.store(false, std::memory_order_release);
+              emit levelMatchStateChanged();
+              if (!cancelled) {
+                const QString summary =
+                    appliedCount > 0
+                        ? QString("Matched %1 deck(s) to Deck %2 (%3 LUFS)")
+                              .arg(appliedCount)
+                              .arg(refIdNorm)
+                              .arg(refLufs, 0, 'f', 2)
+                        : QStringLiteral(
+                              "Auto level match failed or returned silence");
+                emit levelMatchCompleted(appliedCount > 0, summary);
+              }
+            },
+            Qt::QueuedConnection);
+      });
 }
 
 bool EngineController::loadTrack(const QString &deckId,
@@ -3172,9 +3336,8 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
 
   const QString folderPath =
       QFileInfo(QString::fromStdString(d->trackInfo().path)).absolutePath();
-  if (folderPath.isEmpty() ||
-      engine::workspace::WorkspaceManager::instance()
-          .isPathBlockedByLockedWorkspace(folderPath)) {
+  if (folderPath.isEmpty() || engine::workspace::WorkspaceManager::instance()
+                                  .isPathBlockedByLockedWorkspace(folderPath)) {
     return false;
   }
 
@@ -3200,7 +3363,8 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
                static_cast<int>(fs.tracks().size()));
     log::LogService::instance().log(
         "FolderSession", "StartFromDeck", "Success",
-        QString("Started folder session from loaded track in Deck %1 (%2 tracks)")
+        QString(
+            "Started folder session from loaded track in Deck %1 (%2 tracks)")
             .arg(deckId)
             .arg(fs.tracks().size()),
         "Folder", folderPath,
@@ -3665,17 +3829,21 @@ void EngineController::setReverbParams(double roomSize, double damping,
 
 void EngineController::setReverbLimits(double maxTailRetentionSeconds,
                                        double maxProcessingTimeMs) {
-  const double clampedRetention = std::clamp(maxTailRetentionSeconds, 0.1, 30.0);
+  const double clampedRetention =
+      std::clamp(maxTailRetentionSeconds, 0.1, 30.0);
   const double clampedBudgetMs = std::max(0.0, maxProcessingTimeMs);
   m_reverbMaxTailRetentionSeconds.store(clampedRetention,
                                         std::memory_order_relaxed);
-  m_reverbMaxProcessingTimeMs.store(clampedBudgetMs,
-                                    std::memory_order_relaxed);
+  m_reverbMaxProcessingTimeMs.store(clampedBudgetMs, std::memory_order_relaxed);
   if (m_pipeline) {
-    m_pipeline->updateReverb(
-        m_uiReverb.roomSize(), m_uiReverb.damping(), m_uiReverb.wetLevel(),
-        m_uiReverb.predelayMs(), m_uiReverb.isTailPreserving(), true,
-        clampedRetention, clampedBudgetMs);
+    m_pipeline->updateReverb(m_uiReverb.roomSize(), m_uiReverb.damping(),
+                             m_uiReverb.wetLevel(), m_uiReverb.predelayMs(),
+                             m_uiReverb.isTailPreserving(), true,
+                             clampedRetention, clampedBudgetMs);
+  }
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setReverbMaxTailSeconds(clampedRetention);
+    SettingsManager::instance().setReverbMaxProcessingMs(clampedBudgetMs);
   }
   emit reverbParametersChanged();
 }
@@ -3704,17 +3872,18 @@ QVariantMap EngineController::getReverbParams() {
                 dynamic_cast<engine::pipeline::ReverbNode *>(mc->node(i))) {
           budgetExceeded = rev->processingBudgetExceededCount();
           tailTimeouts = rev->tailRetentionTimeoutRetireCount();
-          tailPreserveBypass =
-              rev->bypassBehavior() ==
-              engine::pipeline::BypassBehavior::TailPreserving;
+          tailPreserveBypass = rev->bypassBehavior() ==
+                               engine::pipeline::BypassBehavior::TailPreserving;
           break;
         }
       }
     }
   }
   map["tailPreservingBypassActive"] = tailPreserveBypass;
-  map["processingBudgetExceededCount"] = static_cast<qulonglong>(budgetExceeded);
-  map["tailRetentionTimeoutRetireCount"] = static_cast<qulonglong>(tailTimeouts);
+  map["processingBudgetExceededCount"] =
+      static_cast<qulonglong>(budgetExceeded);
+  map["tailRetentionTimeoutRetireCount"] =
+      static_cast<qulonglong>(tailTimeouts);
   return map;
 }
 
@@ -3725,59 +3894,62 @@ QVariantMap EngineController::getLastPresetImportReport() const {
 
 QVariantList EngineController::getAudioNodeContracts() const {
   QVariantList out;
-  auto appendChain = [&](const std::unique_ptr<engine::pipeline::AudioChain> &ch,
-                         const QString &chainLabel) {
-    if (!ch)
-      return;
-    for (size_t i = 0; i < ch->nodeCount(); ++i) {
-      const auto *n = ch->node(i);
-      if (!n)
-        continue;
-      const auto c = n->contract();
-      QVariantMap m;
-      m["chain"] = chainLabel;
-      m["name"] = QString::fromStdString(c.name);
-      switch (c.affiliation) {
-      case engine::pipeline::NodeAffiliation::RenderCommon:
-        m["affiliation"] = QStringLiteral("RenderCommon");
-        break;
-      case engine::pipeline::NodeAffiliation::ListeningCorrection:
-        m["affiliation"] = QStringLiteral("ListeningCorrection");
-        break;
-      case engine::pipeline::NodeAffiliation::RenderMonitorOnly:
-        m["affiliation"] = QStringLiteral("RenderMonitorOnly");
-        break;
-      }
-      m["inputChannels"] = static_cast<int>(c.inputChannels);
-      m["outputChannels"] = static_cast<int>(c.outputChannels);
-      m["sampleFormat"] = QStringLiteral("Float64Planar");
-      m["maxBlockSize"] = static_cast<int>(c.maxBlockSize);
-      m["sampleRate"] = c.sampleRate;
-      m["latencyFrames"] = QVariant::fromValue(static_cast<qint64>(c.latencyFrames));
-      switch (c.state) {
-      case engine::pipeline::NodeState::Uninitialized:
-        m["state"] = QStringLiteral("Uninitialized");
-        break;
-      case engine::pipeline::NodeState::Active:
-        m["state"] = QStringLiteral("Active");
-        break;
-      case engine::pipeline::NodeState::Bypassed:
-        m["state"] = QStringLiteral("Bypassed");
-        break;
-      case engine::pipeline::NodeState::TailRingout:
-        m["state"] = QStringLiteral("TailRingout");
-        break;
-      case engine::pipeline::NodeState::Error:
-        m["state"] = QStringLiteral("Error");
-        break;
-      }
-      m["bypassBehavior"] =
-          (c.bypassBehavior == engine::pipeline::BypassBehavior::TailPreserving)
-              ? QStringLiteral("TailPreserving")
-              : QStringLiteral("Immediate");
-      out.append(m);
-    }
-  };
+  auto appendChain =
+      [&](const std::unique_ptr<engine::pipeline::AudioChain> &ch,
+          const QString &chainLabel) {
+        if (!ch)
+          return;
+        for (size_t i = 0; i < ch->nodeCount(); ++i) {
+          const auto *n = ch->node(i);
+          if (!n)
+            continue;
+          const auto c = n->contract();
+          QVariantMap m;
+          m["chain"] = chainLabel;
+          m["name"] = QString::fromStdString(c.name);
+          switch (c.affiliation) {
+          case engine::pipeline::NodeAffiliation::RenderCommon:
+            m["affiliation"] = QStringLiteral("RenderCommon");
+            break;
+          case engine::pipeline::NodeAffiliation::ListeningCorrection:
+            m["affiliation"] = QStringLiteral("ListeningCorrection");
+            break;
+          case engine::pipeline::NodeAffiliation::RenderMonitorOnly:
+            m["affiliation"] = QStringLiteral("RenderMonitorOnly");
+            break;
+          }
+          m["inputChannels"] = static_cast<int>(c.inputChannels);
+          m["outputChannels"] = static_cast<int>(c.outputChannels);
+          m["sampleFormat"] = QStringLiteral("Float64Planar");
+          m["maxBlockSize"] = static_cast<int>(c.maxBlockSize);
+          m["sampleRate"] = c.sampleRate;
+          m["latencyFrames"] =
+              QVariant::fromValue(static_cast<qint64>(c.latencyFrames));
+          switch (c.state) {
+          case engine::pipeline::NodeState::Uninitialized:
+            m["state"] = QStringLiteral("Uninitialized");
+            break;
+          case engine::pipeline::NodeState::Active:
+            m["state"] = QStringLiteral("Active");
+            break;
+          case engine::pipeline::NodeState::Bypassed:
+            m["state"] = QStringLiteral("Bypassed");
+            break;
+          case engine::pipeline::NodeState::TailRingout:
+            m["state"] = QStringLiteral("TailRingout");
+            break;
+          case engine::pipeline::NodeState::Error:
+            m["state"] = QStringLiteral("Error");
+            break;
+          }
+          m["bypassBehavior"] =
+              (c.bypassBehavior ==
+               engine::pipeline::BypassBehavior::TailPreserving)
+                  ? QStringLiteral("TailPreserving")
+                  : QStringLiteral("Immediate");
+          out.append(m);
+        }
+      };
 
   if (m_pipeline) {
     appendChain(m_pipeline->cloneMasterChainForVerification(),
@@ -3802,6 +3974,9 @@ void EngineController::setListeningPreset(const QString &presetName) {
   bool ok = m_uiListeningCorrection.applyPreset(presetName.toStdString());
   if (ok) {
     m_listeningPresetName = presetName;
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setListeningPreset(presetName);
+    }
     emit listeningPresetChanged(presetName);
     emit peqParametersChanged();
     emit diagnosticsChanged();
@@ -3849,9 +4024,8 @@ void EngineController::setListeningBand(bool isRightChannel, int bandIndex,
   cfg.enabled = enabled;
 
   if (m_pipeline) {
-    m_pipeline->paramMailbox().setListeningBand(isRightChannel,
-                                                static_cast<size_t>(bandIndex),
-                                                cfg);
+    m_pipeline->paramMailbox().setListeningBand(
+        isRightChannel, static_cast<size_t>(bandIndex), cfg);
   }
   if (isRightChannel) {
     m_uiListeningCorrection.setRightBand(static_cast<size_t>(bandIndex), cfg);
@@ -3891,19 +4065,28 @@ QVariantList EngineController::getListeningCurve(bool isRightChannel,
 bool EngineController::findDspNode(const QString &nodeName, uint8_t &outChain,
                                    uint8_t &outIndex) const noexcept {
   auto idxOrInvalid = [&](size_t canonicalSlot) -> bool {
-    const uint8_t idx = m_masterNodeIndices[canonicalSlot].load(std::memory_order_relaxed);
-    if (idx == 0xFF) return false;
+    const uint8_t idx =
+        m_masterNodeIndices[canonicalSlot].load(std::memory_order_relaxed);
+    if (idx == 0xFF)
+      return false;
     outChain = 0;
     outIndex = idx;
     return true;
   };
-  if (nodeName == "PEQ") return idxOrInvalid(0);
-  if (nodeName == "GEQ") return idxOrInvalid(1);
-  if (nodeName == "Filter") return idxOrInvalid(2);
-  if (nodeName == "Compressor") return idxOrInvalid(3);
-  if (nodeName == "ExternalInsert" || nodeName == "Insert") return idxOrInvalid(4);
-  if (nodeName == "Reverb") return idxOrInvalid(5);
-  if (nodeName == "Limiter") return idxOrInvalid(6);
+  if (nodeName == "PEQ")
+    return idxOrInvalid(0);
+  if (nodeName == "GEQ")
+    return idxOrInvalid(1);
+  if (nodeName == "Filter")
+    return idxOrInvalid(2);
+  if (nodeName == "Compressor")
+    return idxOrInvalid(3);
+  if (nodeName == "ExternalInsert" || nodeName == "Insert")
+    return idxOrInvalid(4);
+  if (nodeName == "Reverb")
+    return idxOrInvalid(5);
+  if (nodeName == "Limiter")
+    return idxOrInvalid(6);
   if (nodeName == "ListeningCorrection") {
     outChain = 1;
     outIndex = 0;
@@ -4140,9 +4323,8 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
   const auto &wsMgr = engine::workspace::WorkspaceManager::instance();
   const bool wsOpen = wsMgr.hasOpenWorkspace();
   const QString trackQPath = QString::fromStdString(d->trackInfo().path);
-  const bool insideOpenWs =
-      wsOpen && !trackQPath.isEmpty() &&
-      wsMgr.isPathInsideOpenWorkspace(trackQPath, false);
+  const bool insideOpenWs = wsOpen && !trackQPath.isEmpty() &&
+                            wsMgr.isPathInsideOpenWorkspace(trackQPath, false);
   map["isInsideOpenWorkspace"] = insideOpenWs;
   map["canCopyToWorkspace"] = wsOpen && !trackQPath.isEmpty() && !insideOpenWs;
 
@@ -4177,8 +4359,9 @@ QVariantList EngineController::discoverExternalInsertPorts() const {
   size_t bs = 256;
   if (m_audioOutput) {
     const auto diag = m_audioOutput->diagnostics();
-    bs = (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum
-                                      : (diag.bufferFrames > 0 ? diag.bufferFrames : 256);
+    bs = (diag.negotiatedQuantum > 0)
+             ? diag.negotiatedQuantum
+             : (diag.bufferFrames > 0 ? diag.bufferFrames : 256);
   }
 
   std::vector<engine::insert::ExternalPortInfo> ports;
@@ -4240,7 +4423,8 @@ bool EngineController::configureExternalInsertWithMetadata(
       activeQuantum = diag.bufferFrames;
     }
   }
-  size_t bSize = (bufferSize > 0) ? static_cast<size_t>(bufferSize) : activeQuantum;
+  size_t bSize =
+      (bufferSize > 0) ? static_cast<size_t>(bufferSize) : activeQuantum;
 
   engine::insert::ExternalPortInfo info{
       clientName.toStdString(),
@@ -4263,7 +4447,8 @@ bool EngineController::configureExternalInsertWithMetadata(
     QJsonObject det;
     det.insert(QStringLiteral("host_name"), clientName);
     det.insert(QStringLiteral("plugin_id"),
-               pluginUri.isEmpty() ? QStringLiteral("external_jack_bridge") : pluginUri);
+               pluginUri.isEmpty() ? QStringLiteral("external_jack_bridge")
+                                   : pluginUri);
     det.insert(QStringLiteral("plugin_name"), pluginName);
     det.insert(QStringLiteral("host_preset_reference"), hostPresetReference);
     det.insert(QStringLiteral("sample_rate_hz"), sRate);
@@ -4276,7 +4461,8 @@ bool EngineController::configureExternalInsertWithMetadata(
     det.insert(QStringLiteral("latency_source"),
                latencyReported ? QStringLiteral("host_reported")
                                : QStringLiteral("not_reported"));
-    det.insert(QStringLiteral("transport_simulation_mode"), trDiag.simulationMode);
+    det.insert(QStringLiteral("transport_simulation_mode"),
+               trDiag.simulationMode);
     det.insert(QStringLiteral("transport_active_links"),
                static_cast<int>(trDiag.activeLinksCreated));
     log::LogService::instance().log(
@@ -4287,8 +4473,9 @@ bool EngineController::configureExternalInsertWithMetadata(
             .arg(trDiag.activeLinksCreated)
             .arg(trDiag.simulationMode ? QStringLiteral("Simulation")
                                        : QStringLiteral("LivePipeWire"))
-            .arg(latencyReported ? (QString::number(reportedLatencyFrames) + " frames")
-                                 : QStringLiteral("Not Reported")),
+            .arg(latencyReported
+                     ? (QString::number(reportedLatencyFrames) + " frames")
+                     : QStringLiteral("Not Reported")),
         "InsertBridge", clientName,
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
   } else {
@@ -4317,17 +4504,23 @@ void EngineController::setExternalInsertPosition(int positionIndex) {
   const int clamped = std::clamp(positionIndex, 0, 6);
   if (m_pipeline) {
     std::array<uint8_t, 7> newIndices{};
-    if (m_pipeline->repositionExternalInsert(static_cast<size_t>(clamped), newIndices)) {
+    if (m_pipeline->repositionExternalInsert(static_cast<size_t>(clamped),
+                                             newIndices)) {
       for (size_t k = 0; k < 7; ++k) {
         m_masterNodeIndices[k].store(newIndices[k], std::memory_order_relaxed);
       }
       m_externalInsertPosition.store(clamped, std::memory_order_relaxed);
+      if (SettingsManager::instance().isLoaded() &&
+          !m_applyingInitialSettings) {
+        SettingsManager::instance().setExternalInsertPosition(clamped);
+      }
       emit externalInsertStatusChanged();
       emit diagnosticsChanged();
       log::LogService::instance().log(
           QStringLiteral("ExternalInsert"), QStringLiteral("Reposition"),
           QStringLiteral("Success"),
-          QString("Repositioned External Insert to master slot %1").arg(clamped),
+          QString("Repositioned External Insert to master slot %1")
+              .arg(clamped),
           QStringLiteral("InsertBridge"), QStringLiteral("External Insert"));
     }
   }
@@ -4343,6 +4536,9 @@ void EngineController::setExternalInsertDisconnectPolicy(int policy) {
   const int clamped = std::clamp(policy, 0, 2);
   m_insertNode->bridge().setDisconnectPolicy(
       static_cast<engine::insert::DisconnectPolicy>(clamped));
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setExternalInsertDisconnectPolicy(clamped);
+  }
   emit externalInsertStatusChanged();
   emit diagnosticsChanged();
 }
@@ -4390,7 +4586,8 @@ void EngineController::calibrateInsertLatency() {
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
         QStringLiteral("Failed"),
-        QStringLiteral("Cannot calibrate latency: external insert host is not connected."),
+        QStringLiteral(
+            "Cannot calibrate latency: external insert host is not connected."),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
@@ -4416,11 +4613,13 @@ void EngineController::calibrateInsertLatency() {
   m_calCompletedProbes = 0;
   m_calActive = true;
 
-  // In headless/offline simulation mode, PipeWireAudioOutput's real-time thread is not running,
-  // so drive the isolated probe synchronously through ExternalInsertBridge::process() -> PipeWireInsertTransport.
+  // In headless/offline simulation mode, PipeWireAudioOutput's real-time thread
+  // is not running, so drive the isolated probe synchronously through
+  // ExternalInsertBridge::process() -> PipeWireInsertTransport.
   if (m_audioOutput && m_audioOutput->isOfflineSimulationMode()) {
     bridge.setCalibrationHoldMute(true);
-    const size_t blockFrames = std::max<size_t>(64, bridge.config().bufferSize > 0 ? bridge.config().bufferSize : 256);
+    const size_t blockFrames = std::max<size_t>(
+        64, bridge.config().bufferSize > 0 ? bridge.config().bufferSize : 256);
     std::vector<double> bufL(blockFrames, 0.0);
     std::vector<double> bufR(blockFrames, 0.0);
     for (uint32_t p = 0; p < m_calTargetProbes; ++p) {
@@ -4444,18 +4643,19 @@ void EngineController::calibrateInsertLatency() {
     const auto cand = bridge.latencyCalibrationCandidate();
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
-        cand.hasMeasurement ? QStringLiteral("Success") : QStringLiteral("Failed"),
-        QString::fromStdString(cand.summary),
-        QStringLiteral("InsertBridge"),
+        cand.hasMeasurement ? QStringLiteral("Success")
+                            : QStringLiteral("Failed"),
+        QString::fromStdString(cand.summary), QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName));
     emit externalInsertStatusChanged();
     return;
   }
 
   // Live PipeWire graph mode:
-  // Step 1 (ticks 5..2 = 100ms): smoothly fade monitor output down via AudioPipeline ParameterSmoother
-  // without abruptly chopping ExternalInsertBridge audio.
-  // Step 2 (tick 1 = 25ms): engage holdMute to flush silence through external host before Probe 0.
+  // Step 1 (ticks 5..2 = 100ms): smoothly fade monitor output down via
+  // AudioPipeline ParameterSmoother without abruptly chopping
+  // ExternalInsertBridge audio. Step 2 (tick 1 = 25ms): engage holdMute to
+  // flush silence through external host before Probe 0.
   m_calSettleTicks = 5;
   if (!m_calProbeTimer) {
     m_calProbeTimer = new QTimer(this);
@@ -4467,13 +4667,15 @@ void EngineController::calibrateInsertLatency() {
   log::LogService::instance().log(
       QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
       QStringLiteral("Info"),
-      QStringLiteral("Started 3-sample live PipeWire hardware round-trip latency calibration (monitor output muted)."),
+      QStringLiteral("Started 3-sample live PipeWire hardware round-trip "
+                     "latency calibration (monitor output muted)."),
       QStringLiteral("InsertBridge"),
       QString::fromStdString(bridge.config().clientName));
   emit externalInsertStatusChanged();
 }
 
-void EngineController::finishHardwareCalibration(bool restoreBypass, bool cancelSession) {
+void EngineController::finishHardwareCalibration(bool restoreBypass,
+                                                 bool cancelSession) {
   if (m_calProbeTimer) {
     m_calProbeTimer->stop();
   }
@@ -4505,7 +4707,8 @@ void EngineController::pollHardwareCalibrationProbe() {
   if (m_calSettleTicks > 0) {
     --m_calSettleTicks;
     if (m_calSettleTicks == 1) {
-      // Monitor smoother has finished fading down (~100ms); now mute insert send path to flush host ringbuffer
+      // Monitor smoother has finished fading down (~100ms); now mute insert
+      // send path to flush host ringbuffer
       bridge.setCalibrationHoldMute(true);
     } else if (m_calSettleTicks == 0) {
       bridge.startHardwareProbe(8192, 48000);
@@ -4525,7 +4728,8 @@ void EngineController::pollHardwareCalibrationProbe() {
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
         QStringLiteral("Failed"),
-        QStringLiteral("Hardware latency probe timed out: no return impulse received from external host."),
+        QStringLiteral("Hardware latency probe timed out: no return impulse "
+                       "received from external host."),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
@@ -4545,22 +4749,31 @@ void EngineController::pollHardwareCalibrationProbe() {
   finishHardwareCalibration(m_calRestoreBypass, false);
   const auto cand = bridge.latencyCalibrationCandidate();
   QJsonObject det;
-  det.insert(QStringLiteral("recommended_frames"), static_cast<qint64>(cand.recommendedFrames));
-  det.insert(QStringLiteral("spread_frames"), static_cast<qint64>(cand.spreadFrames));
+  det.insert(QStringLiteral("recommended_frames"),
+             static_cast<qint64>(cand.recommendedFrames));
+  det.insert(QStringLiteral("spread_frames"),
+             static_cast<qint64>(cand.spreadFrames));
   det.insert(QStringLiteral("peak_snr_db"), cand.peakSnrDb);
-  det.insert(QStringLiteral("confidence"),
-             QString::fromUtf8(engine::insert::ExternalInsertBridge::latencyConfidenceToString(cand.confidence)));
-  det.insert(QStringLiteral("sample_count"), static_cast<int>(cand.sampleCount));
+  det.insert(
+      QStringLiteral("confidence"),
+      QString::fromUtf8(
+          engine::insert::ExternalInsertBridge::latencyConfidenceToString(
+              cand.confidence)));
+  det.insert(QStringLiteral("sample_count"),
+             static_cast<int>(cand.sampleCount));
   log::LogService::instance().log(
       QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
       cand.confidence == engine::insert::LatencyConfidence::High
           ? QStringLiteral("Success")
           : QStringLiteral("Warning"),
-      QString("Hardware round-trip latency calibration completed: %1 frames (spread %2, SNR %3 dB, %4)")
+      QString("Hardware round-trip latency calibration completed: %1 frames "
+              "(spread %2, SNR %3 dB, %4)")
           .arg(cand.recommendedFrames)
           .arg(cand.spreadFrames)
           .arg(cand.peakSnrDb, 0, 'f', 1)
-          .arg(QString::fromUtf8(engine::insert::ExternalInsertBridge::latencyConfidenceToString(cand.confidence))),
+          .arg(QString::fromUtf8(
+              engine::insert::ExternalInsertBridge::latencyConfidenceToString(
+                  cand.confidence))),
       QStringLiteral("InsertBridge"),
       QString::fromStdString(bridge.config().clientName),
       QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
@@ -4610,8 +4823,8 @@ void EngineController::beginInsertLatencyCalibration() {
   emit externalInsertStatusChanged();
 }
 
-bool EngineController::recordInsertLatencyCalibrationSample(qint64 measuredFrames,
-                                                            double peakSnrDb) {
+bool EngineController::recordInsertLatencyCalibrationSample(
+    qint64 measuredFrames, double peakSnrDb) {
   if (!m_insertNode)
     return false;
   auto &b = m_insertNode->bridge();
@@ -4626,18 +4839,20 @@ bool EngineController::recordInsertLatencyCalibrationSample(qint64 measuredFrame
         QStringLiteral("Warning"),
         QString("Latency calibration held (%1): %2")
             .arg(QString::fromUtf8(
-                     engine::insert::ExternalInsertBridge::latencyConfidenceToString(
-                         cand.confidence)),
+                     engine::insert::ExternalInsertBridge::
+                         latencyConfidenceToString(cand.confidence)),
                  QString::fromStdString(cand.summary)),
         QStringLiteral("InsertBridge"),
         QString::fromStdString(b.config().clientName), QStringLiteral("{}"),
-        QString(), QString(), log::ErrorCode::ExternalInsertLatencyUnstable, 0.0);
+        QString(), QString(), log::ErrorCode::ExternalInsertLatencyUnstable,
+        0.0);
   }
   emit externalInsertStatusChanged();
   return stable;
 }
 
-bool EngineController::confirmRecommendedInsertLatency(bool allowOverrideUnsafe) {
+bool EngineController::confirmRecommendedInsertLatency(
+    bool allowOverrideUnsafe) {
   if (!m_insertNode)
     return false;
   auto &b = m_insertNode->bridge();
@@ -4692,10 +4907,12 @@ QVariantMap EngineController::getLatencyAlignmentReport() const {
   map["sessionActive"] = cand.sessionActive;
   map["hasMeasurement"] = cand.hasMeasurement;
   map["confirmed"] = cand.confirmed;
-  map["recommendedFrames"] = QVariant::fromValue(static_cast<qint64>(cand.recommendedFrames));
+  map["recommendedFrames"] =
+      QVariant::fromValue(static_cast<qint64>(cand.recommendedFrames));
   map["minFrames"] = QVariant::fromValue(static_cast<qint64>(cand.minFrames));
   map["maxFrames"] = QVariant::fromValue(static_cast<qint64>(cand.maxFrames));
-  map["spreadFrames"] = QVariant::fromValue(static_cast<qint64>(cand.spreadFrames));
+  map["spreadFrames"] =
+      QVariant::fromValue(static_cast<qint64>(cand.spreadFrames));
   map["peakSnrDb"] = cand.peakSnrDb;
   map["sampleCount"] = static_cast<int>(cand.sampleCount);
   map["confidence"] = static_cast<int>(cand.confidence);
@@ -4735,7 +4952,8 @@ QVariantMap EngineController::getExternalInsertStatus() const {
   map["latencySource"] = QString::fromUtf8(
       engine::insert::ExternalInsertBridge::latencySourceToString(
           b.latencySource()));
-  map["insertPosition"] = m_externalInsertPosition.load(std::memory_order_relaxed);
+  map["insertPosition"] =
+      m_externalInsertPosition.load(std::memory_order_relaxed);
   map["disconnectPolicy"] = static_cast<int>(b.disconnectPolicy());
   map["pluginName"] = QString::fromStdString(cfg.pluginName);
   map["pluginUri"] = QString::fromStdString(cfg.pluginUri);
@@ -4789,10 +5007,8 @@ bool EngineController::reconnectExternalInsert() {
       QString::fromStdString(cfg.sendPortL),
       QString::fromStdString(cfg.sendPortR),
       QString::fromStdString(cfg.returnPortL),
-      QString::fromStdString(cfg.returnPortR),
-      sr, bs,
-      static_cast<int>(cfg.reportedLatencyFrames),
-      cfg.latencyReported,
+      QString::fromStdString(cfg.returnPortR), sr, bs,
+      static_cast<int>(cfg.reportedLatencyFrames), cfg.latencyReported,
       QString::fromStdString(cfg.pluginName),
       QString::fromStdString(cfg.pluginUri),
       QString::fromStdString(cfg.hostPresetReference));
@@ -4889,10 +5105,12 @@ bool EngineController::deletePreset(const QString &category,
   return ok;
 }
 
-bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
-                                                    const QString &presetLabel) {
-  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> lBands{};
-  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> rBands{};
+bool EngineController::applyListeningCorrectionJson(
+    const QJsonObject &obj, const QString &presetLabel) {
+  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>
+      lBands{};
+  std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>
+      rBands{};
   ParametricEQ::getPresetBandConfigs("Monitor Flat", lBands, rBands);
 
   std::vector<ParametricEQ::BandConfig> lVec(lBands.begin(), lBands.end());
@@ -4902,7 +5120,8 @@ bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
                               std::vector<ParametricEQ::BandConfig> &out) {
     if (arr.isEmpty())
       return;
-    const size_t maxNeed = std::max(out.size(), static_cast<size_t>(arr.size()));
+    const size_t maxNeed =
+        std::max(out.size(), static_cast<size_t>(arr.size()));
     out.resize(maxNeed);
     for (int i = 0; i < arr.size(); ++i) {
       const QJsonObject bo = arr[i].toObject();
@@ -4917,8 +5136,8 @@ bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
       cfg.gainDb = bo.contains("gain_db") ? bo["gain_db"].toDouble(0.0)
                                           : bo["gainDb"].toDouble(0.0);
       cfg.Q = bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
-      cfg.type = static_cast<BiquadFilterType>(
-          std::clamp(bo["type"].toInt(0), 0, 5));
+      cfg.type =
+          static_cast<BiquadFilterType>(std::clamp(bo["type"].toInt(0), 0, 5));
       cfg.enabled = bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
     }
   };
@@ -4948,16 +5167,22 @@ bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
     std::lock_guard<std::mutex> lock(m_presetReportMutex);
     m_lastPresetImportReport.clear();
     m_lastPresetImportReport["target"] = QStringLiteral("ListeningCorrection");
-    m_lastPresetImportReport["requestedLeftBands"] = static_cast<int>(report.requestedLeft);
-    m_lastPresetImportReport["requestedRightBands"] = static_cast<int>(report.requestedRight);
+    m_lastPresetImportReport["requestedLeftBands"] =
+        static_cast<int>(report.requestedLeft);
+    m_lastPresetImportReport["requestedRightBands"] =
+        static_cast<int>(report.requestedRight);
     m_lastPresetImportReport["activeLimitPerChannel"] =
         static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL);
-    m_lastPresetImportReport["overflowLeftBands"] = static_cast<int>(report.overflowLeft);
-    m_lastPresetImportReport["overflowRightBands"] = static_cast<int>(report.overflowRight);
+    m_lastPresetImportReport["overflowLeftBands"] =
+        static_cast<int>(report.overflowLeft);
+    m_lastPresetImportReport["overflowRightBands"] =
+        static_cast<int>(report.overflowRight);
     m_lastPresetImportReport["truncated"] = report.truncated;
     m_lastPresetImportReport["message"] =
         report.truncated
-            ? QString("Listening Correction imported %1L/%2R bands: 16 bands active per channel, %3L/%4R excess bands retained in variable overflow model.")
+            ? QString("Listening Correction imported %1L/%2R bands: 16 bands "
+                      "active per channel, %3L/%4R excess bands retained in "
+                      "variable overflow model.")
                   .arg(report.requestedLeft)
                   .arg(report.requestedRight)
                   .arg(report.overflowLeft)
@@ -4967,24 +5192,27 @@ bool EngineController::applyListeningCorrectionJson(const QJsonObject &obj,
 
   if (report.truncated) {
     const QString warnMsg =
-        QString("Listening Correction preset exceeds 16 bands/ch (%1L/%2R); excess preserved in overflow storage.")
+        QString("Listening Correction preset exceeds 16 bands/ch (%1L/%2R); "
+                "excess preserved in overflow storage.")
             .arg(report.requestedLeft)
             .arg(report.requestedRight);
     log::LogService::instance().log(
-        QStringLiteral("PresetManagement"), QStringLiteral("ImportListeningPeq"),
-        QStringLiteral("Warning"), warnMsg, QStringLiteral("Preset"),
+        QStringLiteral("PresetManagement"),
+        QStringLiteral("ImportListeningPeq"), QStringLiteral("Warning"),
+        warnMsg, QStringLiteral("Preset"),
         presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel,
         QStringLiteral("{}"), QString(), QString(),
         log::ErrorCode::PresetTruncatedWarn, 0.0);
-    emit presetImportWarning(
-        QStringLiteral("ListeningCorrection"), static_cast<int>(report.requestedLeft),
-        static_cast<int>(report.requestedRight),
-        static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
-        static_cast<int>(report.overflowLeft),
-        static_cast<int>(report.overflowRight), warnMsg);
+    emit presetImportWarning(QStringLiteral("ListeningCorrection"),
+                             static_cast<int>(report.requestedLeft),
+                             static_cast<int>(report.requestedRight),
+                             static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
+                             static_cast<int>(report.overflowLeft),
+                             static_cast<int>(report.overflowRight), warnMsg);
   }
 
-  m_listeningPresetName = presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
+  m_listeningPresetName =
+      presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
   emit listeningPresetChanged(m_listeningPresetName);
   emit peqParametersChanged();
   emit diagnosticsChanged();
@@ -5069,10 +5297,10 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
         }
         auto &cfg = out[static_cast<size_t>(idx)];
         cfg.frequency = bo["frequency"].toDouble(1000.0);
-        cfg.gainDb = bo.contains("gain_db")
-                         ? bo["gain_db"].toDouble(0.0)
-                         : bo["gainDb"].toDouble(0.0);
-        cfg.Q = bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
+        cfg.gainDb = bo.contains("gain_db") ? bo["gain_db"].toDouble(0.0)
+                                            : bo["gainDb"].toDouble(0.0);
+        cfg.Q =
+            bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
         cfg.type = static_cast<BiquadFilterType>(
             std::clamp(bo["type"].toInt(0), 0, 5));
         cfg.enabled =
@@ -5103,16 +5331,22 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
       std::lock_guard<std::mutex> lock(m_presetReportMutex);
       m_lastPresetImportReport.clear();
       m_lastPresetImportReport["target"] = QStringLiteral("MasterPEQ");
-      m_lastPresetImportReport["requestedLeftBands"] = static_cast<int>(report.requestedLeft);
-      m_lastPresetImportReport["requestedRightBands"] = static_cast<int>(report.requestedRight);
+      m_lastPresetImportReport["requestedLeftBands"] =
+          static_cast<int>(report.requestedLeft);
+      m_lastPresetImportReport["requestedRightBands"] =
+          static_cast<int>(report.requestedRight);
       m_lastPresetImportReport["activeLimitPerChannel"] =
           static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL);
-      m_lastPresetImportReport["overflowLeftBands"] = static_cast<int>(report.overflowLeft);
-      m_lastPresetImportReport["overflowRightBands"] = static_cast<int>(report.overflowRight);
+      m_lastPresetImportReport["overflowLeftBands"] =
+          static_cast<int>(report.overflowLeft);
+      m_lastPresetImportReport["overflowRightBands"] =
+          static_cast<int>(report.overflowRight);
       m_lastPresetImportReport["truncated"] = report.truncated;
       m_lastPresetImportReport["message"] =
           report.truncated
-              ? QString("Master PEQ imported %1L/%2R bands: 16 active bands applied, %3L/%4R excess bands retained in variable overflow vector.")
+              ? QString("Master PEQ imported %1L/%2R bands: 16 active bands "
+                        "applied, %3L/%4R excess bands retained in variable "
+                        "overflow vector.")
                     .arg(report.requestedLeft)
                     .arg(report.requestedRight)
                     .arg(report.overflowLeft)
@@ -5122,14 +5356,15 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
 
     if (report.truncated) {
       const QString warnMsg =
-          QString("Master PEQ preset exceeds 16 bands/ch (%1L/%2R); excess retained in variable overflow vector.")
+          QString("Master PEQ preset exceeds 16 bands/ch (%1L/%2R); excess "
+                  "retained in variable overflow vector.")
               .arg(report.requestedLeft)
               .arg(report.requestedRight);
       log::LogService::instance().log(
           QStringLiteral("PresetManagement"), QStringLiteral("ImportMasterPeq"),
           QStringLiteral("Warning"), warnMsg, QStringLiteral("Preset"),
-          QStringLiteral("MasterPEQ"), QStringLiteral("{}"), QString(), QString(),
-          log::ErrorCode::PresetTruncatedWarn, 0.0);
+          QStringLiteral("MasterPEQ"), QStringLiteral("{}"), QString(),
+          QString(), log::ErrorCode::PresetTruncatedWarn, 0.0);
       emit presetImportWarning(
           QStringLiteral("MasterPEQ"), static_cast<int>(report.requestedLeft),
           static_cast<int>(report.requestedRight),
@@ -5227,6 +5462,23 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
 }
 
 bool EngineController::applyAudioDeviceJson(const QJsonObject &obj) {
+  if (obj.contains("target_device")) {
+    const QString dev = obj["target_device"].toString();
+    selectOutputDevice(dev.isEmpty() ? QStringLiteral("default") : dev);
+  }
+  if (obj.contains("buffer_size")) {
+    const int bf = obj["buffer_size"].toInt(256);
+    if (bf > 0) {
+      setOutputBufferFrames(bf);
+    }
+  }
+  if (obj.contains("output_pcm_format")) {
+    setOutputPcmFormat(
+        obj["output_pcm_format"].toString(QStringLiteral("F32LE")));
+  }
+  if (obj.contains("live_dither_enabled")) {
+    setLiveDitherEnabled(obj["live_dither_enabled"].toBool(true));
+  }
   if (obj.contains("fixed_graph_sample_rate")) {
     setFixedGraphSampleRate(obj["fixed_graph_sample_rate"].toDouble(48000.0));
   } else if (obj.contains("graph_sample_rate")) {
@@ -5292,8 +5544,8 @@ bool EngineController::applyPresetProfile(const QString &category,
     if (ok) {
       log::LogService::instance().log(
           "PresetManagement", "ApplyPreset", "Success",
-          QString("Applied Audio Device preset '%1'.").arg(presetName), category,
-          presetName);
+          QString("Applied Audio Device preset '%1'.").arg(presetName),
+          category, presetName);
       emit presetManagementChanged();
     }
     return ok;
@@ -5372,15 +5624,20 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
     }
   } else if (category == engine::preset::PresetCategories::AudioDevice) {
     obj["backend"] = QStringLiteral("PipeWire");
+    obj["target_device"] =
+        m_audioOutput ? QString::fromStdString(m_audioOutput->targetDeviceId())
+                      : QString();
+    obj["output_pcm_format"] = outputPcmFormat();
+    obj["live_dither_enabled"] = isLiveDitherEnabled();
     obj["sample_rate"] = graphSampleRate();
     obj["graph_sample_rate"] = graphSampleRate();
     obj["fixed_graph_sample_rate"] =
         m_fixedGraphSampleRate.load(std::memory_order_relaxed);
     obj["buffer_size"] =
-        m_audioOutput ? static_cast<int>(m_audioOutput->diagnostics().bufferFrames)
-                      : 256;
-    obj["direct_mode"] =
-        m_directModeEnabled.load(std::memory_order_relaxed);
+        m_audioOutput
+            ? static_cast<int>(m_audioOutput->diagnostics().bufferFrames)
+            : 256;
+    obj["direct_mode"] = m_directModeEnabled.load(std::memory_order_relaxed);
     obj["output_routing_mode"] =
         m_outputRoutingMode.load(std::memory_order_relaxed);
     obj["listening_volume"] = listeningVolume();
@@ -5479,27 +5736,42 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
 // Phase 4: Export & Render Operations (Section 5.11 & 20.1)
 // =========================================================================
 
-std::atomic<bool> *EngineController::renderNodeFlagPtr(const QString &nodeName) noexcept {
-  if (nodeName == "PEQ" || nodeName == "Master PEQ") return &m_renderIncludePeq;
-  if (nodeName == "GEQ" || nodeName == "Graphic EQ") return &m_renderIncludeGeq;
-  if (nodeName == "Filter" || nodeName == "HPF / LPF") return &m_renderIncludeFilter;
-  if (nodeName == "Compressor") return &m_renderIncludeCompressor;
-  if (nodeName == "Reverb") return &m_renderIncludeReverb;
-  if (nodeName == "Limiter" || nodeName == "Peak Limiter") return &m_renderIncludeLimiter;
+std::atomic<bool> *
+EngineController::renderNodeFlagPtr(const QString &nodeName) noexcept {
+  if (nodeName == "PEQ" || nodeName == "Master PEQ")
+    return &m_renderIncludePeq;
+  if (nodeName == "GEQ" || nodeName == "Graphic EQ")
+    return &m_renderIncludeGeq;
+  if (nodeName == "Filter" || nodeName == "HPF / LPF")
+    return &m_renderIncludeFilter;
+  if (nodeName == "Compressor")
+    return &m_renderIncludeCompressor;
+  if (nodeName == "Reverb")
+    return &m_renderIncludeReverb;
+  if (nodeName == "Limiter" || nodeName == "Peak Limiter")
+    return &m_renderIncludeLimiter;
   return nullptr;
 }
 
-const std::atomic<bool> *EngineController::renderNodeFlagPtr(const QString &nodeName) const noexcept {
-  if (nodeName == "PEQ" || nodeName == "Master PEQ") return &m_renderIncludePeq;
-  if (nodeName == "GEQ" || nodeName == "Graphic EQ") return &m_renderIncludeGeq;
-  if (nodeName == "Filter" || nodeName == "HPF / LPF") return &m_renderIncludeFilter;
-  if (nodeName == "Compressor") return &m_renderIncludeCompressor;
-  if (nodeName == "Reverb") return &m_renderIncludeReverb;
-  if (nodeName == "Limiter" || nodeName == "Peak Limiter") return &m_renderIncludeLimiter;
+const std::atomic<bool> *
+EngineController::renderNodeFlagPtr(const QString &nodeName) const noexcept {
+  if (nodeName == "PEQ" || nodeName == "Master PEQ")
+    return &m_renderIncludePeq;
+  if (nodeName == "GEQ" || nodeName == "Graphic EQ")
+    return &m_renderIncludeGeq;
+  if (nodeName == "Filter" || nodeName == "HPF / LPF")
+    return &m_renderIncludeFilter;
+  if (nodeName == "Compressor")
+    return &m_renderIncludeCompressor;
+  if (nodeName == "Reverb")
+    return &m_renderIncludeReverb;
+  if (nodeName == "Limiter" || nodeName == "Peak Limiter")
+    return &m_renderIncludeLimiter;
   return nullptr;
 }
 
-void EngineController::setRenderNodeEnabled(const QString &nodeName, bool enabled) {
+void EngineController::setRenderNodeEnabled(const QString &nodeName,
+                                            bool enabled) {
   if (auto *ptr = renderNodeFlagPtr(nodeName)) {
     ptr->store(enabled, std::memory_order_relaxed);
     emit renderStateChanged();
@@ -5547,9 +5819,11 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
   std::vector<double> rndL = srcL, rndR = srcR;
   renderChain.process(rndL.data(), rndR.data(), N);
 
-  // 2. Real cloned AudioPipeline Master Chain (honoring Global Bypass, skipping External Insert per §6.6)
+  // 2. Real cloned AudioPipeline Master Chain (honoring Global Bypass, skipping
+  // External Insert per §6.6)
   std::vector<double> liveL = srcL, liveR = srcR;
-  auto liveChain = m_pipeline ? m_pipeline->cloneMasterChainForVerification() : nullptr;
+  auto liveChain =
+      m_pipeline ? m_pipeline->cloneMasterChainForVerification() : nullptr;
   bool usedRealPipelineClone = false;
   if (liveChain) {
     usedRealPipelineClone = true;
@@ -5561,27 +5835,34 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       auto *node = liveChain->node(i);
       if (!node)
         continue;
-      if (auto *peq = dynamic_cast<engine::pipeline::ParametricEqNode *>(node)) {
+      if (auto *peq =
+              dynamic_cast<engine::pipeline::ParametricEqNode *>(node)) {
         peq->reset();
         if (hasPendingControlUpdates) {
           peq->setBypassed(m_peqBypassed.load(std::memory_order_relaxed));
-          std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL> lc{}, rc{};
+          std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL> lc{},
+              rc{};
           std::array<bool, ParametricEQ::BANDS_PER_CHANNEL> le{}, re{};
           for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             const auto &lb = m_uiPeq.leftBand(b);
             lc[b] = BiquadFilter::calculateCoefficients(
-                lb.type, sr, std::clamp(lb.frequency, 10.0, std::min(24000.0, sr * 0.48)),
-                std::clamp(lb.Q, 0.1, 20.0), std::clamp(lb.gainDb, -24.0, 24.0));
+                lb.type, sr,
+                std::clamp(lb.frequency, 10.0, std::min(24000.0, sr * 0.48)),
+                std::clamp(lb.Q, 0.1, 20.0),
+                std::clamp(lb.gainDb, -24.0, 24.0));
             le[b] = lb.enabled;
             const auto &rb = m_uiPeq.rightBand(b);
             rc[b] = BiquadFilter::calculateCoefficients(
-                rb.type, sr, std::clamp(rb.frequency, 10.0, std::min(24000.0, sr * 0.48)),
-                std::clamp(rb.Q, 0.1, 20.0), std::clamp(rb.gainDb, -24.0, 24.0));
+                rb.type, sr,
+                std::clamp(rb.frequency, 10.0, std::min(24000.0, sr * 0.48)),
+                std::clamp(rb.Q, 0.1, 20.0),
+                std::clamp(rb.gainDb, -24.0, 24.0));
             re[b] = rb.enabled;
           }
           peq->applyCoefficients(lc, rc, le, re, 0);
         }
-      } else if (auto *geq = dynamic_cast<engine::pipeline::GraphicEqNode *>(node)) {
+      } else if (auto *geq =
+                     dynamic_cast<engine::pipeline::GraphicEqNode *>(node)) {
         geq->reset();
         if (hasPendingControlUpdates) {
           geq->setBypassed(m_geqBypassed.load(std::memory_order_relaxed));
@@ -5589,22 +5870,26 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
           geq->applyAllCoefficients(p.geqCoefficients, 0);
           geq->applyBandEnabled(p.geqBandEnabled);
         }
-      } else if (auto *flt = dynamic_cast<engine::pipeline::HighLowPassNode *>(node)) {
+      } else if (auto *flt =
+                     dynamic_cast<engine::pipeline::HighLowPassNode *>(node)) {
         flt->resetFilterStateOnly();
         if (hasPendingControlUpdates) {
           flt->setBypassed(m_filterBypassed.load(std::memory_order_relaxed));
           const auto &p = m_pipeline->paramMailbox().currentParameters();
           flt->applyCoefficients(p.filterCoefficients, 0);
         }
-      } else if (auto *comp = dynamic_cast<engine::pipeline::CompressorNode *>(node)) {
+      } else if (auto *comp =
+                     dynamic_cast<engine::pipeline::CompressorNode *>(node)) {
         comp->reset();
         if (hasPendingControlUpdates) {
           comp->setBypassed(m_compBypassed.load(std::memory_order_relaxed));
           comp->prepareInstance(sr, m_uiComp.thresholdDb(), m_uiComp.ratio(),
                                 m_uiComp.attackMs(), m_uiComp.releaseMs(),
-                                m_uiComp.makeupGainDb(), m_uiComp.kneeDb(), true);
+                                m_uiComp.makeupGainDb(), m_uiComp.kneeDb(),
+                                true);
         }
-      } else if (auto *rev = dynamic_cast<engine::pipeline::ReverbNode *>(node)) {
+      } else if (auto *rev =
+                     dynamic_cast<engine::pipeline::ReverbNode *>(node)) {
         rev->reset();
         if (hasPendingControlUpdates) {
           rev->setBypassed(m_reverbBypassed.load(std::memory_order_relaxed));
@@ -5612,11 +5897,13 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
                                m_uiReverb.wetLevel(), m_uiReverb.predelayMs(),
                                m_uiReverb.isTailPreserving(), true);
         }
-      } else if (auto *lim = dynamic_cast<engine::pipeline::PeakLimiterNode *>(node)) {
+      } else if (auto *lim =
+                     dynamic_cast<engine::pipeline::PeakLimiterNode *>(node)) {
         lim->reset();
         if (hasPendingControlUpdates) {
           lim->setBypassed(m_limiterBypassed.load(std::memory_order_relaxed));
-          lim->prepareInstance(sr, m_uiLimiter.ceilingDb(), m_uiLimiter.releaseMs(),
+          lim->prepareInstance(sr, m_uiLimiter.ceilingDb(),
+                               m_uiLimiter.releaseMs(),
                                m_uiLimiter.lookaheadMs(), true);
         }
       }
@@ -5625,8 +5912,10 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
     if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
       for (size_t i = 0; i < liveChain->nodeCount(); ++i) {
         auto *node = liveChain->node(i);
-        if (!node || dynamic_cast<engine::insert::ExternalInsertNode *>(node) != nullptr) {
-          continue; // §6.6 External Insert is strictly excluded from offline render equivalence
+        if (!node || dynamic_cast<engine::insert::ExternalInsertNode *>(node) !=
+                         nullptr) {
+          continue; // §6.6 External Insert is strictly excluded from offline
+                    // render equivalence
         }
         if (!node->isBypassed()) {
           node->process(liveL.data(), liveR.data(), N);
@@ -5639,14 +5928,19 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
     mirrorChain.setEnabled(!m_globalDspBypass.load(std::memory_order_relaxed));
     mirrorChain.copyParametersFrom(m_uiPeq, m_uiGeq, m_uiFilter, m_uiComp,
                                    m_uiReverb, m_uiLimiter);
-    mirrorChain.peq().setEnabled(!m_peqBypassed.load(std::memory_order_relaxed));
-    mirrorChain.geq().setEnabled(!m_geqBypassed.load(std::memory_order_relaxed));
+    mirrorChain.peq().setEnabled(
+        !m_peqBypassed.load(std::memory_order_relaxed));
+    mirrorChain.geq().setEnabled(
+        !m_geqBypassed.load(std::memory_order_relaxed));
     const bool fltOn = !m_filterBypassed.load(std::memory_order_relaxed);
     mirrorChain.filter().setHpfEnabled(fltOn && m_uiFilter.isHpfEnabled());
     mirrorChain.filter().setLpfEnabled(fltOn && m_uiFilter.isLpfEnabled());
-    mirrorChain.compressor().setEnabled(!m_compBypassed.load(std::memory_order_relaxed));
-    mirrorChain.reverb().setEnabled(!m_reverbBypassed.load(std::memory_order_relaxed));
-    mirrorChain.limiter().setEnabled(!m_limiterBypassed.load(std::memory_order_relaxed));
+    mirrorChain.compressor().setEnabled(
+        !m_compBypassed.load(std::memory_order_relaxed));
+    mirrorChain.reverb().setEnabled(
+        !m_reverbBypassed.load(std::memory_order_relaxed));
+    mirrorChain.limiter().setEnabled(
+        !m_limiterBypassed.load(std::memory_order_relaxed));
     mirrorChain.process(liveL.data(), liveR.data(), N);
   }
 
@@ -5662,8 +5956,10 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
   engine::routing::OutputPathRouter router;
   router.setSampleRate(sr);
   for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
-    router.listeningCorrection().setLeftBand(b, m_uiListeningCorrection.leftBand(b));
-    router.listeningCorrection().setRightBand(b, m_uiListeningCorrection.rightBand(b));
+    router.listeningCorrection().setLeftBand(
+        b, m_uiListeningCorrection.leftBand(b));
+    router.listeningCorrection().setRightBand(
+        b, m_uiListeningCorrection.rightBand(b));
   }
   router.setRenderMonitorVolume(1.0);
   router.setMode(engine::routing::OutputPathMode::RenderMonitorPath);
@@ -5709,9 +6005,9 @@ void EngineController::syncMasterDspToRenderEngine() {
   tc.reverb().setEnabled(revOn);
   tc.limiter().setEnabled(limOn);
 
-  const bool insertActive =
-      m_insertNode && !m_insertBypassed.load(std::memory_order_relaxed) &&
-      !m_insertNode->isBypassed();
+  const bool insertActive = m_insertNode &&
+                            !m_insertBypassed.load(std::memory_order_relaxed) &&
+                            !m_insertNode->isBypassed();
   const std::string insertName =
       m_insertNode ? m_insertNode->bridge().config().clientName : std::string{};
   tc.setExternalInsertLiveStatus(insertActive, insertName);
@@ -5773,10 +6069,14 @@ QString EngineController::startTrackRender(const QString &deckId, int bitDepth,
   settings.enableMasterDsp = enableDsp;
   settings.includePeq = m_renderIncludePeq.load(std::memory_order_relaxed);
   settings.includeGeq = m_renderIncludeGeq.load(std::memory_order_relaxed);
-  settings.includeFilter = m_renderIncludeFilter.load(std::memory_order_relaxed);
-  settings.includeCompressor = m_renderIncludeCompressor.load(std::memory_order_relaxed);
-  settings.includeReverb = m_renderIncludeReverb.load(std::memory_order_relaxed);
-  settings.includeLimiter = m_renderIncludeLimiter.load(std::memory_order_relaxed);
+  settings.includeFilter =
+      m_renderIncludeFilter.load(std::memory_order_relaxed);
+  settings.includeCompressor =
+      m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  settings.includeReverb =
+      m_renderIncludeReverb.load(std::memory_order_relaxed);
+  settings.includeLimiter =
+      m_renderIncludeLimiter.load(std::memory_order_relaxed);
 
   QString taskId = m_renderEngine.enqueueTrackRender(trackPath, settings);
 
@@ -5839,10 +6139,14 @@ QString EngineController::startAlbumRender(const QString &folderPath,
   settings.enableMasterDsp = enableDsp;
   settings.includePeq = m_renderIncludePeq.load(std::memory_order_relaxed);
   settings.includeGeq = m_renderIncludeGeq.load(std::memory_order_relaxed);
-  settings.includeFilter = m_renderIncludeFilter.load(std::memory_order_relaxed);
-  settings.includeCompressor = m_renderIncludeCompressor.load(std::memory_order_relaxed);
-  settings.includeReverb = m_renderIncludeReverb.load(std::memory_order_relaxed);
-  settings.includeLimiter = m_renderIncludeLimiter.load(std::memory_order_relaxed);
+  settings.includeFilter =
+      m_renderIncludeFilter.load(std::memory_order_relaxed);
+  settings.includeCompressor =
+      m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  settings.includeReverb =
+      m_renderIncludeReverb.load(std::memory_order_relaxed);
+  settings.includeLimiter =
+      m_renderIncludeLimiter.load(std::memory_order_relaxed);
 
   QString taskId = m_renderEngine.enqueueAlbumRender(folderPath, settings);
 
@@ -6025,7 +6329,8 @@ QString EngineController::defaultSessionStatePath() const {
 }
 
 bool EngineController::saveSessionState(const QString &filePath) const {
-  const QString targetPath = filePath.isEmpty() ? defaultSessionStatePath() : filePath;
+  const QString targetPath =
+      filePath.isEmpty() ? defaultSessionStatePath() : filePath;
   QDir().mkpath(QFileInfo(targetPath).absolutePath());
 
   QJsonObject root;
@@ -6041,34 +6346,38 @@ bool EngineController::saveSessionState(const QString &filePath) const {
   root["master_mute"] = isMasterMute();
 
   auto *nonConstThis = const_cast<EngineController *>(this);
-  root["master_dsp"] = QJsonObject::fromVariantMap(
-      nonConstThis->captureCurrentStateAsPreset(
+  root["master_dsp"] =
+      QJsonObject::fromVariantMap(nonConstThis->captureCurrentStateAsPreset(
           engine::preset::PresetCategories::MasterDsp));
-  root["listening_correction"] = QJsonObject::fromVariantMap(
-      nonConstThis->captureCurrentStateAsPreset(
+  root["listening_correction"] =
+      QJsonObject::fromVariantMap(nonConstThis->captureCurrentStateAsPreset(
           engine::preset::PresetCategories::ListeningCorrection));
-  root["external_insert"] = QJsonObject::fromVariantMap(
-      nonConstThis->captureCurrentStateAsPreset(
+  root["external_insert"] =
+      QJsonObject::fromVariantMap(nonConstThis->captureCurrentStateAsPreset(
           engine::preset::PresetCategories::ExternalInsert));
-  root["audio_device"] = QJsonObject::fromVariantMap(
-      nonConstThis->captureCurrentStateAsPreset(
+  root["audio_device"] =
+      QJsonObject::fromVariantMap(nonConstThis->captureCurrentStateAsPreset(
           engine::preset::PresetCategories::AudioDevice));
 
   QJsonObject renderNodes;
-  renderNodes["sync_master_dsp"] = m_syncMasterDspToRender.load(std::memory_order_relaxed);
+  renderNodes["sync_master_dsp"] =
+      m_syncMasterDspToRender.load(std::memory_order_relaxed);
   renderNodes["PEQ"] = m_renderIncludePeq.load(std::memory_order_relaxed);
   renderNodes["GEQ"] = m_renderIncludeGeq.load(std::memory_order_relaxed);
   renderNodes["Filter"] = m_renderIncludeFilter.load(std::memory_order_relaxed);
-  renderNodes["Compressor"] = m_renderIncludeCompressor.load(std::memory_order_relaxed);
+  renderNodes["Compressor"] =
+      m_renderIncludeCompressor.load(std::memory_order_relaxed);
   renderNodes["Reverb"] = m_renderIncludeReverb.load(std::memory_order_relaxed);
-  renderNodes["Limiter"] = m_renderIncludeLimiter.load(std::memory_order_relaxed);
+  renderNodes["Limiter"] =
+      m_renderIncludeLimiter.load(std::memory_order_relaxed);
   root["render_nodes"] = renderNodes;
 
   QJsonArray decksArr;
   if (m_deckManager) {
     for (char cid : {'A', 'B', 'C', 'D'}) {
       if (const auto *d = m_deckManager->deck(cid)) {
-        if (!d->isOpen() || d->trackInfo().path.empty()) continue;
+        if (!d->isOpen() || d->trackInfo().path.empty())
+          continue;
         QJsonObject dobj;
         dobj["deck"] = QString(cid);
         dobj["path"] = QString::fromStdString(d->trackInfo().path);
@@ -6077,7 +6386,8 @@ bool EngineController::saveSessionState(const QString &filePath) const {
         dobj["offset_frames"] = static_cast<qint64>(d->offsetFrames());
         dobj["locked"] = d->isLocked();
         dobj["folder_mode"] = d->folderSession().isActive();
-        dobj["folder_path"] = QString::fromStdString(d->folderSession().folderPath());
+        dobj["folder_path"] =
+            QString::fromStdString(d->folderSession().folderPath());
         decksArr.append(dobj);
       }
     }
@@ -6093,7 +6403,8 @@ bool EngineController::saveSessionState(const QString &filePath) const {
 }
 
 bool EngineController::restoreSessionState(const QString &filePath) {
-  const QString targetPath = filePath.isEmpty() ? defaultSessionStatePath() : filePath;
+  const QString targetPath =
+      filePath.isEmpty() ? defaultSessionStatePath() : filePath;
   QFile f(targetPath);
   if (!f.exists() || !f.open(QIODevice::ReadOnly)) {
     return false;
@@ -6147,7 +6458,8 @@ bool EngineController::restoreSessionState(const QString &filePath) {
 
   const QJsonArray decksArr = root["decks"].toArray();
   for (const QJsonValue &dv : decksArr) {
-    if (!dv.isObject()) continue;
+    if (!dv.isObject())
+      continue;
     const QJsonObject dobj = dv.toObject();
     const QString dId = dobj["deck"].toString();
     const QString path = dobj["path"].toString();

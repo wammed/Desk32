@@ -7,7 +7,7 @@ import Desk32.Core
 ApplicationWindow {
     id: root
     visible: true
-    visibility: Window.FullScreen
+    visibility: SettingsManager.fullscreenOnStartup ? Window.FullScreen : Window.Windowed
     width: 2560
     height: 1440
     minimumWidth: 1280
@@ -3729,6 +3729,49 @@ ApplicationWindow {
             if (op === "WorkspaceRootMissing") {
                 workspaceRootMissingLabel.text = msg
                 workspaceRootMissingDialog.open()
+            }
+        }
+    }
+
+    Connections {
+        target: EngineController
+        function onDeckWorkspaceImportFinished(deckId, ok, statusText, message) {
+            if (!ok && !workspacePanel.visible) {
+                deckImportFailedTitleLabel.text = statusText === "Conflict"
+                    ? qsTr("Deck %1 -> Workspace Conflict").arg(deckId)
+                    : (statusText === "SelfCopy"
+                       ? qsTr("Deck %1 Already in Workspace").arg(deckId)
+                       : qsTr("Deck %1 -> Workspace Import Failed").arg(deckId))
+                deckImportFailedMsgLabel.text = message
+                deckImportFailedDialog.open()
+            }
+        }
+    }
+
+    Dialog {
+        id: deckImportFailedDialog
+        title: qsTr("Workspace Import Notice")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 440
+        standardButtons: Dialog.Ok
+        contentItem: ColumnLayout {
+            spacing: 6
+            Label {
+                id: deckImportFailedTitleLabel
+                Layout.fillWidth: true
+                font.bold: true
+                font.pixelSize: 12
+                color: "#FF8A80"
+                text: ""
+            }
+            Label {
+                id: deckImportFailedMsgLabel
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
+                color: "#E0E6ED"
+                text: ""
             }
         }
     }

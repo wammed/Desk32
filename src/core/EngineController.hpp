@@ -450,6 +450,9 @@ signals:
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
     void levelMatchStateChanged();
     void levelMatchCompleted(bool success, const QString& summary);
+    void deckWorkspaceImportFinished(const QString& deckId, bool ok,
+                                     const QString& statusText,
+                                     const QString& message);
 
 private:
     void syncMasterDspToRenderEngine();
@@ -472,6 +475,7 @@ private:
     void syncExternalInsertBypassToPipeline(bool bypass);
     void pollHardwareCalibrationProbe();
     void finishHardwareCalibration(bool restoreBypass, bool cancelSession = false);
+    void applyInitialSettingsIfLoaded();
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
@@ -574,6 +578,7 @@ private:
     bool m_calActive{false};
     int m_calSettleTicks{0};
     bool m_calRestoreBypass{false};
+    bool m_applyingInitialSettings{false};
 };
 
 } // namespace desk32::core

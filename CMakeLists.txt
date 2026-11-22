@@ -90,6 +90,8 @@ qt_standard_project_setup(REQUIRES 6.4)
 # Primary Desk32 Executable
 qt_add_executable(desk32
     src/main.cpp
+    src/core/SettingsManager.hpp
+    src/core/SettingsManager.cpp
     src/core/LanguageManager.hpp
     src/core/LanguageManager.cpp
     src/core/EngineController.hpp

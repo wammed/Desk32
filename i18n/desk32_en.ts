@@ -294,6 +294,65 @@
         <source>Select Audio Output Device (%1)</source>
         <translation>Select Audio Output Device (%1)</translation>
     </message>
+    <message>
+        <source>Deck %1 -&gt; Workspace Conflict</source>
+        <translation>Deck %1 -&gt; Workspace Conflict</translation>
+    </message>
+    <message>
+        <source>Deck %1 Already in Workspace</source>
+        <translation>Deck %1 Already in Workspace</translation>
+    </message>
+    <message>
+        <source>Deck %1 -&gt; Workspace Import Failed</source>
+        <translation>Deck %1 -&gt; Workspace Import Failed</translation>
+    </message>
+    <message>
+        <source>Workspace Import Notice</source>
+        <translation>Workspace Import Notice</translation>
+    </message>
+</context>
+<context>
+    <name>WorkspacePanel</name>
+    <message>
+        <source>Import failed</source>
+        <translation>Import failed</translation>
+    </message>
+    <message>
+        <source>Import Conflict — File Not Overwritten</source>
+        <translation>Import Conflict — File Not Overwritten</translation>
+    </message>
+    <message>
+        <source>Import Failed</source>
+        <translation>Import Failed</translation>
+    </message>
+    <message>
+        <source>Folder Import Failed</source>
+        <translation>Folder Import Failed</translation>
+    </message>
+    <message>
+        <source>No supported audio files found in folder (symbolic links are excluded).</source>
+        <translation>No supported audio files found in folder (symbolic links are excluded).</translation>
+    </message>
+    <message>
+        <source>Folder import: %1 imported, %2 skipped, %3 conflict(s), %4 failed</source>
+        <translation>Folder import: %1 imported, %2 skipped, %3 conflict(s), %4 failed</translation>
+    </message>
+    <message>
+        <source>Folder Import Completed with Failures / Conflicts</source>
+        <translation>Folder Import Completed with Failures / Conflicts</translation>
+    </message>
+    <message>
+        <source>Ext Mods: %1 | Save Store: %2 KB</source>
+        <translation>Ext Mods: %1 | Save Store: %2 KB</translation>
+    </message>
+    <message>
+        <source>Details</source>
+        <translation>Details</translation>
+    </message>
+    <message>
+        <source>Renamed to %1</source>
+        <translation>Renamed to %1</translation>
+    </message>
 </context>
 <context>
     <name>OutputDevicePanel</name>

@@ -350,6 +350,65 @@
         <source>Select Audio Output Device (%1)</source>
         <translation>オーディオ出力デバイスを選択 (%1)</translation>
     </message>
+    <message>
+        <source>Deck %1 -&gt; Workspace Conflict</source>
+        <translation>Deck %1 → ワークスペース衝突</translation>
+    </message>
+    <message>
+        <source>Deck %1 Already in Workspace</source>
+        <translation>Deck %1 は既にワークスペース内にあります</translation>
+    </message>
+    <message>
+        <source>Deck %1 -&gt; Workspace Import Failed</source>
+        <translation>Deck %1 → ワークスペース取り込み失敗</translation>
+    </message>
+    <message>
+        <source>Workspace Import Notice</source>
+        <translation>ワークスペース取り込み通知</translation>
+    </message>
+</context>
+<context>
+    <name>WorkspacePanel</name>
+    <message>
+        <source>Import failed</source>
+        <translation>取り込みに失敗しました</translation>
+    </message>
+    <message>
+        <source>Import Conflict — File Not Overwritten</source>
+        <translation>取り込み衝突 — 既存ファイルは上書きされませんでした</translation>
+    </message>
+    <message>
+        <source>Import Failed</source>
+        <translation>取り込み失敗</translation>
+    </message>
+    <message>
+        <source>Folder Import Failed</source>
+        <translation>フォルダ取り込み失敗</translation>
+    </message>
+    <message>
+        <source>No supported audio files found in folder (symbolic links are excluded).</source>
+        <translation>フォルダ内に対応音声ファイルが見つかりませんでした（シンボリックリンクは除外されます）。</translation>
+    </message>
+    <message>
+        <source>Folder import: %1 imported, %2 skipped, %3 conflict(s), %4 failed</source>
+        <translation>フォルダ取り込み: %1 件取込, %2 件スキップ, %3 件衝突, %4 件失敗</translation>
+    </message>
+    <message>
+        <source>Folder Import Completed with Failures / Conflicts</source>
+        <translation>フォルダ取り込み完了（失敗・衝突あり）</translation>
+    </message>
+    <message>
+        <source>Ext Mods: %1 | Save Store: %2 KB</source>
+        <translation>外部変更: %1 | セーブ容量: %2 KB</translation>
+    </message>
+    <message>
+        <source>Details</source>
+        <translation>詳細</translation>
+    </message>
+    <message>
+        <source>Renamed to %1</source>
+        <translation>%1 にリネームしました</translation>
+    </message>
 </context>
 <context>
     <name>OutputDevicePanel</name>

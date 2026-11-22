@@ -324,6 +324,7 @@ add_test(NAME test_log_service COMMAND test_log_service)
 # Phase 2: Acoustic Correction & Built-in DSP Implementation
 add_executable(test_phase2_dsp
     test_phase2_dsp.cpp
+    ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
@@ -378,6 +379,7 @@ add_test(NAME test_phase2_dsp COMMAND test_phase2_dsp)
 # Phase 3: External Plugin Host Integration (External Insert & Preset Management)
 add_executable(test_phase3_external_insert
     test_phase3_external_insert.cpp
+    ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
@@ -432,6 +434,7 @@ add_test(NAME test_phase3_external_insert COMMAND test_phase3_external_insert)
 # Phase 4: Export and Render Engine (Offline Processing, Bijective Base-26 Serial, Staging & Rollback)
 add_executable(test_phase4_export_render
     test_phase4_export_render.cpp
+    ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
@@ -530,6 +533,7 @@ set_tests_properties(test_underrun_investigation PROPERTIES TIMEOUT 300)
 # v3.8.1 Dedicated Workspace, TagLib Metadata, Direct Mode, Tap Isolation, 16-Band PEQ, Filter Q & Presets
 add_executable(test_workspace_v381
     test_workspace_v381.cpp
+    ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
@@ -585,6 +589,7 @@ set_tests_properties(test_workspace_v381 PROPERTIES TIMEOUT 300)
 # Output Device Enumeration & Selection UI Verification
 add_executable(test_output_device_ui
     test_output_device_ui.cpp
+    ../src/core/SettingsManager.cpp
     ../src/core/LanguageManager.cpp
     ../src/core/EngineController.cpp
     ../src/core/log/LogService.cpp

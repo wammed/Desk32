@@ -1,5 +1,6 @@
 #include "core/EngineController.hpp"
 #include "core/LanguageManager.hpp"
+#include "core/SettingsManager.hpp"
 #include "core/log/LogErrorCodes.hpp"
 #include "core/log/LogService.hpp"
 #include "engine/render/RenderEngine.hpp"
@@ -174,7 +175,10 @@ int main(int argc, char *argv[]) {
 
   QQmlApplicationEngine engine;
 
-  // Initialize bilingual language manager
+  // Load unified XDG settings ($XDG_CONFIG_HOME/desk32/settings.json)
+  desk32::core::SettingsManager::instance().load();
+
+  // Initialize bilingual language manager (honors SettingsManager preference)
   LanguageManager::instance().init(&app, &engine);
 
   // Initialize Engine Controller & Subsystems
@@ -198,6 +202,8 @@ int main(int argc, char *argv[]) {
   }
 
   // Expose Singletons to QML
+  qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "SettingsManager",
+                               &desk32::core::SettingsManager::instance());
   qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager",
                                &LanguageManager::instance());
   qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController",

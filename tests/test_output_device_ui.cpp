@@ -1,3 +1,6 @@
+#include <QFile>
+#include <QProcess>
+#include <QSignalSpy>
 #include <QTest>
 #include <QGuiApplication>
 #include <QQmlComponent>
@@ -9,9 +12,11 @@
 #include <QVariant>
 #include <QVariantList>
 #include <QVariantMap>
+#include <unistd.h>
 
 #include "core/EngineController.hpp"
 #include "core/LanguageManager.hpp"
+#include "core/SettingsManager.hpp"
 #include "core/log/LogService.hpp"
 #include "engine/backend/AudioControlTypes.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
@@ -36,6 +41,8 @@ private slots:
     void initTestCase();
     void cleanupTestCase();
     void testOutputDeviceEnumerationAndSelectionPanel();
+    void testWorkspaceImportFailureUiDisplay();
+    void testSettingsManagerPersistenceAndIntegration();
     void testMainQmlCompilesWithOutputDevicePanel();
 
 private:
@@ -50,6 +57,8 @@ void TestOutputDeviceUi::initTestCase()
     QVERIFY(m_tempDir->isValid());
     LogService::instance().start(m_tempDir->path() + "/test_output_device_ui_log.db");
     PresetManager::instance().setCustomRootPath(m_tempDir->path() + "/presets");
+    WorkspaceManager::instance().setConfigFilePathForTesting(m_tempDir->path() + "/workspaces.json");
+    WorkspaceManager::instance().resetForTesting();
 
     auto& ctrl = EngineController::instance();
     QVERIFY(ctrl.initialize(true));
@@ -76,6 +85,8 @@ void TestOutputDeviceUi::initTestCase()
 
     ctrl.audioOutput()->setSimulatedOutputDevices({dac1, dac2});
 
+    qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "SettingsManager",
+                                 &desk32::core::SettingsManager::instance());
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "LanguageManager",
                                  &LanguageManager::instance());
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "EngineController",
@@ -95,6 +106,7 @@ void TestOutputDeviceUi::cleanupTestCase()
     WorkspaceManager::instance().resetForTesting();
     RenderSequenceManager::instance().close();
     LogService::instance().stop();
+    desk32::core::SettingsManager::instance().resetForTesting();
     m_tempDir.reset();
 }
 
@@ -167,6 +179,184 @@ void TestOutputDeviceUi::testOutputDeviceEnumerationAndSelectionPanel()
     QCOMPARE(panel->property("statusIsError").toBool(), false);
     QCOMPARE(EngineController::instance().getAudioCapabilities().value("targetDeviceId").toString(),
              QString());
+}
+
+void TestOutputDeviceUi::testWorkspaceImportFailureUiDisplay()
+{
+    auto& ws = WorkspaceManager::instance();
+    const QString wsDir = m_tempDir->path() + "/ui_import_ws";
+    const QString srcDir = m_tempDir->path() + "/ui_import_src";
+    QVERIFY(QDir().mkpath(wsDir));
+    QVERIFY(QDir().mkpath(srcDir));
+
+    QString wsErr;
+    QVERIFY2(ws.registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
+
+    // Create a valid stereo WAV and a mono WAV for import testing
+    const QString stereoWav = srcDir + "/stereo_ok.wav";
+    const QString monoWav = srcDir + "/mono_bad.wav";
+    const QString symWav = srcDir + "/sym_link.wav";
+    const QString hardWav = srcDir + "/hard_link.wav";
+
+    QProcess ffStereo;
+    ffStereo.start("ffmpeg", {"-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                              "-ar", "48000", "-ac", "2", stereoWav});
+    QVERIFY(ffStereo.waitForFinished(10000) && ffStereo.exitCode() == 0);
+
+    QProcess ffMono;
+    ffMono.start("ffmpeg", {"-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                            "-ar", "48000", "-ac", "1", monoWav});
+    QVERIFY(ffMono.waitForFinished(10000) && ffMono.exitCode() == 0);
+
+    QVERIFY(::symlink(stereoWav.toUtf8().constData(), symWav.toUtf8().constData()) == 0);
+    QVERIFY(::link(stereoWav.toUtf8().constData(), hardWav.toUtf8().constData()) == 0);
+
+    QQmlEngine engine;
+    const QUrl wsPanelUrl = QUrl::fromLocalFile(
+        QStringLiteral(DESK32_SOURCE_DIR "/qml/WorkspacePanel.qml"));
+    QQmlComponent component(&engine, wsPanelUrl);
+    if (component.isError()) {
+        qWarning() << component.errors();
+    }
+    QVERIFY2(component.status() == QQmlComponent::Ready,
+             qPrintable(component.errorString()));
+
+    std::unique_ptr<QObject> panel(component.create());
+    QVERIFY2(panel != nullptr, qPrintable(component.errorString()));
+
+    // 1. Symbolic link rejection -> error severity + feedback item populated
+    const QVariantMap symRes = ws.importFileFromUi(symWav, QString());
+    QVERIFY(QMetaObject::invokeMethod(
+        panel.get(), "handleImportFileResult",
+        Q_ARG(QVariant, symRes),
+        Q_ARG(QVariant, false)));
+    QCOMPARE(panel->property("statusSeverity").toString(), QStringLiteral("error"));
+    QVERIFY(panel->property("statusNotice").toString().contains("Symbolic links"));
+    QCOMPARE(panel->property("importFeedbackItems").toList().size(), 1);
+
+    // 2. Hardlink rejection -> error severity + feedback item populated
+    const QVariantMap hardRes = ws.importFileFromUi(hardWav, QString());
+    QVERIFY(QMetaObject::invokeMethod(
+        panel.get(), "handleImportFileResult",
+        Q_ARG(QVariant, hardRes),
+        Q_ARG(QVariant, false)));
+    QCOMPARE(panel->property("statusSeverity").toString(), QStringLiteral("error"));
+    QVERIFY(panel->property("statusNotice").toString().contains("Hard-linked"));
+    QCOMPARE(panel->property("importFeedbackItems").toList().size(), 1);
+
+    // 3. Non-stereo rejection -> error severity
+    const QVariantMap monoRes = ws.importFileFromUi(monoWav, QString());
+    QVERIFY(QMetaObject::invokeMethod(
+        panel.get(), "handleImportFileResult",
+        Q_ARG(QVariant, monoRes),
+        Q_ARG(QVariant, false)));
+    QCOMPARE(panel->property("statusSeverity").toString(), QStringLiteral("error"));
+    QVERIFY(panel->property("statusNotice").toString().contains("Non-stereo") ||
+            panel->property("statusNotice").toString().contains("Stereo"));
+    QCOMPARE(panel->property("importFeedbackItems").toList().size(), 1);
+
+    // Remove hardlink before importing stereo_ok.wav (so link count returns to 1)
+    QVERIFY(QFile::remove(hardWav));
+    const QVariantMap okRes = ws.importFileFromUi(stereoWav, QString());
+    QVERIFY(QMetaObject::invokeMethod(
+        panel.get(), "handleImportFileResult",
+        Q_ARG(QVariant, okRes),
+        Q_ARG(QVariant, false)));
+    QCOMPARE(panel->property("statusSeverity").toString(), QStringLiteral("success"));
+    QCOMPARE(panel->property("importFeedbackItems").toList().size(), 0);
+
+    // 4. Folder import with mixed valid + mono failure -> error severity & failure detail list
+    const QVariantList folderRes = ws.importFolderFromUi(srcDir, QString());
+    QVERIFY(QMetaObject::invokeMethod(
+        panel.get(), "handleImportFolderResults",
+        Q_ARG(QVariant, folderRes),
+        Q_ARG(QVariant, false)));
+    QCOMPARE(panel->property("statusSeverity").toString(), QStringLiteral("error"));
+    QVERIFY(!panel->property("importFeedbackItems").toList().isEmpty());
+
+    // 5. Deck ->WS copy failure emits deckWorkspaceImportFinished with ok=false and reason
+    auto& ctrl = EngineController::instance();
+    QVERIFY(ctrl.loadTrack("A", wsDir + "/stereo_ok.wav"));
+    QSignalSpy copySpy(&ctrl, &EngineController::deckWorkspaceImportFinished);
+    QVERIFY(!ctrl.copyDeckTrackToWorkspace("A"));
+    QCOMPARE(copySpy.count(), 1);
+    const QList<QVariant> args = copySpy.takeFirst();
+    QCOMPARE(args[0].toString(), QStringLiteral("A"));
+    QCOMPARE(args[1].toBool(), false);
+    QCOMPARE(args[2].toString(), QStringLiteral("SelfCopy"));
+    QVERIFY(!args[3].toString().isEmpty());
+
+    ws.resetForTesting();
+}
+
+void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
+{
+    auto& sm = desk32::core::SettingsManager::instance();
+    const QString cfgPath = m_tempDir->path() + "/desk32_cfg/settings.json";
+    sm.setConfigFilePathForTesting(cfgPath);
+    QVERIFY(sm.load());
+    QVERIFY(QFile::exists(cfgPath));
+    QCOMPARE(sm.audioBackend(), QStringLiteral("PipeWire"));
+    QCOMPARE(sm.audioBufferFrames(), 256);
+    QCOMPARE(sm.audioPcmFormat(), QStringLiteral("F32LE"));
+    QCOMPARE(sm.fullscreenOnStartup(), true);
+
+    // Extensible dotted-key support for upcoming JACK / ALSA / DSP settings
+    sm.setValue(QStringLiteral("audio.jack.auto_connect"), false);
+    sm.setValue(QStringLiteral("audio.alsa.device"), QStringLiteral("hw:1,0"));
+    sm.setValue(QStringLiteral("audio.alsa.exclusive_hw_direct"), true);
+    sm.setLanguagePreference(QStringLiteral("ja"));
+    sm.setFullscreenOnStartup(false);
+
+    // Modify via EngineController -> persisted to settings.json automatically
+    auto& ctrl = EngineController::instance();
+    QVERIFY(ctrl.selectOutputDevice(QStringLiteral("alsa_output.usb-dac")));
+    QVERIFY(ctrl.setOutputBufferFrames(512));
+    ctrl.setOutputPcmFormat(QStringLiteral("S24_32LE"));
+    ctrl.setLiveDitherEnabled(false);
+    QVERIFY(ctrl.setFixedGraphSampleRate(96000.0));
+    ctrl.setListeningPreset(QStringLiteral("Acoustic Clarity"));
+    ctrl.setExternalInsertPosition(2);
+    ctrl.setExternalInsertDisconnectPolicy(1);
+
+    // Reload from disk into fresh SettingsManager state
+    sm.setConfigFilePathForTesting(cfgPath);
+    QVERIFY(sm.load());
+    QCOMPARE(sm.languagePreference(), QStringLiteral("ja"));
+    QCOMPARE(sm.fullscreenOnStartup(), false);
+    QCOMPARE(sm.audioTargetDevice(), QStringLiteral("alsa_output.usb-dac"));
+    QCOMPARE(sm.audioBufferFrames(), 512);
+    QCOMPARE(sm.audioPcmFormat(), QStringLiteral("S24_32LE"));
+    QCOMPARE(sm.liveDitherEnabled(), false);
+    QCOMPARE(sm.audioFixedSampleRate(), 96000.0);
+    QCOMPARE(sm.listeningPreset(), QStringLiteral("Acoustic Clarity"));
+    QCOMPARE(sm.externalInsertPosition(), 2);
+    QCOMPARE(sm.externalInsertDisconnectPolicy(), 1);
+    QCOMPARE(sm.value(QStringLiteral("audio.jack.auto_connect")).toBool(), false);
+    QCOMPARE(sm.value(QStringLiteral("audio.alsa.device")).toString(), QStringLiteral("hw:1,0"));
+    QCOMPARE(sm.value(QStringLiteral("audio.alsa.exclusive_hw_direct")).toBool(), true);
+
+    // Corrupt JSON fallback safety
+    {
+        QFile badFile(cfgPath);
+        QVERIFY(badFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        badFile.write("{ invalid json");
+        badFile.close();
+    }
+    QVERIFY(!sm.load());
+    QVERIFY(!sm.lastError().isEmpty());
+    QCOMPARE(sm.audioBufferFrames(), 256);
+
+    sm.resetForTesting();
+    // Restore controller defaults so subsequent tests remain clean
+    QVERIFY(ctrl.selectOutputDevice(QStringLiteral("default")));
+    QVERIFY(ctrl.setOutputBufferFrames(256));
+    ctrl.setOutputPcmFormat(QStringLiteral("F32LE"));
+    ctrl.setLiveDitherEnabled(true);
+    QVERIFY(ctrl.setFixedGraphSampleRate(48000.0));
+    ctrl.setListeningPreset(QStringLiteral("Monitor Flat"));
+    ctrl.setExternalInsertPosition(4);
+    ctrl.setExternalInsertDisconnectPolicy(0);
 }
 
 void TestOutputDeviceUi::testMainQmlCompilesWithOutputDevicePanel()

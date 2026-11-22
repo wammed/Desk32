@@ -24,6 +24,7 @@ signals:
 private:
     explicit LanguageManager(QObject* parent = nullptr);
     ~LanguageManager() override = default;
+    void applyLanguageInternal(const QString& langCode, bool persist);
 
     QGuiApplication* m_app = nullptr;
     QQmlEngine* m_engine = nullptr;

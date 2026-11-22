@@ -23,7 +23,120 @@ Rectangle {
     property string selectedFileRel: ""
     property var selectedFileDetails: ({})
     property string statusNotice: ""
+    property string statusSeverity: "info" // "info" | "success" | "warning" | "error"
+    property string importFeedbackTitle: ""
+    property string importFeedbackSummary: ""
+    property var importFeedbackItems: []
     property string diffSummaryText: ""
+
+    function setNotice(message, severity) {
+        statusNotice = message || ""
+        statusSeverity = severity || "info"
+    }
+
+    function noticeBorderColor() {
+        if (statusSeverity === "error") return "#FF5252"
+        if (statusSeverity === "warning") return "#FFB300"
+        if (statusSeverity === "success") return "#00E676"
+        return "#00E5FF"
+    }
+
+    function noticeBgColor() {
+        if (statusSeverity === "error") return "#FF52521C"
+        if (statusSeverity === "warning") return "#FFB3001A"
+        if (statusSeverity === "success") return "#00E67616"
+        return "#00E5FF14"
+    }
+
+    function noticeTextColor() {
+        if (statusSeverity === "error") return "#FFCDD2"
+        if (statusSeverity === "warning") return "#FFE082"
+        if (statusSeverity === "success") return "#B9F6CA"
+        return "#B2EBF2"
+    }
+
+    function handleImportFileResult(res, openDialogOnFailure) {
+        var shouldPopup = (openDialogOnFailure === undefined) ? true : openDialogOnFailure
+        var st = res ? res.status : 3
+        var msg = (res && res.message) ? res.message : qsTr("Import failed")
+        if (st === 0) {
+            setNotice(msg, "success")
+            importFeedbackItems = []
+            return
+        }
+        if (st === 1) {
+            setNotice(msg, "warning")
+            importFeedbackItems = []
+            return
+        }
+        setNotice(msg, "error")
+        var statusLbl = (res && res.statusText) ? res.statusText : (st === 2 ? "Conflict" : "Failed")
+        importFeedbackTitle = (st === 2)
+            ? qsTr("Import Conflict — File Not Overwritten")
+            : qsTr("Import Failed")
+        importFeedbackSummary = msg
+        importFeedbackItems = [{
+            statusText: statusLbl,
+            sourcePath: (res && res.sourcePath) ? res.sourcePath : "",
+            message: msg
+        }]
+        if (shouldPopup) {
+            importFeedbackDialog.open()
+        }
+    }
+
+    function handleImportFolderResults(results, openDialogOnFailure) {
+        var shouldPopup = (openDialogOnFailure === undefined) ? true : openDialogOnFailure
+        var arr = results || []
+        if (arr.length === 0) {
+            var errMsg = WorkspaceManager.lastError()
+            if (errMsg && errMsg.length > 0) {
+                setNotice(errMsg, "error")
+                importFeedbackTitle = qsTr("Folder Import Failed")
+                importFeedbackSummary = errMsg
+                importFeedbackItems = [{ statusText: "Failed", sourcePath: "", message: errMsg }]
+                if (shouldPopup) importFeedbackDialog.open()
+            } else {
+                setNotice(qsTr("No supported audio files found in folder (symbolic links are excluded)."), "warning")
+                importFeedbackItems = []
+            }
+            return
+        }
+        var imported = 0
+        var skipped = 0
+        var conflicts = 0
+        var failed = 0
+        var issues = []
+        for (var i = 0; i < arr.length; ++i) {
+            var r = arr[i]
+            if (r.status === 0) imported++
+            else if (r.status === 1) skipped++
+            else if (r.status === 2) {
+                conflicts++
+                issues.push(r)
+            } else {
+                failed++
+                issues.push(r)
+            }
+        }
+        var summary = qsTr("Folder import: %1 imported, %2 skipped, %3 conflict(s), %4 failed")
+                      .arg(imported).arg(skipped).arg(conflicts).arg(failed)
+        if (failed > 0 || conflicts > 0) {
+            setNotice(summary + " — " + (issues[0].message || ""), "error")
+            importFeedbackTitle = qsTr("Folder Import Completed with Failures / Conflicts")
+            importFeedbackSummary = summary
+            importFeedbackItems = issues
+            if (shouldPopup) {
+                importFeedbackDialog.open()
+            }
+        } else if (skipped > 0 && imported === 0) {
+            setNotice(summary, "warning")
+            importFeedbackItems = []
+        } else {
+            setNotice(summary, "success")
+            importFeedbackItems = []
+        }
+    }
 
     function stripFileScheme(urlStr) {
         var s = urlStr ? urlStr.toString() : ""
@@ -62,11 +175,23 @@ Rectangle {
         function onWorkspaceStateChanged() { wsRoot.refreshAll() }
         function onWorkspaceContentsChanged() { wsRoot.refreshAll() }
         function onExternalModificationDetected(path, detail) {
-            wsRoot.statusNotice = qsTr("External modification: %1 (%2)").arg(path, detail)
+            wsRoot.setNotice(qsTr("External modification: %1 (%2)").arg(path, detail), "warning")
             wsRoot.refreshAll()
         }
         function onWorkspaceErrorOccurred(op, msg) {
-            wsRoot.statusNotice = op + ": " + msg
+            wsRoot.setNotice(op + ": " + msg, "error")
+        }
+    }
+
+    Connections {
+        target: EngineController
+        function onDeckWorkspaceImportFinished(deckId, ok, statusText, message) {
+            if (ok) {
+                wsRoot.setNotice(message, statusText === "Skipped" ? "warning" : "success")
+            } else {
+                wsRoot.setNotice(message, statusText === "SelfCopy" ? "warning" : "error")
+            }
+            wsRoot.refreshAll()
         }
     }
 
@@ -76,9 +201,9 @@ Rectangle {
         onAccepted: {
             var p = wsRoot.stripFileScheme(selectedFolder)
             if (WorkspaceManager.registerAndSelectWorkspaceAtStartup(p)) {
-                wsRoot.statusNotice = qsTr("Opened workspace: %1").arg(p)
+                wsRoot.setNotice(qsTr("Opened workspace: %1").arg(p), "success")
             } else {
-                wsRoot.statusNotice = WorkspaceManager.lastError()
+                wsRoot.setNotice(WorkspaceManager.lastError(), "error")
             }
             wsRoot.refreshAll()
         }
@@ -91,7 +216,7 @@ Rectangle {
         onAccepted: {
             var p = wsRoot.stripFileScheme(selectedFile)
             var res = WorkspaceManager.importFileFromUi(p, "")
-            wsRoot.statusNotice = res.message || (res.ok ? qsTr("Imported") : qsTr("Import failed"))
+            wsRoot.handleImportFileResult(res, true)
             wsRoot.refreshAll()
         }
     }
@@ -102,8 +227,98 @@ Rectangle {
         onAccepted: {
             var p = wsRoot.stripFileScheme(selectedFolder)
             var results = WorkspaceManager.importFolderFromUi(p, "")
-            wsRoot.statusNotice = qsTr("Processed %1 file(s) from folder").arg(results.length)
+            wsRoot.handleImportFolderResults(results, true)
             wsRoot.refreshAll()
+        }
+    }
+
+    // Import failure / conflict detail dialog
+    Dialog {
+        id: importFeedbackDialog
+        title: wsRoot.importFeedbackTitle.length > 0 ? wsRoot.importFeedbackTitle : qsTr("Import Failed")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 480
+        standardButtons: Dialog.Ok
+
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
+                font.bold: true
+                color: "#FF8A80"
+                text: wsRoot.importFeedbackSummary
+            }
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(240, Math.max(80, wsRoot.importFeedbackItems.length * 64))
+                visible: wsRoot.importFeedbackItems.length > 0
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: 440
+                    spacing: 6
+
+                    Repeater {
+                        model: wsRoot.importFeedbackItems
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: itemCol.implicitHeight + 12
+                            radius: 4
+                            color: "#1a1214"
+                            border.color: modelData.statusText === "Conflict" ? "#FFB300" : "#FF5252"
+
+                            ColumnLayout {
+                                id: itemCol
+                                anchors.fill: parent
+                                anchors.margins: 6
+                                spacing: 2
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Rectangle {
+                                        implicitWidth: stBadgeLbl.implicitWidth + 8
+                                        height: 16
+                                        radius: 3
+                                        color: modelData.statusText === "Conflict" ? "#FFB30022" : "#FF525222"
+                                        border.color: modelData.statusText === "Conflict" ? "#FFB300" : "#FF5252"
+                                        Label {
+                                            id: stBadgeLbl
+                                            anchors.centerIn: parent
+                                            text: (modelData.statusText || "FAILED").toUpperCase()
+                                            font.pixelSize: 8
+                                            font.bold: true
+                                            font.family: "Monospace"
+                                            color: modelData.statusText === "Conflict" ? "#FFB300" : "#FF5252"
+                                        }
+                                    }
+                                    Label {
+                                        Layout.fillWidth: true
+                                        visible: !!(modelData.sourcePath && modelData.sourcePath.length > 0)
+                                        text: modelData.sourcePath || ""
+                                        font.pixelSize: 9
+                                        font.family: "Monospace"
+                                        color: "#B0BEC5"
+                                        elide: Text.ElideMiddle
+                                    }
+                                }
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: modelData.message || ""
+                                    font.pixelSize: 10
+                                    color: "#FFCDD2"
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -175,9 +390,9 @@ Rectangle {
 
         onAccepted: {
             if (WorkspaceManager.unregisterWorkspaceFromUi(targetPath)) {
-                wsRoot.statusNotice = qsTr("Unregistered workspace: %1").arg(targetPath)
+                wsRoot.setNotice(qsTr("Unregistered workspace: %1").arg(targetPath), "success")
             } else {
-                wsRoot.statusNotice = WorkspaceManager.lastError()
+                wsRoot.setNotice(WorkspaceManager.lastError(), "error")
             }
             wsRoot.refreshAll()
         }
@@ -236,10 +451,53 @@ Rectangle {
                     Layout.fillWidth: true
                     elide: Text.ElideRight
                     font.pixelSize: 9; color: "#B0BEC5"
-                    text: qsTr("Ext Mods: %1 | Save Store: %2 KB | %3")
+                    text: qsTr("Ext Mods: %1 | Save Store: %2 KB")
                           .arg(WorkspaceManager.externalModificationCount)
                           .arg(Math.round(WorkspaceManager.saveStoreTotalBytes / 1024))
-                          .arg(wsRoot.statusNotice.length > 0 ? wsRoot.statusNotice : qsTr("Ready"))
+                }
+            }
+        }
+
+        // Prominent Operation / Import Feedback Banner (color-coded & word-wrapped)
+        Rectangle {
+            id: noticeBanner
+            Layout.fillWidth: true
+            visible: wsRoot.statusNotice.length > 0
+            implicitHeight: noticeRow.implicitHeight + 12
+            radius: 4
+            color: wsRoot.noticeBgColor()
+            border.color: wsRoot.noticeBorderColor()
+
+            RowLayout {
+                id: noticeRow
+                anchors.fill: parent
+                anchors.margins: 6
+                spacing: 6
+
+                Label {
+                    Layout.fillWidth: true
+                    text: wsRoot.statusNotice
+                    font.pixelSize: 10
+                    font.bold: wsRoot.statusSeverity === "error"
+                    color: wsRoot.noticeTextColor()
+                    wrapMode: Text.WordWrap
+                }
+
+                Button {
+                    text: qsTr("Details")
+                    font.pixelSize: 9
+                    Layout.preferredHeight: 20
+                    visible: wsRoot.importFeedbackItems.length > 0
+                    onClicked: importFeedbackDialog.open()
+                }
+
+                Button {
+                    text: "✕"
+                    flat: true
+                    font.pixelSize: 9
+                    Layout.preferredWidth: 20
+                    Layout.preferredHeight: 20
+                    onClicked: wsRoot.statusNotice = ""
                 }
             }
         }
@@ -274,7 +532,7 @@ Rectangle {
                         font.pixelSize: 10
                         onClicked: {
                             WorkspaceManager.continueInReadOnlyMode()
-                            wsRoot.statusNotice = qsTr("Switched to Read-Only mode")
+                            wsRoot.setNotice(qsTr("Switched to Read-Only mode"), "info")
                             wsRoot.refreshAll()
                         }
                     }
@@ -316,7 +574,7 @@ Rectangle {
                                 enabled: modelData.lockState === 0
                                 onClicked: {
                                     if (!WorkspaceManager.selectWorkspaceAtStartup(modelData.path)) {
-                                        wsRoot.statusNotice = WorkspaceManager.lastError()
+                                        wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                     }
                                     wsRoot.refreshAll()
                                 }
@@ -359,7 +617,11 @@ Rectangle {
                         enabled: WorkspaceManager.hasOpenWorkspace
                         onClicked: {
                             var mods = WorkspaceManager.checkExternalChangesFromUi()
-                            wsRoot.statusNotice = mods.length === 0 ? qsTr("All files match index SHA-256") : mods.join("; ")
+                            if (mods.length === 0) {
+                                wsRoot.setNotice(qsTr("All files match index SHA-256"), "success")
+                            } else {
+                                wsRoot.setNotice(mods.join("; "), "warning")
+                            }
                             wsRoot.refreshAll()
                         }
                     }
@@ -414,7 +676,7 @@ Rectangle {
                                 font.pixelSize: 9; Layout.preferredHeight: 24
                                 onClicked: {
                                     if (!WorkspaceManager.deleteFileFromUi(modelData.relativePath)) {
-                                        wsRoot.statusNotice = WorkspaceManager.lastError()
+                                        wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                     }
                                     if (wsRoot.selectedFileRel === modelData.relativePath) wsRoot.selectedFileRel = ""
                                     wsRoot.refreshAll()
@@ -457,9 +719,9 @@ Rectangle {
                                     genre: editGenreField.text
                                 }
                                 if (WorkspaceManager.editFileTagsFromUi(wsRoot.selectedFileRel, m)) {
-                                    wsRoot.statusNotice = qsTr("Tags saved to %1").arg(wsRoot.selectedFileRel)
+                                    wsRoot.setNotice(qsTr("Tags saved to %1").arg(wsRoot.selectedFileRel), "success")
                                 } else {
-                                    wsRoot.statusNotice = WorkspaceManager.lastError()
+                                    wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                 }
                                 wsRoot.refreshAll()
                             }
@@ -471,10 +733,11 @@ Rectangle {
                             enabled: renameField.text.trim().length > 0
                             onClicked: {
                                 if (WorkspaceManager.renameFileFromUi(wsRoot.selectedFileRel, renameField.text.trim())) {
+                                    wsRoot.setNotice(qsTr("Renamed to %1").arg(renameField.text.trim()), "success")
                                     wsRoot.selectedFileRel = renameField.text.trim()
                                     renameField.text = ""
                                 } else {
-                                    wsRoot.statusNotice = WorkspaceManager.lastError()
+                                    wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                 }
                                 wsRoot.refreshAll()
                             }
@@ -497,9 +760,9 @@ Rectangle {
                             var sid = WorkspaceManager.createSaveFromUi(newSaveNameField.text.trim())
                             if (sid.length > 0) {
                                 newSaveNameField.text = ""
-                                wsRoot.statusNotice = qsTr("Created save %1").arg(sid)
+                                wsRoot.setNotice(qsTr("Created save %1").arg(sid), "success")
                             } else {
-                                wsRoot.statusNotice = WorkspaceManager.lastError()
+                                wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                             }
                             wsRoot.refreshAll()
                         }
@@ -510,7 +773,7 @@ Rectangle {
                         enabled: WorkspaceManager.hasOpenWorkspace
                         onClicked: {
                             var removed = WorkspaceManager.runGarbageCollectionFromUi()
-                            wsRoot.statusNotice = qsTr("GC removed %1 unreferenced object(s)").arg(removed)
+                            wsRoot.setNotice(qsTr("GC removed %1 unreferenced object(s)").arg(removed), "info")
                             wsRoot.refreshAll()
                         }
                     }
@@ -562,7 +825,7 @@ Rectangle {
                                 onClicked: {
                                     var p = WorkspaceManager.prepareSavedTrackForAuditionFromUi(modelData.saveId, wsRoot.selectedFileRel)
                                     if (p.length > 0) EngineController.loadTrack(EngineController.activeDeckId, p)
-                                    else wsRoot.statusNotice = WorkspaceManager.lastError()
+                                    else wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                 }
                             }
                             Button {
@@ -570,9 +833,11 @@ Rectangle {
                                 font.pixelSize: 9; Layout.preferredHeight: 24
                                 onClicked: {
                                     var r = WorkspaceManager.adoptSaveFromUi(modelData.saveId)
-                                    wsRoot.statusNotice = r.success
-                                        ? qsTr("Rolled back to %1 (auto-save: %2)").arg(modelData.saveId, r.autoSaveId || "-")
-                                        : (r.errorMessage || qsTr("Rollback failed"))
+                                    if (r.success) {
+                                        wsRoot.setNotice(qsTr("Rolled back to %1 (auto-save: %2)").arg(modelData.saveId, r.autoSaveId || "-"), "success")
+                                    } else {
+                                        wsRoot.setNotice(r.errorMessage || qsTr("Rollback failed"), "error")
+                                    }
                                     wsRoot.refreshAll()
                                 }
                             }
