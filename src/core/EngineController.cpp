@@ -56,6 +56,10 @@ EngineController::EngineController(QObject *parent)
 }
 
 EngineController::~EngineController() {
+  m_levelMatchCancel.store(true, std::memory_order_release);
+  if (m_levelMatchThread.joinable()) {
+    m_levelMatchThread.join();
+  }
   if (m_audioOutput) {
     m_audioOutput->stop();
   }
@@ -2591,6 +2595,44 @@ double EngineController::getTrackMeasuredRmsDb(const QString &deckId) const {
   return rmsDb;
 }
 
+double EngineController::getTrackMeasuredLufs(const QString &deckId) const {
+  if (!m_deckManager || deckId.isEmpty())
+    return -70.0;
+  char id = deckId.toUpper().at(0).toLatin1();
+  const auto *d = m_deckManager->deck(id);
+  if (!d || !d->isOpen() || d->trackInfo().path.empty())
+    return -70.0;
+  double lufs = -70.0;
+  engine::deck::ReferenceDeck::measureTrackLufs(d->trackInfo().path, lufs);
+  return lufs;
+}
+
+namespace {
+void logAutoLevelMatchLufs(const QString &refId, const QString &tgtId,
+                           double deltaDb, double refLufs, double tgtLufs,
+                           double durationMs = 0.0) {
+  QJsonObject det;
+  det.insert(QStringLiteral("method"), QStringLiteral("ITU-R BS.1770-4"));
+  det.insert(QStringLiteral("ref_deck"), refId);
+  det.insert(QStringLiteral("target_deck"), tgtId);
+  det.insert(QStringLiteral("ref_lufs"), refLufs);
+  det.insert(QStringLiteral("target_lufs"), tgtLufs);
+  det.insert(QStringLiteral("delta_db"), deltaDb);
+
+  desk32::core::log::LogService::instance().log(
+      QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
+      QStringLiteral("Success"),
+      QString("Measured level match %1 -> %2: %3 dB (Ref: %4 LUFS, Target: %5 LUFS)")
+          .arg(refId, tgtId)
+          .arg(deltaDb, 0, 'f', 2)
+          .arg(refLufs, 0, 'f', 2)
+          .arg(tgtLufs, 0, 'f', 2),
+      QStringLiteral("Deck"), tgtId,
+      QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+      QString(), QString(), 0, durationMs);
+}
+} // namespace
+
 double EngineController::measureAndApplyDeckLevelMatch(
     const QString &referenceDeckId, const QString &targetDeckId) {
   if (!m_deckManager || referenceDeckId.isEmpty() || targetDeckId.isEmpty())
@@ -2600,24 +2642,151 @@ double EngineController::measureAndApplyDeckLevelMatch(
   if (!refDeck || !tgtDeck || !refDeck->isOpen() || !tgtDeck->isOpen())
     return 0.0;
 
-  double refRmsDb = -96.0;
-  double tgtRmsDb = -96.0;
-  if (!engine::deck::ReferenceDeck::measureTrackRmsDb(refDeck->trackInfo().path, 0.0, 10.0, refRmsDb) ||
-      !engine::deck::ReferenceDeck::measureTrackRmsDb(tgtDeck->trackInfo().path, 0.0, 10.0, tgtRmsDb))
+  const auto t0 = std::chrono::steady_clock::now();
+  double refLufs = -70.0;
+  double tgtLufs = -70.0;
+  if (!engine::deck::ReferenceDeck::measureTrackLufs(refDeck->trackInfo().path, refLufs) ||
+      !engine::deck::ReferenceDeck::measureTrackLufs(tgtDeck->trackInfo().path, tgtLufs))
     return 0.0;
+  const double durationMs = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0)
+                                .count();
 
-  const double deltaDb = std::clamp(refRmsDb - tgtRmsDb, -24.0, 24.0);
+  const double deltaDb = std::clamp(refLufs - tgtLufs, -24.0, 24.0);
   setDeckLevelMatchDb(targetDeckId, deltaDb);
-  log::LogService::instance().log(
-      QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
-      QStringLiteral("Success"),
-      QString("Measured level match %1 -> %2: %3 dB (Ref: %4 dBFS, Target: %5 dBFS)")
-          .arg(referenceDeckId, targetDeckId)
-          .arg(deltaDb, 0, 'f', 2)
-          .arg(refRmsDb, 0, 'f', 2)
-          .arg(tgtRmsDb, 0, 'f', 2),
-      QStringLiteral("Deck"), targetDeckId);
+  logAutoLevelMatchLufs(referenceDeckId, targetDeckId, deltaDb, refLufs, tgtLufs,
+                        durationMs);
   return deltaDb;
+}
+
+void EngineController::startAutoLevelMatch(const QString &referenceDeckId,
+                                           const QStringList &targetDeckIds) {
+  if (m_levelMatchInProgress.load(std::memory_order_acquire)) {
+    return;
+  }
+  if (m_levelMatchThread.joinable()) {
+    m_levelMatchThread.join();
+  }
+  if (!m_deckManager || referenceDeckId.isEmpty()) {
+    emit levelMatchCompleted(false, QStringLiteral("Reference deck is not available"));
+    return;
+  }
+
+  const QString refIdNorm = referenceDeckId.toUpper().left(1);
+  auto *refDeck = m_deckManager->deck(refIdNorm.at(0).toLatin1());
+  if (!refDeck || !refDeck->isOpen() || refDeck->trackInfo().path.empty()) {
+    emit levelMatchCompleted(false, QStringLiteral("Reference deck has no loaded track"));
+    return;
+  }
+  const std::string refPath = refDeck->trackInfo().path;
+
+  struct TargetSpec {
+    QString id;
+    std::string path;
+  };
+  std::vector<TargetSpec> targets;
+  targets.reserve(static_cast<size_t>(targetDeckIds.size()));
+  for (const QString &rawId : targetDeckIds) {
+    if (rawId.isEmpty()) continue;
+    const QString normId = rawId.toUpper().left(1);
+    if (normId == refIdNorm) continue;
+    auto *td = m_deckManager->deck(normId.at(0).toLatin1());
+    if (!td || !td->isOpen() || td->trackInfo().path.empty()) continue;
+    targets.push_back(TargetSpec{normId, td->trackInfo().path});
+  }
+
+  if (targets.empty()) {
+    emit levelMatchCompleted(false, QStringLiteral("No loaded target decks to match"));
+    return;
+  }
+
+  m_levelMatchCancel.store(false, std::memory_order_release);
+  m_levelMatchInProgress.store(true, std::memory_order_release);
+  emit levelMatchStateChanged();
+
+  m_levelMatchThread = std::thread([this, refIdNorm, refPath,
+                                    targets = std::move(targets)]() {
+    struct TargetResult {
+      QString id;
+      std::string path;
+      double lufs{-70.0};
+      bool ok{false};
+    };
+
+    const auto tStart = std::chrono::steady_clock::now();
+    double refLufs = -70.0;
+    const bool refOk = engine::deck::ReferenceDeck::measureTrackLufs(
+        refPath, refLufs, &m_levelMatchCancel);
+
+    std::vector<TargetResult> results;
+    if (refOk && !m_levelMatchCancel.load(std::memory_order_acquire)) {
+      results.reserve(targets.size());
+      for (const auto &tgt : targets) {
+        if (m_levelMatchCancel.load(std::memory_order_acquire)) break;
+        double tgtLufs = -70.0;
+        const bool ok = engine::deck::ReferenceDeck::measureTrackLufs(
+            tgt.path, tgtLufs, &m_levelMatchCancel);
+        results.push_back(TargetResult{tgt.id, tgt.path, tgtLufs, ok});
+      }
+    }
+    const double totalDurationMs =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - tStart)
+            .count();
+
+    QMetaObject::invokeMethod(
+        this,
+        [this, refIdNorm, refPath, refOk, refLufs, totalDurationMs,
+         results = std::move(results)]() {
+          const bool cancelled =
+              m_levelMatchCancel.load(std::memory_order_acquire);
+          int appliedCount = 0;
+
+          if (!cancelled && refOk && m_deckManager) {
+            const auto *refDeckNow =
+                m_deckManager->deck(refIdNorm.at(0).toLatin1());
+            if (refDeckNow && refDeckNow->isOpen() &&
+                refDeckNow->trackInfo().path == refPath) {
+              for (const auto &r : results) {
+                if (!r.ok) continue;
+                const auto *tgtDeckNow =
+                    m_deckManager->deck(r.id.at(0).toLatin1());
+                if (!tgtDeckNow || !tgtDeckNow->isOpen() ||
+                    tgtDeckNow->trackInfo().path != r.path) {
+                  continue;
+                }
+                const double deltaDb =
+                    std::clamp(refLufs - r.lufs, -24.0, 24.0);
+                setDeckLevelMatchDb(r.id, deltaDb);
+                logAutoLevelMatchLufs(refIdNorm, r.id, deltaDb, refLufs, r.lufs,
+                                      totalDurationMs);
+                ++appliedCount;
+              }
+            }
+          } else if (!cancelled && !refOk) {
+            log::LogService::instance().log(
+                QStringLiteral("Deck"), QStringLiteral("AutoLevelMatch"),
+                QStringLiteral("Error"),
+                QString("Auto level match failed for reference Deck %1")
+                    .arg(refIdNorm),
+                QStringLiteral("Deck"), refIdNorm);
+          }
+
+          m_levelMatchInProgress.store(false, std::memory_order_release);
+          emit levelMatchStateChanged();
+          if (!cancelled) {
+            const QString summary =
+                appliedCount > 0
+                    ? QString("Matched %1 deck(s) to Deck %2 (%3 LUFS)")
+                          .arg(appliedCount)
+                          .arg(refIdNorm)
+                          .arg(refLufs, 0, 'f', 2)
+                    : QStringLiteral("Auto level match failed or returned silence");
+            emit levelMatchCompleted(appliedCount > 0, summary);
+          }
+        },
+        Qt::QueuedConnection);
+  });
 }
 
 bool EngineController::loadTrack(const QString &deckId,

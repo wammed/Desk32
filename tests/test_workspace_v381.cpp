@@ -96,6 +96,7 @@ private slots:
     void testExternalModificationTwoStageDetection();
     void testDirectModeSampleRateFollowAndBypass();
     void testDeckLevelMatchPostTapAndOffsetFrames();
+    void testAsyncAutoLevelMatchLufsAndLogUnits();
     void testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory();
     void testPhase4GapFixesRenameRollbackExternalReloadTargetedStopHardlink();
     void testWorkspaceAuditStereoOnlySelfCopyExternalAddAndLogOnlyIndex();
@@ -699,6 +700,53 @@ void TestWorkspaceV381::testDeckLevelMatchPostTapAndOffsetFrames()
     ctrl.stop("A");
     ctrl.setDeckLevelMatchDb("A", 0.0);
     ctrl.setMasterGain(1.0);
+}
+
+void TestWorkspaceV381::testAsyncAutoLevelMatchLufsAndLogUnits()
+{
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+
+    const QString dir = m_tempDir->filePath("async_lufs_match");
+    QDir().mkpath(dir);
+    // Ref: 0.5 amplitude (997 Hz @ 48 kHz), Target: 0.25 amplitude (-6.02 dB quieter -> expected +6.02 dB trim)
+    const QString refWav = dir + "/ref.wav";
+    const QString tgtWav = dir + "/tgt.wav";
+    QVERIFY(createTestWav(refWav, 48000.0, 48000 * 2, 997.0, 0.5));
+    QVERIFY(createTestWav(tgtWav, 48000.0, 48000 * 2, 997.0, 0.25));
+
+    QVERIFY(ctrl.loadTrack("A", refWav));
+    QVERIFY(ctrl.loadTrack("B", tgtWav));
+    ctrl.setDeckLevelMatchDb("A", 0.0);
+    ctrl.setDeckLevelMatchDb("B", 0.0);
+
+    bool completed = false;
+    bool completedOk = false;
+    auto conn = connect(&ctrl, &EngineController::levelMatchCompleted,
+                        this, [&](bool ok, const QString&) {
+                            completed = true;
+                            completedOk = ok;
+                        });
+
+    ctrl.startAutoLevelMatch("A", QStringList{"B"});
+    QTRY_VERIFY_WITH_TIMEOUT(completed, 5000);
+    disconnect(conn);
+
+    QVERIFY(completedOk);
+    QVERIFY(!ctrl.isLevelMatchInProgress());
+    const double trimB = ctrl.getDeckLevelMatchDb("B");
+    QVERIFY2(std::abs(trimB - 6.02) < 0.25, qPrintable(QString("trimB=%1").arg(trimB)));
+
+    // Verify LogService recorded LUFS (not dBFS) for AutoLevelMatch
+    QVariantMap filter;
+    filter["category"] = QStringLiteral("Deck");
+    filter["operation"] = QStringLiteral("AutoLevelMatch");
+    QTRY_VERIFY_WITH_TIMEOUT(!LogService::instance().fetchLogs(filter).isEmpty(), 3000);
+    const QVariantList logs = LogService::instance().fetchLogs(filter);
+    const QString msg = logs.first().toMap().value("message").toString();
+    QVERIFY2(msg.contains("LUFS") && !msg.contains("dBFS"), qPrintable(msg));
+
+    ctrl.setDeckLevelMatchDb("B", 0.0);
 }
 
 void TestWorkspaceV381::testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory()

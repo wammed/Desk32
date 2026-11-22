@@ -303,8 +303,36 @@ ApplicationWindow {
                         }
 
                         RowLayout {
+                            id: quickControlRow
                             Layout.fillWidth: true
                             spacing: 6
+
+                            property bool canAutoMatch: false
+                            function refreshAutoMatchState() {
+                                var refId = EngineController.activeDeckId
+                                var refState = EngineController.getDeckState(refId)
+                                if (!refState || !refState.path || refState.path === "") {
+                                    canAutoMatch = false
+                                    return
+                                }
+                                var ids = ["A", "B", "C", "D"]
+                                for (var i = 0; i < ids.length; ++i) {
+                                    if (ids[i] === refId) continue
+                                    var st = EngineController.getDeckState(ids[i])
+                                    if (st && st.path && st.path !== "") {
+                                        canAutoMatch = true
+                                        return
+                                    }
+                                }
+                                canAutoMatch = false
+                            }
+                            Component.onCompleted: refreshAutoMatchState()
+                            Connections {
+                                target: EngineController
+                                function onDeckStateChanged(deckId) { quickControlRow.refreshAutoMatchState() }
+                                function onActiveDeckChanged(deckId) { quickControlRow.refreshAutoMatchState() }
+                            }
+
                             Button {
                                 text: qsTr("Quick A/B")
                                 font.pixelSize: 11
@@ -314,6 +342,32 @@ ApplicationWindow {
                                 Layout.preferredHeight: 26
                                 highlighted: true
                                 onClicked: EngineController.quickSwitchAB()
+                            }
+                            Button {
+                                text: EngineController.levelMatchInProgress ? qsTr("Matching...") : qsTr("Auto Match")
+                                font.pixelSize: 11
+                                leftPadding: 8
+                                rightPadding: 8
+                                Layout.preferredWidth: implicitContentWidth + leftPadding + rightPadding
+                                Layout.preferredHeight: 26
+                                enabled: quickControlRow.canAutoMatch && !EngineController.levelMatchInProgress
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Measure integrated LUFS and match other loaded decks to active Deck %1").arg(EngineController.activeDeckId)
+                                onClicked: {
+                                    var refId = EngineController.activeDeckId
+                                    var ids = ["A", "B", "C", "D"]
+                                    var targets = []
+                                    for (var i = 0; i < ids.length; ++i) {
+                                        if (ids[i] === refId) continue
+                                        var st = EngineController.getDeckState(ids[i])
+                                        if (st && st.path && st.path !== "") {
+                                            targets.push(ids[i])
+                                        }
+                                    }
+                                    if (targets.length > 0) {
+                                        EngineController.startAutoLevelMatch(refId, targets)
+                                    }
+                                }
                             }
                             ComboBox {
                                 id: modeCombo

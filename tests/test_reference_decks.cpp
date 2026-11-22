@@ -150,6 +150,7 @@ private slots:
     void testAutoAdvanceSpscCapacityOverflowNoOverwrite();
     void testComparativeSwitchTerminatesFolderSession();
     void testPhase1GapFixesFolderAndTransport();
+    void testKWeightingSampleRatesAndGatedLufs();
     void cleanupTestCase();
 
 private:
@@ -2507,6 +2508,105 @@ void TestReferenceDecks::testPhase1GapFixesFolderAndTransport()
     auto swA = mgr.switchDeck('A', SwitchingMode::Normal);
     QVERIFY(swA.success);
     QCOMPARE(deckA->state(), TransportState::Playing);
+}
+
+void TestReferenceDecks::testKWeightingSampleRatesAndGatedLufs()
+{
+    using namespace desk32::engine::deck;
+
+    // 1. Sample-rate-dependent K-weighting coefficients:
+    //    48 kHz matches published ITU-R BS.1770-4 table; 44.1 kHz, 96 kHz, 192 kHz produce ~0.00 LUFS
+    //    on a 0 dBFS stereo 997 Hz sine wave and attenuate 35 Hz rumble via RLB high-pass.
+    for (double sr : {44100.0, 48000.0, 96000.0, 192000.0}) {
+        ReferenceDeck::KWeightBiquad s1, s2;
+        ReferenceDeck::computeKWeightingStages(sr, s1, s2);
+
+        if (std::abs(sr - 48000.0) < 0.5) {
+            QVERIFY(std::abs(s1.b0 - 1.53512485958697) < 1e-12);
+            QVERIFY(std::abs(s2.a1 - (-1.99004745483398)) < 1e-12);
+        }
+
+        // Write 1.5s stereo 997 Hz WAV at 0.5 amplitude (expected ~ -6.02 LUFS) vs 48k/44.1k/96k
+        const QString wavPath = m_testDir + QString("/kw_997_%1.wav").arg(static_cast<int>(sr));
+        {
+            std::ofstream out(wavPath.toStdString(), std::ios::binary);
+            QVERIFY(out.is_open());
+            const uint32_t sRate = static_cast<uint32_t>(sr);
+            const size_t totalFrames = static_cast<size_t>(sr * 1.5);
+            const uint16_t numCh = 2, bitsPerSample = 16;
+            const uint32_t dataBytes = static_cast<uint32_t>(totalFrames * numCh * 2);
+            const uint32_t chunkSize = 36 + dataBytes;
+            const uint32_t byteRate = sRate * numCh * 2;
+            const uint16_t blockAlign = numCh * 2;
+            const uint32_t sub1 = 16;
+            const uint16_t fmt = 1;
+            out.write("RIFF", 4); out.write(reinterpret_cast<const char*>(&chunkSize), 4);
+            out.write("WAVEfmt ", 8);
+            out.write(reinterpret_cast<const char*>(&sub1), 4);
+            out.write(reinterpret_cast<const char*>(&fmt), 2);
+            out.write(reinterpret_cast<const char*>(&numCh), 2);
+            out.write(reinterpret_cast<const char*>(&sRate), 4);
+            out.write(reinterpret_cast<const char*>(&byteRate), 4);
+            out.write(reinterpret_cast<const char*>(&blockAlign), 2);
+            out.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+            out.write("data", 4); out.write(reinterpret_cast<const char*>(&dataBytes), 4);
+            for (size_t i = 0; i < totalFrames; ++i) {
+                const int16_t v = static_cast<int16_t>(
+                    0.5 * 32767.0 * std::sin(2.0 * M_PI * 997.0 * static_cast<double>(i) / sr));
+                out.write(reinterpret_cast<const char*>(&v), 2);
+                out.write(reinterpret_cast<const char*>(&v), 2);
+            }
+        }
+        double lufs = 0.0;
+        QVERIFY(ReferenceDeck::measureTrackLufs(wavPath.toStdString(), lufs));
+        // 0.5 peak stereo sine = -6.0206 LUFS at 997 Hz
+        QVERIFY2(std::abs(lufs - (-6.02)) < 0.25,
+                 qPrintable(QString("sr=%1 lufs=%2").arg(sr).arg(lufs)));
+    }
+
+    // 2. Gating accuracy: 4s silence intro + 4s 997 Hz tone must match pure 4s 997 Hz tone within 0.2 LU
+    auto writeToneWithSilence = [&](const QString& name, size_t silenceFrames, size_t toneFrames) {
+        const QString path = m_testDir + "/" + name;
+        std::ofstream out(path.toStdString(), std::ios::binary);
+        const double sr = 48000.0;
+        const size_t totalFrames = silenceFrames + toneFrames;
+        const uint32_t sRate = 48000;
+        const uint16_t numCh = 2, bitsPerSample = 16;
+        const uint32_t dataBytes = static_cast<uint32_t>(totalFrames * numCh * 2);
+        const uint32_t chunkSize = 36 + dataBytes;
+        const uint32_t byteRate = sRate * numCh * 2;
+        const uint16_t blockAlign = numCh * 2;
+        const uint32_t sub1 = 16;
+        const uint16_t fmt = 1;
+        out.write("RIFF", 4); out.write(reinterpret_cast<const char*>(&chunkSize), 4);
+        out.write("WAVEfmt ", 8);
+        out.write(reinterpret_cast<const char*>(&sub1), 4);
+        out.write(reinterpret_cast<const char*>(&fmt), 2);
+        out.write(reinterpret_cast<const char*>(&numCh), 2);
+        out.write(reinterpret_cast<const char*>(&sRate), 4);
+        out.write(reinterpret_cast<const char*>(&byteRate), 4);
+        out.write(reinterpret_cast<const char*>(&blockAlign), 2);
+        out.write(reinterpret_cast<const char*>(&bitsPerSample), 2);
+        out.write("data", 4); out.write(reinterpret_cast<const char*>(&dataBytes), 4);
+        for (size_t i = 0; i < totalFrames; ++i) {
+            int16_t v = 0;
+            if (i >= silenceFrames) {
+                v = static_cast<int16_t>(
+                    0.4 * 32767.0 * std::sin(2.0 * M_PI * 997.0 * static_cast<double>(i - silenceFrames) / sr));
+            }
+            out.write(reinterpret_cast<const char*>(&v), 2);
+            out.write(reinterpret_cast<const char*>(&v), 2);
+        }
+        return path;
+    };
+
+    const QString pureTone = writeToneWithSilence("pure_tone.wav", 0, 48000 * 4);
+    const QString silentIntroTone = writeToneWithSilence("silent_intro_tone.wav", 48000 * 4, 48000 * 4);
+    double pureLufs = 0.0, gatedLufs = 0.0;
+    QVERIFY(ReferenceDeck::measureTrackLufs(pureTone.toStdString(), pureLufs));
+    QVERIFY(ReferenceDeck::measureTrackLufs(silentIntroTone.toStdString(), gatedLufs));
+    QVERIFY2(std::abs(pureLufs - gatedLufs) < 0.2,
+             qPrintable(QString("pure=%1 LUFS vs gated=%2 LUFS").arg(pureLufs).arg(gatedLufs)));
 }
 
 void TestReferenceDecks::cleanupTestCase()

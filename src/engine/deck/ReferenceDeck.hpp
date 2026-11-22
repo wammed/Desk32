@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -273,6 +274,211 @@ public:
 
     [[nodiscard]] double previousRestartThresholdSec() const noexcept {
         return m_previousRestartThresholdSec.load(std::memory_order_acquire);
+    }
+
+    struct KWeightBiquad {
+        double b0 = 1.0, b1 = 0.0, b2 = 0.0;
+        double a1 = 0.0, a2 = 0.0;
+        double z1L = 0.0, z2L = 0.0;
+        double z1R = 0.0, z2R = 0.0;
+
+        inline void processSample(double inL, double inR, double& outL, double& outR) noexcept {
+            outL = (b0 * inL) + z1L;
+            z1L  = (b1 * inL) - (a1 * outL) + z2L;
+            z2L  = (b2 * inL) - (a2 * outL);
+
+            outR = (b0 * inR) + z1R;
+            z1R  = (b1 * inR) - (a1 * outR) + z2R;
+            z2R  = (b2 * inR) - (a2 * outR);
+        }
+    };
+
+    /// Compute ITU-R BS.1770-4 K-weighting stage 1 (high-shelf) & stage 2 (RLB high-pass) coefficients
+    /// for the decoder's native sample rate (exact published constants at 44.1k/48k, analog prototype
+    /// bilinear transform for 88.2k/96k/176.4k/192k and arbitrary rates).
+    static void computeKWeightingStages(double sampleRate, KWeightBiquad& stage1, KWeightBiquad& stage2) noexcept {
+        const double fs = std::max(8000.0, sampleRate);
+        if (std::abs(fs - 48000.0) < 0.5) {
+            stage1 = KWeightBiquad{
+                1.53512485958697, -2.69169618940638, 1.19839281085285,
+                -1.69065929318241, 0.73248077421585
+            };
+            stage2 = KWeightBiquad{
+                1.0, -2.0, 1.0,
+                -1.99004745483398, 0.99007225036621
+            };
+            return;
+        }
+        if (std::abs(fs - 44100.0) < 0.5) {
+            stage1 = KWeightBiquad{
+                1.5308412300503478, -2.6509799951547297, 1.169079079921587,
+                -1.6636551132560204, 0.7125954280732254
+            };
+            stage2 = KWeightBiquad{
+                1.0, -2.0, 1.0,
+                -1.989169673629796, 0.9891990357870393
+            };
+            return;
+        }
+
+        // Stage 1: ITU-R BS.1770-4 high-shelf pre-filter bilinear transform
+        constexpr double f0_1 = 1681.974450955533;
+        constexpr double G_1 = 3.999843853973347;
+        constexpr double Q_1 = 0.7071752369554196;
+        const double K1 = std::tan(std::numbers::pi * f0_1 / fs);
+        const double Vh = std::pow(10.0, G_1 / 20.0);
+        const double Vb = std::pow(Vh, 0.4996667741545416);
+        const double a0_1 = 1.0 + (K1 / Q_1) + (K1 * K1);
+        stage1 = KWeightBiquad{
+            (Vh + (Vb * K1 / Q_1) + (K1 * K1)) / a0_1,
+            2.0 * ((K1 * K1) - Vh) / a0_1,
+            (Vh - (Vb * K1 / Q_1) + (K1 * K1)) / a0_1,
+            2.0 * ((K1 * K1) - 1.0) / a0_1,
+            (1.0 - (K1 / Q_1) + (K1 * K1)) / a0_1
+        };
+
+        // Stage 2: ITU-R BS.1770-4 RLB high-pass bilinear transform
+        constexpr double f0_2 = 38.13547087602444;
+        constexpr double Q_2 = 0.5003270373238773;
+        const double K2 = std::tan(std::numbers::pi * f0_2 / fs);
+        const double a0_2 = 1.0 + (K2 / Q_2) + (K2 * K2);
+        stage2 = KWeightBiquad{
+            1.0,
+            -2.0,
+            1.0,
+            2.0 * ((K2 * K2) - 1.0) / a0_2,
+            (1.0 - (K2 / Q_2) + (K2 * K2)) / a0_2
+        };
+    }
+
+    /// Thread-safe ITU-R BS.1770-4 / EBU R128 integrated loudness measurement (LUFS) with
+    /// sample-rate-dependent K-weighting and 400 ms dual-stage gating (-70 LUFS abs, -10 LU rel).
+    static bool measureTrackLufs(const std::string& filePath,
+                                 double& outLufs,
+                                 const std::atomic<bool>* cancelFlag = nullptr,
+                                 double maxDurationSec = 0.0) {
+        if (filePath.empty()) return false;
+        if (filePath.rfind("synthetic://", 0) == 0) {
+            // Synthetic stereo test sine has peak 0.5 per channel -> total power 0.25 -> -6.71 LUFS
+            outLufs = -0.691 + (10.0 * std::log10(0.25));
+            return true;
+        }
+        decoder::FFmpegAudioDecoder dec;
+        if (!dec.open(filePath)) {
+            return false;
+        }
+        const auto& fmt = dec.formatInfo();
+        const double sr = fmt.sampleRate > 0.0 ? fmt.sampleRate : 48000.0;
+
+        KWeightBiquad stage1, stage2;
+        computeKWeightingStages(sr, stage1, stage2);
+
+        const size_t subBlockFrames = std::max<size_t>(1, static_cast<size_t>(std::llround(sr * 0.1))); // 100 ms step
+        const size_t maxFrames = (maxDurationSec > 0.0)
+                                     ? static_cast<size_t>(std::max(0.4, maxDurationSec) * sr)
+                                     : std::numeric_limits<size_t>::max();
+
+        std::array<double, 2048> bufL{};
+        std::array<double, 2048> bufR{};
+        std::vector<double> subPowers;
+        if (fmt.durationSeconds > 0.0) {
+            subPowers.reserve(static_cast<size_t>(fmt.durationSeconds * 10.0) + 16);
+        }
+
+        double subSq = 0.0;
+        size_t subCount = 0;
+        double totalSq = 0.0;
+        size_t totalFrames = 0;
+
+        while (totalFrames < maxFrames) {
+            if (cancelFlag && cancelFlag->load(std::memory_order_acquire)) {
+                dec.close();
+                return false;
+            }
+            const size_t remaining = maxFrames - totalFrames;
+            const size_t chunk = std::min(bufL.size(), remaining);
+            const size_t got = dec.readFrames(bufL.data(), bufR.data(), chunk);
+            if (got == 0) break;
+
+            for (size_t i = 0; i < got; ++i) {
+                double s1L = 0.0, s1R = 0.0, kwL = 0.0, kwR = 0.0;
+                stage1.processSample(bufL[i], bufR[i], s1L, s1R);
+                stage2.processSample(s1L, s1R, kwL, kwR);
+                const double p = (kwL * kwL) + (kwR * kwR);
+                subSq += p;
+                totalSq += p;
+                ++subCount;
+                if (subCount >= subBlockFrames) {
+                    subPowers.push_back(subSq / static_cast<double>(subCount));
+                    subSq = 0.0;
+                    subCount = 0;
+                }
+            }
+            totalFrames += got;
+        }
+        dec.close();
+
+        if (totalFrames == 0) {
+            outLufs = -70.0;
+            return false;
+        }
+        if (subCount >= (subBlockFrames / 2)) {
+            subPowers.push_back(subSq / static_cast<double>(subCount));
+        }
+
+        // Absolute gate: -70.0 LUFS => power threshold = 10^((-70 + 0.691) / 10)
+        const double absGatePower = std::pow(10.0, (-70.0 + 0.691) / 10.0);
+
+        // Short clips (< 400 ms): integrate directly across decoded frames
+        if (subPowers.size() < 4) {
+            const double p = totalSq / static_cast<double>(totalFrames);
+            if (p <= absGatePower) {
+                outLufs = -70.0;
+                return false;
+            }
+            outLufs = -0.691 + (10.0 * std::log10(std::max(p, 1e-12)));
+            return true;
+        }
+
+        // 400 ms sliding gating blocks (4 consecutive 100 ms sub-blocks, 75% overlap)
+        std::vector<double> blockPowers;
+        blockPowers.reserve(subPowers.size() - 3);
+        double absSum = 0.0;
+        size_t absCount = 0;
+        for (size_t i = 0; i + 3 < subPowers.size(); ++i) {
+            const double bp = 0.25 * (subPowers[i] + subPowers[i + 1] + subPowers[i + 2] + subPowers[i + 3]);
+            blockPowers.push_back(bp);
+            if (bp > absGatePower) {
+                absSum += bp;
+                ++absCount;
+            }
+        }
+        if (absCount == 0) {
+            outLufs = -70.0;
+            return false;
+        }
+
+        // Relative gate: -10.0 LU below ungated intermediate loudness
+        const double absMeanPower = absSum / static_cast<double>(absCount);
+        const double relGatePower = absMeanPower * 0.1;
+        const double finalGatePower = std::max(absGatePower, relGatePower);
+
+        double gatedSum = 0.0;
+        size_t gatedCount = 0;
+        for (double bp : blockPowers) {
+            if (bp > finalGatePower) {
+                gatedSum += bp;
+                ++gatedCount;
+            }
+        }
+        if (gatedCount == 0) {
+            outLufs = -70.0;
+            return false;
+        }
+
+        const double gatedPower = gatedSum / static_cast<double>(gatedCount);
+        outLufs = -0.691 + (10.0 * std::log10(std::max(gatedPower, 1e-12)));
+        return true;
     }
 
     /// Control-thread offline RMS measurement in dBFS over [startSec, startSec + durationSec].

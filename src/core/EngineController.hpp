@@ -2,11 +2,13 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVariantMap>
 #include <QVariantList>
 #include <memory>
 #include <array>
 #include <atomic>
+#include <thread>
 #include "engine/deck/DeckManager.hpp"
 #include "engine/pipeline/AudioPipeline.hpp"
 #include "engine/pipeline/BuiltInDspNodes.hpp"
@@ -92,6 +94,7 @@ class EngineController : public QObject {
     Q_PROPERTY(int externalInsertPosition READ externalInsertPosition WRITE setExternalInsertPosition NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(int externalInsertDisconnectPolicy READ externalInsertDisconnectPolicy WRITE setExternalInsertDisconnectPolicy NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(bool syncMasterDspToRender READ syncMasterDspToRenderEnabled WRITE setSyncMasterDspToRender NOTIFY renderStateChanged)
+    Q_PROPERTY(bool levelMatchInProgress READ isLevelMatchInProgress NOTIFY levelMatchStateChanged)
 
     // Phase 4: Export & Render Telemetry (Section 5.11 & 20.1)
     // All render properties delegate directly to RenderEngine as the single canonical state source.
@@ -266,7 +269,12 @@ public:
     Q_INVOKABLE void setDeckLevelMatchDb(const QString& deckId, double gainDb);
     Q_INVOKABLE double getDeckLevelMatchDb(const QString& deckId) const;
     Q_INVOKABLE double getTrackMeasuredRmsDb(const QString& deckId) const;
+    Q_INVOKABLE double getTrackMeasuredLufs(const QString& deckId) const;
     Q_INVOKABLE double measureAndApplyDeckLevelMatch(const QString& referenceDeckId, const QString& targetDeckId);
+    Q_INVOKABLE void startAutoLevelMatch(const QString& referenceDeckId, const QStringList& targetDeckIds);
+    [[nodiscard]] bool isLevelMatchInProgress() const noexcept {
+        return m_levelMatchInProgress.load(std::memory_order_acquire);
+    }
 
     // QML-invokable Folder Session Operations
     Q_INVOKABLE bool startFolderSession(const QString& deckId, const QString& folderPath, const QStringList& fileNames);
@@ -433,6 +441,8 @@ signals:
                              const QString& message);
     void renderTaskStarted(const QString& taskId, const QString& name, int totalTracks);
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
+    void levelMatchStateChanged();
+    void levelMatchCompleted(bool success, const QString& summary);
 
 private:
     void syncMasterDspToRenderEngine();
@@ -517,6 +527,10 @@ private:
     std::atomic<double> m_reverbMaxProcessingTimeMs{0.0};
     mutable std::mutex m_presetReportMutex;
     QVariantMap m_lastPresetImportReport;
+
+    std::atomic<bool> m_levelMatchInProgress{false};
+    std::atomic<bool> m_levelMatchCancel{false};
+    std::thread m_levelMatchThread;
 
     // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
     engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};
