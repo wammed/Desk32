@@ -851,6 +851,8 @@ void EngineController::recordSessionEnd(const QString &reason) {
 }
 
 void EngineController::checkAudioHealthAndGraph() {
+  (void)engine::workspace::WorkspaceManager::instance()
+      .handleMissingOpenWorkspaceRootIfNeeded();
   if (m_audioOutput) {
     const auto diag = m_audioOutput->diagnostics();
     const uint32_t effectiveQuantum = (diag.negotiatedQuantum > 0)

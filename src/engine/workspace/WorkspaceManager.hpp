@@ -200,6 +200,7 @@ public:
     bool registerWorkspace(const QString& dirPath, QString& outError);
     bool openWorkspace(const QString& dirPath, QString& outError);
     bool registerAndOpenWorkspace(const QString& dirPath, QString& outError);
+    bool unregisterWorkspace(const QString& dirPath, QString& outError);
     void enterReadOnlyMode();
     void closeWorkspaceForShutdown();
 
@@ -217,6 +218,7 @@ public:
     Q_INVOKABLE QVariantList getRegisteredWorkspaces() const;
     Q_INVOKABLE bool selectWorkspaceAtStartup(const QString& dirPath);
     Q_INVOKABLE bool registerAndSelectWorkspaceAtStartup(const QString& dirPath);
+    Q_INVOKABLE bool unregisterWorkspaceFromUi(const QString& dirPath);
     Q_INVOKABLE void continueInReadOnlyMode();
     Q_INVOKABLE QString lastError() const;
 
@@ -272,6 +274,7 @@ public:
     /// Verify current workspace contents against state index and save references (Stage 2 hash check)
     QStringList verifyWorkspaceIntegrity();
     Q_INVOKABLE QStringList checkExternalChangesFromUi();
+    bool handleMissingOpenWorkspaceRootIfNeeded();
 
 signals:
     void workspaceStateChanged();
@@ -306,6 +309,9 @@ private:
     // Internal helpers (execute on WorkspaceWorkerThread)
     std::vector<RegisteredWorkspaceInfo> loadRegisteredWorkspacesLocked() const;
     bool saveRegisteredWorkspacesLocked(const std::vector<RegisteredWorkspaceInfo>& list) const;
+    void clearWatcherPaths();
+    void releaseOpenWorkspaceStateLocked(QString* outClosedPath = nullptr,
+                                         StopPlaybackCallback* outStopCb = nullptr);
 
     static QString resolveRealPath(const QString& path);
     static bool isSameOrSubpath(const QString& candidate, const QString& base);

@@ -107,6 +107,82 @@ Rectangle {
         }
     }
 
+    // Two-step confirmation dialog to prevent accidental workspace unregistration
+    Dialog {
+        id: unregisterConfirmDialog
+        title: qsTr("Unregister Workspace?")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 420
+
+        property string targetPath: ""
+        property bool isCurrentlyOpen: false
+
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
+                color: "#E0E6ED"
+                text: qsTr("Remove this folder from Desk32's Registered Workspaces list? Audio files and the .desk32 folder on disk will NOT be deleted.")
+            }
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: targetPathLabel.implicitHeight + 12
+                radius: 4
+                color: "#181c22"
+                border.color: "#2c3440"
+                Label {
+                    id: targetPathLabel
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    wrapMode: Text.WrapAnywhere
+                    font.pixelSize: 10
+                    font.family: "Monospace"
+                    color: "#00E5FF"
+                    text: unregisterConfirmDialog.targetPath
+                }
+            }
+            Label {
+                visible: unregisterConfirmDialog.isCurrentlyOpen
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                font.pixelSize: 10
+                font.bold: true
+                color: "#FFB300"
+                text: qsTr("Warning: This workspace is currently open. Unregistering will stop playback from it and switch this session to Read-Only mode.")
+            }
+        }
+
+        footer: RowLayout {
+            spacing: 8
+            Item { Layout.fillWidth: true }
+            Button {
+                text: qsTr("Cancel")
+                font.pixelSize: 10
+                onClicked: unregisterConfirmDialog.reject()
+            }
+            Button {
+                text: qsTr("Confirm Unregister")
+                font.pixelSize: 10
+                font.bold: true
+                palette.button: "#B71C1C"
+                palette.buttonText: "#FFFFFF"
+                onClicked: unregisterConfirmDialog.accept()
+            }
+        }
+
+        onAccepted: {
+            if (WorkspaceManager.unregisterWorkspaceFromUi(targetPath)) {
+                wsRoot.statusNotice = qsTr("Unregistered workspace: %1").arg(targetPath)
+            } else {
+                wsRoot.statusNotice = WorkspaceManager.lastError()
+            }
+            wsRoot.refreshAll()
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 10
@@ -243,6 +319,16 @@ Rectangle {
                                         wsRoot.statusNotice = WorkspaceManager.lastError()
                                     }
                                     wsRoot.refreshAll()
+                                }
+                            }
+                            Button {
+                                text: qsTr("Unregister")
+                                font.pixelSize: 9
+                                enabled: modelData.lockState !== 2
+                                onClicked: {
+                                    unregisterConfirmDialog.targetPath = modelData.path
+                                    unregisterConfirmDialog.isCurrentlyOpen = (modelData.lockState === 1)
+                                    unregisterConfirmDialog.open()
                                 }
                             }
                         }

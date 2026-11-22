@@ -3359,4 +3359,34 @@ ApplicationWindow {
             workspacePanel.visible = false
         }
     }
+
+    Connections {
+        target: WorkspaceManager
+        function onWorkspaceErrorOccurred(op, msg) {
+            if (op === "WorkspaceRootMissing") {
+                workspaceRootMissingLabel.text = msg
+                workspaceRootMissingDialog.open()
+            }
+        }
+    }
+
+    Dialog {
+        id: workspaceRootMissingDialog
+        title: qsTr("Workspace Unavailable — Switched to Read-Only")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 440
+        standardButtons: Dialog.Ok
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                id: workspaceRootMissingLabel
+                Layout.fillWidth: true
+                wrapMode: Text.WrapAnywhere
+                font.pixelSize: 11
+                color: "#FFB300"
+                text: ""
+            }
+        }
+    }
 }

@@ -100,6 +100,8 @@ private slots:
     void testPeq16BandsHpfLpfQMasterDspPresetAndPlaybackHistory();
     void testPhase4GapFixesRenameRollbackExternalReloadTargetedStopHardlink();
     void testWorkspaceAuditStereoOnlySelfCopyExternalAddAndLogOnlyIndex();
+    void testUnregisterWorkspaceLifecycle();
+    void testMissingOpenWorkspaceRootFailSafe();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -1018,6 +1020,106 @@ void TestWorkspaceV381::testWorkspaceAuditStereoOnlySelfCopyExternalAddAndLogOnl
         }
     }
     QVERIFY(foundLogOnlyInIndex);
+}
+
+void TestWorkspaceV381::testUnregisterWorkspaceLifecycle()
+{
+    auto& ws = WorkspaceManager::instance();
+    const QString wsA = m_tempDir->filePath("ws_unreg_a");
+    const QString wsB = m_tempDir->filePath("ws_unreg_b");
+    const QString wsMissing = m_tempDir->filePath("ws_unreg_missing");
+    QDir().mkpath(wsA);
+    QDir().mkpath(wsB);
+    QDir().mkpath(wsMissing);
+
+    const QString trackA = wsA + "/keep_me.wav";
+    QVERIFY(createTestWav(trackA, 48000.0, 24000));
+
+    QString err;
+    QVERIFY(ws.registerAndOpenWorkspace(wsA, err));
+    QVERIFY(ws.registerWorkspace(wsB, err));
+    QVERIFY(ws.registerWorkspace(wsMissing, err));
+    QCOMPARE(ws.getRegisteredWorkspaces().size(), 3);
+
+    // 1. Unregister closed/locked workspace B -> removed from registry, directory stays on disk
+    QVERIFY(ws.unregisterWorkspaceFromUi(wsB));
+    QVERIFY(QDir(wsB).exists());
+    QCOMPARE(ws.getRegisteredWorkspaces().size(), 2);
+
+    // 2. Unregister already-deleted directory from disk -> still succeeds via normalized path match
+    QDir(wsMissing).removeRecursively();
+    QVERIFY(!QDir(wsMissing).exists());
+    QVERIFY(ws.unregisterWorkspaceFromUi(wsMissing));
+    QCOMPARE(ws.getRegisteredWorkspaces().size(), 1);
+
+    // 3. Re-unregistering non-registered path returns false cleanly
+    QVERIFY(!ws.unregisterWorkspace(wsB, err));
+    QVERIFY(!err.isEmpty());
+
+    // 4. Unregistering currently open workspace A closes/unlocks it into Read-Only mode, keeps files on disk
+    QVERIFY(ws.hasOpenWorkspace());
+    QVERIFY(ws.unregisterWorkspaceFromUi(wsA));
+    QVERIFY(!ws.hasOpenWorkspace());
+    QVERIFY(ws.isReadOnlyMode());
+    QCOMPARE(ws.getRegisteredWorkspaces().size(), 0);
+    QVERIFY(QFile::exists(trackA));
+}
+
+void TestWorkspaceV381::testMissingOpenWorkspaceRootFailSafe()
+{
+    auto& ws = WorkspaceManager::instance();
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+
+    const QString wsRoot = m_tempDir->filePath("ws_vanished");
+    const QString extWav = m_tempDir->filePath("ext_src.wav");
+    QDir().mkpath(wsRoot);
+    QVERIFY(createTestWav(extWav, 48000.0, 48000));
+
+    QString err;
+    QVERIFY(ws.registerAndOpenWorkspace(wsRoot, err));
+    QVERIFY(ws.hasOpenWorkspace());
+
+    const auto imp = ws.importFile(extWav);
+    QCOMPARE(imp.status, ImportResultStatus::Imported);
+    QVERIFY(ctrl.loadWorkspaceTrack("A", imp.destPath));
+    ctrl.play("A");
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Playing);
+    // Allow queued QFileSystemWatcher::addPaths() setup to settle before external deletion
+    QCoreApplication::processEvents();
+
+    QString receivedOp;
+    QString receivedMsg;
+    auto conn = connect(&ws, &WorkspaceManager::workspaceErrorOccurred,
+                        this, [&](const QString& op, const QString& msg) {
+                            receivedOp = op;
+                            receivedMsg = msg;
+                        });
+
+    // Externally delete the entire open workspace root folder on disk
+    QVERIFY(QDir(wsRoot).removeRecursively());
+    QVERIFY(!QDir(wsRoot).exists());
+
+    // QFileSystemWatcher on parent/root detects disappearance and engages fail-safe automatically
+    QTRY_VERIFY_WITH_TIMEOUT(!ws.hasOpenWorkspace(), 3000);
+    disconnect(conn);
+
+    QVERIFY(ws.isReadOnlyMode());
+    QVERIFY(ws.openWorkspacePath().isEmpty());
+    QCOMPARE(receivedOp, QStringLiteral("WorkspaceRootMissing"));
+    QVERIFY(receivedMsg.contains(wsRoot));
+    QCOMPARE(ctrl.deckManager()->deck('A')->state(), desk32::engine::deck::TransportState::Stopped);
+
+    // LogService records RootMissingFailSafe Failed
+    QVariantMap filter;
+    filter["category"] = QStringLiteral("Workspace");
+    filter["operation"] = QStringLiteral("RootMissingFailSafe");
+    QTRY_VERIFY_WITH_TIMEOUT(!LogService::instance().fetchLogs(filter).isEmpty(), 3000);
+    const QVariantList logs = LogService::instance().fetchLogs(filter);
+    QCOMPARE(logs.first().toMap().value("status").toString(), QStringLiteral("Failed"));
+
+    // Clean up registry entry
+    QVERIFY(ws.unregisterWorkspaceFromUi(wsRoot));
 }
 
 QTEST_GUILESS_MAIN(TestWorkspaceV381)
