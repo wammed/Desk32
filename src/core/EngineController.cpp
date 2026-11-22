@@ -22,6 +22,126 @@
 
 namespace desk32::core {
 
+namespace {
+
+bool parsePresetFilterType(const QJsonValue &val, BiquadFilterType &outType,
+                           QString &outRawLabel) {
+  if (val.isUndefined() || val.isNull()) {
+    outType = BiquadFilterType::Peak;
+    return true;
+  }
+  if (val.isDouble()) {
+    const double d = val.toDouble();
+    const int code = static_cast<int>(std::llround(d));
+    if (std::abs(d - static_cast<double>(code)) > 1e-6 || code < 0 ||
+        code > 5) {
+      outRawLabel = QString::number(d);
+      return false;
+    }
+    outType = static_cast<BiquadFilterType>(code);
+    return true;
+  }
+  if (val.isString()) {
+    const QString s = val.toString().trimmed().toLower();
+    if (s == QLatin1String("peak") || s == QLatin1String("pk") ||
+        s == QLatin1String("bell") || s == QLatin1String("peaking")) {
+      outType = BiquadFilterType::Peak;
+      return true;
+    }
+    if (s == QLatin1String("lowshelf") || s == QLatin1String("low_shelf") ||
+        s == QLatin1String("ls") || s == QLatin1String("lsc")) {
+      outType = BiquadFilterType::LowShelf;
+      return true;
+    }
+    if (s == QLatin1String("highshelf") || s == QLatin1String("high_shelf") ||
+        s == QLatin1String("hs") || s == QLatin1String("hsc")) {
+      outType = BiquadFilterType::HighShelf;
+      return true;
+    }
+    if (s == QLatin1String("lowpass") || s == QLatin1String("low_pass") ||
+        s == QLatin1String("lp") || s == QLatin1String("lpf")) {
+      outType = BiquadFilterType::LowPass;
+      return true;
+    }
+    if (s == QLatin1String("highpass") || s == QLatin1String("high_pass") ||
+        s == QLatin1String("hp") || s == QLatin1String("hpf")) {
+      outType = BiquadFilterType::HighPass;
+      return true;
+    }
+    if (s == QLatin1String("notch") || s == QLatin1String("no")) {
+      outType = BiquadFilterType::Notch;
+      return true;
+    }
+    outRawLabel = val.toString();
+    return false;
+  }
+  outRawLabel = QStringLiteral("<invalid>");
+  return false;
+}
+
+double extractPresetPreampDb(const QJsonObject &obj) {
+  double raw = 0.0;
+  if (obj.contains(QStringLiteral("preamp_db"))) {
+    raw = obj.value(QStringLiteral("preamp_db")).toDouble(0.0);
+  } else if (obj.contains(QStringLiteral("preampDb"))) {
+    raw = obj.value(QStringLiteral("preampDb")).toDouble(0.0);
+  } else if (obj.contains(QStringLiteral("preamp"))) {
+    raw = obj.value(QStringLiteral("preamp")).toDouble(0.0);
+  }
+  const double clamped = std::clamp(raw, -24.0, 24.0);
+  return (std::abs(clamped) <= 1e-9) ? 0.0 : clamped;
+}
+
+void parsePresetChannelBands(const QJsonArray &arr, const QString &chLabel,
+                             std::vector<ParametricEQ::BandConfig> &out,
+                             QStringList &unsupportedOut) {
+  out.clear();
+  if (arr.isEmpty()) {
+    return;
+  }
+  for (int i = 0; i < arr.size(); ++i) {
+    const QJsonObject bo = arr[i].toObject();
+    const int idx =
+        bo.contains(QStringLiteral("index")) ? bo[QStringLiteral("index")].toInt(i) : i;
+    if (idx < 0) {
+      continue;
+    }
+    if (static_cast<size_t>(idx) >= out.size()) {
+      const size_t oldSz = out.size();
+      out.resize(static_cast<size_t>(idx) + 1);
+      for (size_t k = oldSz; k < out.size(); ++k) {
+        out[k].enabled = false;
+        out[k].gainDb = 0.0;
+      }
+    }
+    auto &cfg = out[static_cast<size_t>(idx)];
+    BiquadFilterType parsedType = BiquadFilterType::Peak;
+    QString rawTypeLabel;
+    if (!parsePresetFilterType(bo.value(QStringLiteral("type")), parsedType,
+                               rawTypeLabel)) {
+      cfg.enabled = false;
+      cfg.gainDb = 0.0;
+      cfg.type = BiquadFilterType::Peak;
+      unsupportedOut.append(
+          QStringLiteral("%1[%2]:%3").arg(chLabel).arg(idx).arg(rawTypeLabel));
+      continue;
+    }
+    cfg.frequency = bo.value(QStringLiteral("frequency")).toDouble(1000.0);
+    cfg.gainDb = bo.contains(QStringLiteral("gain_db"))
+                     ? bo.value(QStringLiteral("gain_db")).toDouble(0.0)
+                     : bo.value(QStringLiteral("gainDb")).toDouble(0.0);
+    cfg.Q = bo.contains(QStringLiteral("q"))
+                ? bo.value(QStringLiteral("q")).toDouble(1.0)
+                : bo.value(QStringLiteral("Q")).toDouble(1.0);
+    cfg.type = parsedType;
+    cfg.enabled = bo.contains(QStringLiteral("enabled"))
+                      ? bo.value(QStringLiteral("enabled")).toBool(true)
+                      : true;
+  }
+}
+
+} // namespace
+
 EngineController &EngineController::instance() {
   static EngineController s_instance;
   return s_instance;
@@ -92,6 +212,14 @@ bool EngineController::initialize(bool offlineMode) {
   m_renderIncludeCompressor.store(true, std::memory_order_relaxed);
   m_renderIncludeReverb.store(true, std::memory_order_relaxed);
   m_renderIncludeLimiter.store(true, std::memory_order_relaxed);
+  for (size_t k = 0; k < 7; ++k) {
+    m_dspInputTrimDb[k].store(0.0, std::memory_order_relaxed);
+    m_dspOutputTrimDb[k].store(0.0, std::memory_order_relaxed);
+  }
+  {
+    std::lock_guard<std::mutex> lock(m_presetReportMutex);
+    m_lastPresetImportReport.clear();
+  }
 
   // 1. Initialize 4-Deck Manager
   m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
@@ -221,12 +349,15 @@ bool EngineController::initialize(bool offlineMode) {
 
   // 2. Initialize Control Thread DSP Parameter Snapshots (P0-21)
   m_uiPeq.configure(48000.0);
+  m_uiPeq.setPreampDb(0.0);
   m_uiPeq.setEnabled(false);
 
   m_uiGeq.configure(48000.0);
   m_uiGeq.setEnabled(false);
 
   m_uiFilter.configure(48000.0);
+  m_uiFilter.setHpfTrimDb(0.0, 0.0, 0);
+  m_uiFilter.setLpfTrimDb(0.0, 0.0, 0);
   m_uiFilter.setHpfEnabled(false);
   m_uiFilter.setLpfEnabled(false);
 
@@ -1785,6 +1916,10 @@ int EngineController::bitPerfectStatus() const {
       return 1;
     }
 
+    if (!areAllDspTrimsZero()) {
+      return 1; // Non-zero DSP input/output trim alters signal even when DSP is bypassed
+    }
+
     if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
       const bool filterActive =
           !m_filterBypassed.load(std::memory_order_relaxed) &&
@@ -1802,6 +1937,9 @@ int EngineController::bitPerfectStatus() const {
 
       if (routeMode == 0 &&
           !m_listeningCorrectionBypassed.load(std::memory_order_relaxed)) {
+        if (std::abs(m_uiListeningCorrection.preampDb()) > 1e-4) {
+          return 1;
+        }
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
           if (m_uiListeningCorrection.leftBand(b).enabled ||
               m_uiListeningCorrection.rightBand(b).enabled) {
@@ -1898,6 +2036,11 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   report["modeState"] = modeState;
   report["modeStateText"] = bitPerfectModeStateText();
   report["legacyStatus"] = bitPerfectStatus();
+  const bool trimsZero = areAllDspTrimsZero();
+  report["dspTrimsZero"] = trimsZero;
+  if (!trimsZero) {
+    report["nonZeroTrims"] = getAllDspTrims();
+  }
 
   const uint64_t requiredGen = m_pipeline ? m_pipeline->level1Generation() : 0;
   const auto telem = m_pipeline ? m_pipeline->currentTelemetry()
@@ -1926,6 +2069,7 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
       m_pipeline ? m_pipeline->level1VerifiedBlocks() : 0);
   level1["totalBlocks"] =
       static_cast<qulonglong>(m_pipeline ? m_pipeline->level1TotalBlocks() : 0);
+  level1["dspTrimsZero"] = trimsZero;
   level1["status"] = level1Pass
                          ? QStringLiteral("Verified")
                          : (!level1Fresh ? QStringLiteral("Indeterminate")
@@ -3638,6 +3782,7 @@ QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
 void EngineController::applyPeqPreset(const QString &presetName) {
   bool ok = m_uiPeq.applyPreset(presetName.toStdString());
   if (ok) {
+    m_uiPeq.setPreampDb(0.0);
     if (m_pipeline) {
       // P0-21: Publish entire 16-band-per-channel PEQ configuration atomically
       // via Mailbox
@@ -3662,9 +3807,23 @@ void EngineController::applyPeqPreset(const QString &presetName) {
         rightBands[b].enabled = r.enabled ? 1 : 0;
         rightBands[b].modified = 1;
       }
-      m_pipeline->paramMailbox().applyPeqPreset(leftBands, rightBands);
+      m_pipeline->paramMailbox().applyPeqPreset(leftBands, rightBands, 0.0f);
+      m_pipeline->invalidateLevel1Measurement();
+    }
+    if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+      syncMasterDspToRenderEngine();
     }
     emit peqParametersChanged();
+    emit diagnosticsChanged();
+    log::LogService::instance().log("DSP", "ApplyPEQPreset", "Success",
+                                    "Applied PEQ Preset: " + presetName,
+                                    "DSPNode", "PEQ");
+    return;
+  }
+
+  const QJsonObject obj = m_presetManager.loadPreset(
+      engine::preset::PresetCategories::ListeningCorrection, presetName);
+  if (!obj.isEmpty() && applyPeqBandsFromJson(obj, presetName)) {
     log::LogService::instance().log("DSP", "ApplyPEQPreset", "Success",
                                     "Applied PEQ Preset: " + presetName,
                                     "DSPNode", "PEQ");
@@ -3892,6 +4051,130 @@ QVariantMap EngineController::getLastPresetImportReport() const {
   return m_lastPresetImportReport;
 }
 
+int EngineController::resolveDspTrimIndex(const QString &dspName) noexcept {
+  const QString key = dspName.trimmed().toLower();
+  if (key == QLatin1String("peq") || key == QLatin1String("masterpeq") ||
+      key == QLatin1String("master peq")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Peq);
+  }
+  if (key == QLatin1String("geq") || key == QLatin1String("graphiceq") ||
+      key == QLatin1String("graphic eq")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Geq);
+  }
+  if (key == QLatin1String("hpf")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Hpf);
+  }
+  if (key == QLatin1String("lpf")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Lpf);
+  }
+  if (key == QLatin1String("compressor") || key == QLatin1String("comp")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Compressor);
+  }
+  if (key == QLatin1String("limiter") ||
+      key == QLatin1String("peaklimiter") ||
+      key == QLatin1String("peak limiter")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Limiter);
+  }
+  if (key == QLatin1String("reverb")) {
+    return static_cast<int>(engine::dsp::DspTrimTarget::Reverb);
+  }
+  return -1;
+}
+
+bool EngineController::areAllDspTrimsZero() const noexcept {
+  for (size_t i = 0; i < 7; ++i) {
+    if (std::abs(m_dspInputTrimDb[i].load(std::memory_order_relaxed)) > 1e-4 ||
+        std::abs(m_dspOutputTrimDb[i].load(std::memory_order_relaxed)) > 1e-4) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void EngineController::setDspTrim(const QString &dspName, bool isOutput,
+                                  double gainDb) {
+  const int idx = resolveDspTrimIndex(dspName);
+  if (idx < 0 || idx >= 7)
+    return;
+
+  double clamped = std::clamp(gainDb, -12.0, 12.0);
+  if (std::abs(clamped) < 1e-6) {
+    clamped = 0.0;
+  }
+
+  const size_t uIdx = static_cast<size_t>(idx);
+  if (isOutput) {
+    m_dspOutputTrimDb[uIdx].store(clamped, std::memory_order_relaxed);
+  } else {
+    m_dspInputTrimDb[uIdx].store(clamped, std::memory_order_relaxed);
+  }
+
+  if (uIdx == static_cast<size_t>(engine::dsp::DspTrimTarget::Hpf)) {
+    m_uiFilter.setHpfTrimDb(
+        m_dspInputTrimDb[uIdx].load(std::memory_order_relaxed),
+        m_dspOutputTrimDb[uIdx].load(std::memory_order_relaxed), 0);
+  } else if (uIdx == static_cast<size_t>(engine::dsp::DspTrimTarget::Lpf)) {
+    m_uiFilter.setLpfTrimDb(
+        m_dspInputTrimDb[uIdx].load(std::memory_order_relaxed),
+        m_dspOutputTrimDb[uIdx].load(std::memory_order_relaxed), 0);
+  }
+
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().setDspTrim(uIdx, isOutput,
+                                          static_cast<float>(clamped));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+
+  emit dspTrimsChanged();
+  emit diagnosticsChanged();
+}
+
+double EngineController::getDspTrim(const QString &dspName,
+                                    bool isOutput) const {
+  const int idx = resolveDspTrimIndex(dspName);
+  if (idx < 0 || idx >= 7)
+    return 0.0;
+  const size_t uIdx = static_cast<size_t>(idx);
+  return isOutput ? m_dspOutputTrimDb[uIdx].load(std::memory_order_relaxed)
+                  : m_dspInputTrimDb[uIdx].load(std::memory_order_relaxed);
+}
+
+QVariantMap EngineController::getAllDspTrims() const {
+  static constexpr const char *kNames[7] = {
+      "PEQ", "GEQ", "HPF", "LPF", "Compressor", "Limiter", "Reverb"};
+  QVariantMap out;
+  for (size_t i = 0; i < 7; ++i) {
+    QVariantMap entry;
+    entry[QStringLiteral("inputDb")] =
+        m_dspInputTrimDb[i].load(std::memory_order_relaxed);
+    entry[QStringLiteral("outputDb")] =
+        m_dspOutputTrimDb[i].load(std::memory_order_relaxed);
+    out[QString::fromLatin1(kNames[i])] = entry;
+  }
+  return out;
+}
+
+void EngineController::resetAllDspTrims() {
+  for (size_t i = 0; i < 7; ++i) {
+    m_dspInputTrimDb[i].store(0.0, std::memory_order_relaxed);
+    m_dspOutputTrimDb[i].store(0.0, std::memory_order_relaxed);
+  }
+  m_uiFilter.setHpfTrimDb(0.0, 0.0, 0);
+  m_uiFilter.setLpfTrimDb(0.0, 0.0, 0);
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().resetAllDspTrims();
+    m_pipeline->invalidateLevel1Measurement();
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+  emit dspTrimsChanged();
+  emit diagnosticsChanged();
+}
+
 QVariantList EngineController::getAudioNodeContracts() const {
   QVariantList out;
   auto appendChain =
@@ -3970,9 +4253,11 @@ void EngineController::setListeningPreset(const QString &presetName) {
     // P0-27: Precompute preset coefficients on Control Thread and publish
     // atomically via Mailbox
     m_pipeline->paramMailbox().setListeningPreset(presetName.toStdString());
+    m_pipeline->invalidateLevel1Measurement();
   }
   bool ok = m_uiListeningCorrection.applyPreset(presetName.toStdString());
   if (ok) {
+    m_uiListeningCorrection.setPreampDb(0.0);
     m_listeningPresetName = presetName;
     if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
       SettingsManager::instance().setListeningPreset(presetName);
@@ -5107,66 +5392,171 @@ bool EngineController::deletePreset(const QString &category,
 
 bool EngineController::applyListeningCorrectionJson(
     const QJsonObject &obj, const QString &presetLabel) {
+  std::vector<ParametricEQ::BandConfig> lVec;
+  std::vector<ParametricEQ::BandConfig> rVec;
+  QStringList unsupportedFilters;
+
+  if (obj.contains("left_bands")) {
+    parsePresetChannelBands(obj["left_bands"].toArray(), QStringLiteral("L"),
+                            lVec, unsupportedFilters);
+  } else if (obj.contains("bands")) {
+    parsePresetChannelBands(obj["bands"].toArray(), QStringLiteral("L"), lVec,
+                            unsupportedFilters);
+  }
+  if (obj.contains("right_bands")) {
+    parsePresetChannelBands(obj["right_bands"].toArray(), QStringLiteral("R"),
+                            rVec, unsupportedFilters);
+  } else if (obj.contains("bands")) {
+    parsePresetChannelBands(obj["bands"].toArray(), QStringLiteral("R"), rVec,
+                            unsupportedFilters);
+  }
+
+  const double preampDb = extractPresetPreampDb(obj);
+  const auto report = m_uiListeningCorrection.importBandsWithReport(lVec, rVec);
+  m_uiListeningCorrection.setPreampDb(preampDb);
+
   std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>
       lBands{};
   std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>
       rBands{};
-  ParametricEQ::getPresetBandConfigs("Monitor Flat", lBands, rBands);
-
-  std::vector<ParametricEQ::BandConfig> lVec(lBands.begin(), lBands.end());
-  std::vector<ParametricEQ::BandConfig> rVec(rBands.begin(), rBands.end());
-
-  auto parseArrayDynamic = [](const QJsonArray &arr,
-                              std::vector<ParametricEQ::BandConfig> &out) {
-    if (arr.isEmpty())
-      return;
-    const size_t maxNeed =
-        std::max(out.size(), static_cast<size_t>(arr.size()));
-    out.resize(maxNeed);
-    for (int i = 0; i < arr.size(); ++i) {
-      const QJsonObject bo = arr[i].toObject();
-      const int idx = bo.contains("index") ? bo["index"].toInt(i) : i;
-      if (idx < 0)
-        continue;
-      if (static_cast<size_t>(idx) >= out.size()) {
-        out.resize(static_cast<size_t>(idx) + 1);
-      }
-      auto &cfg = out[static_cast<size_t>(idx)];
-      cfg.frequency = bo["frequency"].toDouble(cfg.frequency);
-      cfg.gainDb = bo.contains("gain_db") ? bo["gain_db"].toDouble(0.0)
-                                          : bo["gainDb"].toDouble(0.0);
-      cfg.Q = bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
-      cfg.type =
-          static_cast<BiquadFilterType>(std::clamp(bo["type"].toInt(0), 0, 5));
-      cfg.enabled = bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
-    }
-  };
-
-  if (obj.contains("left_bands")) {
-    parseArrayDynamic(obj["left_bands"].toArray(), lVec);
-  } else if (obj.contains("bands")) {
-    parseArrayDynamic(obj["bands"].toArray(), lVec);
-  }
-  if (obj.contains("right_bands")) {
-    parseArrayDynamic(obj["right_bands"].toArray(), rVec);
-  } else if (obj.contains("bands")) {
-    parseArrayDynamic(obj["bands"].toArray(), rVec);
-  }
-
-  const auto report = m_uiListeningCorrection.importBandsWithReport(lVec, rVec);
   for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
     lBands[b] = m_uiListeningCorrection.leftBand(b);
     rBands[b] = m_uiListeningCorrection.rightBand(b);
   }
 
   if (m_pipeline) {
-    m_pipeline->paramMailbox().applyListeningBands(lBands, rBands);
+    m_pipeline->paramMailbox().applyListeningBands(
+        lBands, rBands, static_cast<float>(preampDb));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+
+  const QString effectiveLabel =
+      presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
+  recordPresetImportReport(
+      QStringLiteral("ListeningCorrection"),
+      QStringLiteral("Listening Correction"),
+      QStringLiteral("ImportListeningPeq"), effectiveLabel, report,
+      unsupportedFilters, preampDb);
+
+  m_listeningPresetName = effectiveLabel;
+  emit listeningPresetChanged(m_listeningPresetName);
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+  return true;
+}
+
+bool EngineController::applyPeqBandsFromJson(const QJsonObject &peq,
+                                             const QString &presetLabel) {
+  std::vector<ParametricEQ::BandConfig> leftVec;
+  std::vector<ParametricEQ::BandConfig> rightVec;
+  QStringList unsupportedFilters;
+
+  if (peq.contains("left_bands")) {
+    parsePresetChannelBands(peq["left_bands"].toArray(), QStringLiteral("L"),
+                            leftVec, unsupportedFilters);
+  } else if (peq.contains("leftBands")) {
+    parsePresetChannelBands(peq["leftBands"].toArray(), QStringLiteral("L"),
+                            leftVec, unsupportedFilters);
+  } else if (peq.contains("bands")) {
+    parsePresetChannelBands(peq["bands"].toArray(), QStringLiteral("L"),
+                            leftVec, unsupportedFilters);
+  }
+
+  if (peq.contains("right_bands")) {
+    parsePresetChannelBands(peq["right_bands"].toArray(), QStringLiteral("R"),
+                            rightVec, unsupportedFilters);
+  } else if (peq.contains("rightBands")) {
+    parsePresetChannelBands(peq["rightBands"].toArray(), QStringLiteral("R"),
+                            rightVec, unsupportedFilters);
+  } else if (peq.contains("bands")) {
+    parsePresetChannelBands(peq["bands"].toArray(), QStringLiteral("R"),
+                            rightVec, unsupportedFilters);
+  }
+
+  const double preampDb = extractPresetPreampDb(peq);
+  const auto report = m_uiPeq.importBandsWithReport(leftVec, rightVec);
+  m_uiPeq.setPreampDb(preampDb);
+
+  if (m_pipeline) {
+    std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24>
+        mailLeft{};
+    std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24>
+        mailRight{};
+    for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+      const auto &lb = m_uiPeq.leftBand(b);
+      mailLeft[b].frequency = static_cast<float>(lb.frequency);
+      mailLeft[b].gainDb = static_cast<float>(lb.gainDb);
+      mailLeft[b].Q = static_cast<float>(lb.Q);
+      mailLeft[b].type = static_cast<uint8_t>(lb.type);
+      mailLeft[b].enabled = lb.enabled ? 1 : 0;
+      mailLeft[b].modified = 1;
+
+      const auto &rb = m_uiPeq.rightBand(b);
+      mailRight[b].frequency = static_cast<float>(rb.frequency);
+      mailRight[b].gainDb = static_cast<float>(rb.gainDb);
+      mailRight[b].Q = static_cast<float>(rb.Q);
+      mailRight[b].type = static_cast<uint8_t>(rb.type);
+      mailRight[b].enabled = rb.enabled ? 1 : 0;
+      mailRight[b].modified = 1;
+    }
+    m_pipeline->paramMailbox().applyPeqPreset(mailLeft, mailRight,
+                                              static_cast<float>(preampDb));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+
+  const QString effectiveLabel =
+      presetLabel.isEmpty() ? QStringLiteral("MasterPEQ") : presetLabel;
+  recordPresetImportReport(
+      QStringLiteral("MasterPEQ"), QStringLiteral("Master PEQ"),
+      QStringLiteral("ImportMasterPeq"), effectiveLabel, report,
+      unsupportedFilters, preampDb);
+
+  if (peq.contains("enabled")) {
+    setDspNodeBypass("PEQ", !peq["enabled"].toBool(false));
+  } else if (peq.contains("bypassed")) {
+    setDspNodeBypass("PEQ", peq["bypassed"].toBool(true));
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+  return true;
+}
+
+void EngineController::recordPresetImportReport(
+    const QString &targetKey, const QString &targetDisplay,
+    const QString &logOperation, const QString &presetLabel,
+    const ParametricEQ::BandImportReport &report,
+    const QStringList &unsupportedFilters, double preampDb) {
+  const bool hasUnsupported = !unsupportedFilters.isEmpty();
+  QString summaryMsg;
+  if (report.truncated || hasUnsupported) {
+    QStringList parts;
+    if (report.truncated) {
+      parts << QString("truncated %1L/%2R excess bands (limit %3/ch)")
+                   .arg(report.overflowLeft)
+                   .arg(report.overflowRight)
+                   .arg(ParametricEQ::BANDS_PER_CHANNEL);
+    }
+    if (hasUnsupported) {
+      parts << QString("skipped %1 unsupported filter type(s): %2")
+                   .arg(unsupportedFilters.size())
+                   .arg(unsupportedFilters.join(QStringLiteral(", ")));
+    }
+    summaryMsg = QString("%1 imported %2L/%3R bands: %4.")
+                     .arg(targetDisplay)
+                     .arg(report.requestedLeft)
+                     .arg(report.requestedRight)
+                     .arg(parts.join(QStringLiteral("; ")));
+  } else {
+    summaryMsg = QStringLiteral("Imported cleanly within 16-band DSP limit.");
   }
 
   {
     std::lock_guard<std::mutex> lock(m_presetReportMutex);
     m_lastPresetImportReport.clear();
-    m_lastPresetImportReport["target"] = QStringLiteral("ListeningCorrection");
+    m_lastPresetImportReport["target"] = targetKey;
     m_lastPresetImportReport["requestedLeftBands"] =
         static_cast<int>(report.requestedLeft);
     m_lastPresetImportReport["requestedRightBands"] =
@@ -5177,46 +5567,46 @@ bool EngineController::applyListeningCorrectionJson(
         static_cast<int>(report.overflowLeft);
     m_lastPresetImportReport["overflowRightBands"] =
         static_cast<int>(report.overflowRight);
+    m_lastPresetImportReport["truncatedCountLeft"] =
+        static_cast<int>(report.overflowLeft);
+    m_lastPresetImportReport["truncatedCountRight"] =
+        static_cast<int>(report.overflowRight);
     m_lastPresetImportReport["truncated"] = report.truncated;
-    m_lastPresetImportReport["message"] =
-        report.truncated
-            ? QString("Listening Correction imported %1L/%2R bands: 16 bands "
-                      "active per channel, %3L/%4R excess bands retained in "
-                      "variable overflow model.")
-                  .arg(report.requestedLeft)
-                  .arg(report.requestedRight)
-                  .arg(report.overflowLeft)
-                  .arg(report.overflowRight)
-            : QStringLiteral("Imported cleanly within 16-band DSP limit.");
+    m_lastPresetImportReport["unsupportedFilterCount"] =
+        unsupportedFilters.size();
+    m_lastPresetImportReport["unsupportedFilterTypes"] = unsupportedFilters;
+    m_lastPresetImportReport["preampDb"] = preampDb;
+    m_lastPresetImportReport["message"] = summaryMsg;
   }
 
-  if (report.truncated) {
-    const QString warnMsg =
-        QString("Listening Correction preset exceeds 16 bands/ch (%1L/%2R); "
-                "excess preserved in overflow storage.")
-            .arg(report.requestedLeft)
-            .arg(report.requestedRight);
+  if (report.truncated || hasUnsupported) {
+    QJsonObject det;
+    det.insert(QStringLiteral("target"), targetKey);
+    det.insert(QStringLiteral("requested_left"),
+               static_cast<int>(report.requestedLeft));
+    det.insert(QStringLiteral("requested_right"),
+               static_cast<int>(report.requestedRight));
+    det.insert(QStringLiteral("truncated_left"),
+               static_cast<int>(report.overflowLeft));
+    det.insert(QStringLiteral("truncated_right"),
+               static_cast<int>(report.overflowRight));
+    det.insert(QStringLiteral("unsupported_filter_count"),
+               unsupportedFilters.size());
+    det.insert(QStringLiteral("unsupported_filters"),
+               QJsonArray::fromStringList(unsupportedFilters));
     log::LogService::instance().log(
-        QStringLiteral("PresetManagement"),
-        QStringLiteral("ImportListeningPeq"), QStringLiteral("Warning"),
-        warnMsg, QStringLiteral("Preset"),
-        presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel,
-        QStringLiteral("{}"), QString(), QString(),
-        log::ErrorCode::PresetTruncatedWarn, 0.0);
-    emit presetImportWarning(QStringLiteral("ListeningCorrection"),
-                             static_cast<int>(report.requestedLeft),
-                             static_cast<int>(report.requestedRight),
-                             static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
-                             static_cast<int>(report.overflowLeft),
-                             static_cast<int>(report.overflowRight), warnMsg);
+        QStringLiteral("PresetManagement"), logOperation,
+        QStringLiteral("Warning"), summaryMsg, QStringLiteral("Preset"),
+        presetLabel,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(), QString(), log::ErrorCode::PresetTruncatedWarn, 0.0);
+    emit presetImportWarning(
+        targetKey, static_cast<int>(report.requestedLeft),
+        static_cast<int>(report.requestedRight),
+        static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
+        static_cast<int>(report.overflowLeft),
+        static_cast<int>(report.overflowRight), summaryMsg);
   }
-
-  m_listeningPresetName =
-      presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
-  emit listeningPresetChanged(m_listeningPresetName);
-  emit peqParametersChanged();
-  emit diagnosticsChanged();
-  return true;
 }
 
 bool EngineController::applyExternalInsertJson(const QJsonObject &obj) {
@@ -5276,108 +5666,14 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
     }
   }
   if (obj.contains("peq")) {
-    const QJsonObject peq = obj["peq"].toObject();
-    std::vector<ParametricEQ::BandConfig> leftVec = m_uiPeq.exportBands(false);
-    leftVec.resize(ParametricEQ::BANDS_PER_CHANNEL);
-    std::vector<ParametricEQ::BandConfig> rightVec = m_uiPeq.exportBands(true);
-    rightVec.resize(ParametricEQ::BANDS_PER_CHANNEL);
-
-    auto collectChannelBands = [&](const QJsonArray &arr,
-                                   std::vector<ParametricEQ::BandConfig> &out) {
-      if (static_cast<size_t>(arr.size()) > out.size()) {
-        out.resize(static_cast<size_t>(arr.size()));
-      }
-      for (int i = 0; i < arr.size(); ++i) {
-        const QJsonObject bo = arr[i].toObject();
-        const int idx = bo.contains("index") ? bo["index"].toInt(i) : i;
-        if (idx < 0)
-          continue;
-        if (static_cast<size_t>(idx) >= out.size()) {
-          out.resize(static_cast<size_t>(idx) + 1);
-        }
-        auto &cfg = out[static_cast<size_t>(idx)];
-        cfg.frequency = bo["frequency"].toDouble(1000.0);
-        cfg.gainDb = bo.contains("gain_db") ? bo["gain_db"].toDouble(0.0)
-                                            : bo["gainDb"].toDouble(0.0);
-        cfg.Q =
-            bo.contains("q") ? bo["q"].toDouble(1.0) : bo["Q"].toDouble(1.0);
-        cfg.type = static_cast<BiquadFilterType>(
-            std::clamp(bo["type"].toInt(0), 0, 5));
-        cfg.enabled =
-            bo.contains("enabled") ? bo["enabled"].toBool(true) : true;
-      }
-    };
-
-    if (peq.contains("left_bands"))
-      collectChannelBands(peq["left_bands"].toArray(), leftVec);
-    else if (peq.contains("leftBands"))
-      collectChannelBands(peq["leftBands"].toArray(), leftVec);
-    if (peq.contains("right_bands"))
-      collectChannelBands(peq["right_bands"].toArray(), rightVec);
-    else if (peq.contains("rightBands"))
-      collectChannelBands(peq["rightBands"].toArray(), rightVec);
-
-    const auto report = m_uiPeq.importBandsWithReport(leftVec, rightVec);
-    for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
-      const auto &lb = m_uiPeq.leftBand(b);
-      setPeqBand(false, static_cast<int>(b), lb.frequency, lb.gainDb, lb.Q,
-                 static_cast<int>(lb.type), lb.enabled);
-      const auto &rb = m_uiPeq.rightBand(b);
-      setPeqBand(true, static_cast<int>(b), rb.frequency, rb.gainDb, rb.Q,
-                 static_cast<int>(rb.type), rb.enabled);
+    QJsonObject peq = obj["peq"].toObject();
+    if (!peq.contains("preamp_db") && !peq.contains("preampDb") &&
+        !peq.contains("preamp") &&
+        (obj.contains("preamp_db") || obj.contains("preampDb") ||
+         obj.contains("preamp"))) {
+      peq["preamp_db"] = extractPresetPreampDb(obj);
     }
-
-    {
-      std::lock_guard<std::mutex> lock(m_presetReportMutex);
-      m_lastPresetImportReport.clear();
-      m_lastPresetImportReport["target"] = QStringLiteral("MasterPEQ");
-      m_lastPresetImportReport["requestedLeftBands"] =
-          static_cast<int>(report.requestedLeft);
-      m_lastPresetImportReport["requestedRightBands"] =
-          static_cast<int>(report.requestedRight);
-      m_lastPresetImportReport["activeLimitPerChannel"] =
-          static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL);
-      m_lastPresetImportReport["overflowLeftBands"] =
-          static_cast<int>(report.overflowLeft);
-      m_lastPresetImportReport["overflowRightBands"] =
-          static_cast<int>(report.overflowRight);
-      m_lastPresetImportReport["truncated"] = report.truncated;
-      m_lastPresetImportReport["message"] =
-          report.truncated
-              ? QString("Master PEQ imported %1L/%2R bands: 16 active bands "
-                        "applied, %3L/%4R excess bands retained in variable "
-                        "overflow vector.")
-                    .arg(report.requestedLeft)
-                    .arg(report.requestedRight)
-                    .arg(report.overflowLeft)
-                    .arg(report.overflowRight)
-              : QStringLiteral("Imported cleanly within 16-band DSP limit.");
-    }
-
-    if (report.truncated) {
-      const QString warnMsg =
-          QString("Master PEQ preset exceeds 16 bands/ch (%1L/%2R); excess "
-                  "retained in variable overflow vector.")
-              .arg(report.requestedLeft)
-              .arg(report.requestedRight);
-      log::LogService::instance().log(
-          QStringLiteral("PresetManagement"), QStringLiteral("ImportMasterPeq"),
-          QStringLiteral("Warning"), warnMsg, QStringLiteral("Preset"),
-          QStringLiteral("MasterPEQ"), QStringLiteral("{}"), QString(),
-          QString(), log::ErrorCode::PresetTruncatedWarn, 0.0);
-      emit presetImportWarning(
-          QStringLiteral("MasterPEQ"), static_cast<int>(report.requestedLeft),
-          static_cast<int>(report.requestedRight),
-          static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
-          static_cast<int>(report.overflowLeft),
-          static_cast<int>(report.overflowRight), warnMsg);
-    }
-
-    if (peq.contains("enabled")) {
-      setDspNodeBypass("PEQ", !peq["enabled"].toBool(false));
-    } else if (peq.contains("bypassed")) {
-      setDspNodeBypass("PEQ", peq["bypassed"].toBool(true));
-    }
+    applyPeqBandsFromJson(peq, QStringLiteral("MasterPEQ"));
   }
   if (obj.contains("compressor")) {
     const QJsonObject comp = obj["compressor"].toObject();
@@ -5598,6 +5894,9 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
     obj["right_bands"] = serializeListening(true);
     obj["bands"] = leftArr;
     obj["preset_name"] = m_listeningPresetName;
+    if (std::abs(m_uiListeningCorrection.preampDb()) > 1e-6) {
+      obj["preamp_db"] = m_uiListeningCorrection.preampDb();
+    }
   } else if (category == engine::preset::PresetCategories::ExternalInsert) {
     if (m_insertNode) {
       const auto &cfg = m_insertNode->bridge().config();
@@ -5677,6 +5976,9 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
       };
       peq["left_bands"] = serializeChannel(false);
       peq["right_bands"] = serializeChannel(true);
+      if (std::abs(m_uiPeq.preampDb()) > 1e-6) {
+        peq["preamp_db"] = m_uiPeq.preampDb();
+      }
       obj["peq"] = peq;
     }
     {
@@ -5838,6 +6140,20 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       if (auto *peq =
               dynamic_cast<engine::pipeline::ParametricEqNode *>(node)) {
         peq->reset();
+        peq->setInputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Peq)]
+                      .load(std::memory_order_relaxed)
+                : peq->inputTrimDb(),
+            true);
+        peq->setOutputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Peq)]
+                      .load(std::memory_order_relaxed)
+                : peq->outputTrimDb(),
+            true);
         if (hasPendingControlUpdates) {
           peq->setBypassed(m_peqBypassed.load(std::memory_order_relaxed));
           std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL> lc{},
@@ -5860,10 +6176,27 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
             re[b] = rb.enabled;
           }
           peq->applyCoefficients(lc, rc, le, re, 0);
+          peq->setPreampDb(m_uiPeq.preampDb(), true);
+        } else {
+          peq->setPreampDb(peq->dsp().preampDb(), true);
         }
       } else if (auto *geq =
                      dynamic_cast<engine::pipeline::GraphicEqNode *>(node)) {
         geq->reset();
+        geq->setInputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Geq)]
+                      .load(std::memory_order_relaxed)
+                : geq->inputTrimDb(),
+            true);
+        geq->setOutputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Geq)]
+                      .load(std::memory_order_relaxed)
+                : geq->outputTrimDb(),
+            true);
         if (hasPendingControlUpdates) {
           geq->setBypassed(m_geqBypassed.load(std::memory_order_relaxed));
           const auto &p = m_pipeline->paramMailbox().currentParameters();
@@ -5873,6 +6206,28 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       } else if (auto *flt =
                      dynamic_cast<engine::pipeline::HighLowPassNode *>(node)) {
         flt->resetFilterStateOnly();
+        flt->applyTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Hpf)]
+                      .load(std::memory_order_relaxed)
+                : flt->dsp().hpfInputTrimDb(),
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Hpf)]
+                      .load(std::memory_order_relaxed)
+                : flt->dsp().hpfOutputTrimDb(),
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Lpf)]
+                      .load(std::memory_order_relaxed)
+                : flt->dsp().lpfInputTrimDb(),
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Lpf)]
+                      .load(std::memory_order_relaxed)
+                : flt->dsp().lpfOutputTrimDb(),
+            0);
         if (hasPendingControlUpdates) {
           flt->setBypassed(m_filterBypassed.load(std::memory_order_relaxed));
           const auto &p = m_pipeline->paramMailbox().currentParameters();
@@ -5881,6 +6236,20 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       } else if (auto *comp =
                      dynamic_cast<engine::pipeline::CompressorNode *>(node)) {
         comp->reset();
+        comp->setInputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Compressor)]
+                      .load(std::memory_order_relaxed)
+                : comp->inputTrimDb(),
+            true);
+        comp->setOutputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Compressor)]
+                      .load(std::memory_order_relaxed)
+                : comp->outputTrimDb(),
+            true);
         if (hasPendingControlUpdates) {
           comp->setBypassed(m_compBypassed.load(std::memory_order_relaxed));
           comp->prepareInstance(sr, m_uiComp.thresholdDb(), m_uiComp.ratio(),
@@ -5891,6 +6260,20 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       } else if (auto *rev =
                      dynamic_cast<engine::pipeline::ReverbNode *>(node)) {
         rev->reset();
+        rev->setInputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Reverb)]
+                      .load(std::memory_order_relaxed)
+                : rev->inputTrimDb(),
+            true);
+        rev->setOutputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Reverb)]
+                      .load(std::memory_order_relaxed)
+                : rev->outputTrimDb(),
+            true);
         if (hasPendingControlUpdates) {
           rev->setBypassed(m_reverbBypassed.load(std::memory_order_relaxed));
           rev->prepareInstance(sr, m_uiReverb.roomSize(), m_uiReverb.damping(),
@@ -5900,27 +6283,42 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       } else if (auto *lim =
                      dynamic_cast<engine::pipeline::PeakLimiterNode *>(node)) {
         lim->reset();
+        lim->setInputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspInputTrimDb[static_cast<size_t>(
+                                       engine::dsp::DspTrimTarget::Limiter)]
+                      .load(std::memory_order_relaxed)
+                : lim->inputTrimDb(),
+            true);
+        lim->setOutputTrimDb(
+            hasPendingControlUpdates
+                ? m_dspOutputTrimDb[static_cast<size_t>(
+                                        engine::dsp::DspTrimTarget::Limiter)]
+                      .load(std::memory_order_relaxed)
+                : lim->outputTrimDb(),
+            true);
         if (hasPendingControlUpdates) {
           lim->setBypassed(m_limiterBypassed.load(std::memory_order_relaxed));
           lim->prepareInstance(sr, m_uiLimiter.ceilingDb(),
                                m_uiLimiter.releaseMs(),
                                m_uiLimiter.lookaheadMs(), true);
         }
+      } else if (dynamic_cast<engine::insert::ExternalInsertNode *>(node) !=
+                 nullptr) {
+        // §6.6 External Insert is strictly excluded from offline render equivalence;
+        // do NOT call ExternalInsertNode::setBypassed(true) as it mutates shared m_bridge.
       }
     }
 
     if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
-      for (size_t i = 0; i < liveChain->nodeCount(); ++i) {
-        auto *node = liveChain->node(i);
-        if (!node || dynamic_cast<engine::insert::ExternalInsertNode *>(node) !=
-                         nullptr) {
-          continue; // §6.6 External Insert is strictly excluded from offline
-                    // render equivalence
-        }
-        if (!node->isBypassed()) {
-          node->process(liveL.data(), liveR.data(), N);
+      for (size_t idx = liveChain->nodeCount(); idx > 0; --idx) {
+        if (dynamic_cast<engine::insert::ExternalInsertNode *>(
+                liveChain->node(idx - 1)) != nullptr) {
+          liveChain->removeNode(idx - 1);
         }
       }
+      liveChain->setBypassed(false);
+      liveChain->process(liveL.data(), liveR.data(), N);
     }
   } else {
     engine::render::RenderChain mirrorChain;
@@ -6004,6 +6402,14 @@ void EngineController::syncMasterDspToRenderEngine() {
   tc.compressor().setEnabled(compOn);
   tc.reverb().setEnabled(revOn);
   tc.limiter().setEnabled(limOn);
+
+  std::array<double, 7> inTrims{}, outTrims{};
+  for (size_t i = 0; i < 7; ++i) {
+    inTrims[i] = m_dspInputTrimDb[i].load(std::memory_order_relaxed);
+    outTrims[i] = m_dspOutputTrimDb[i].load(std::memory_order_relaxed);
+  }
+  tc.setTrims(inTrims, outTrims);
+  tc.peq().setPreampDb(m_uiPeq.preampDb());
 
   const bool insertActive = m_insertNode &&
                             !m_insertBypassed.load(std::memory_order_relaxed) &&

@@ -319,6 +319,14 @@ public:
     Q_INVOKABLE QVariantMap getLastPresetImportReport() const;
     Q_INVOKABLE QVariantList getAudioNodeContracts() const;
 
+    // DSP Input / Output Trim (±12 dB, 0.1 dB step, excluded from bypass & presets)
+    Q_INVOKABLE void setDspTrim(const QString& dspName, bool isOutput, double gainDb);
+    Q_INVOKABLE double getDspTrim(const QString& dspName, bool isOutput) const;
+    Q_INVOKABLE QVariantMap getAllDspTrims() const;
+    Q_INVOKABLE void resetAllDspTrims();
+    Q_INVOKABLE double getPeqPreampDb() const noexcept { return m_uiPeq.preampDb(); }
+    Q_INVOKABLE double getListeningPreampDb() const noexcept { return m_uiListeningCorrection.preampDb(); }
+
     // Listening Correction Presets & Per-Band Control (Section 5.10)
     Q_INVOKABLE QStringList availableListeningPresets();
     Q_INVOKABLE void setListeningPreset(const QString& presetName);
@@ -435,6 +443,7 @@ signals:
     void compressorParametersChanged();
     void limiterParametersChanged();
     void reverbParametersChanged();
+    void dspTrimsChanged();
     void externalInsertStatusChanged();
     void dspQueueOverflowWarning(int commandType);
     void presetManagementChanged();
@@ -457,9 +466,16 @@ signals:
 private:
     void syncMasterDspToRenderEngine();
     bool applyMasterDspJson(const QJsonObject& obj);
+    bool applyPeqBandsFromJson(const QJsonObject& peqObj, const QString& presetLabel);
+    void recordPresetImportReport(const QString& targetKey, const QString& targetDisplay,
+                                  const QString& logOperation, const QString& presetLabel,
+                                  const ParametricEQ::BandImportReport& report,
+                                  const QStringList& unsupportedFilters, double preampDb);
     bool applyListeningCorrectionJson(const QJsonObject& obj, const QString& presetLabel);
     bool applyExternalInsertJson(const QJsonObject& obj);
     bool applyAudioDeviceJson(const QJsonObject& obj);
+    [[nodiscard]] static int resolveDspTrimIndex(const QString& dspName) noexcept;
+    [[nodiscard]] bool areAllDspTrimsZero() const noexcept;
     std::atomic<bool>* renderNodeFlagPtr(const QString& nodeName) noexcept;
     const std::atomic<bool>* renderNodeFlagPtr(const QString& nodeName) const noexcept;
     void followActiveDeckSampleRateIfDirectMode();
@@ -532,6 +548,8 @@ private:
     std::atomic<bool> m_renderIncludeCompressor{true};
     std::atomic<bool> m_renderIncludeReverb{true};
     std::atomic<bool> m_renderIncludeLimiter{true};
+    std::array<std::atomic<double>, 7> m_dspInputTrimDb{};
+    std::array<std::atomic<double>, 7> m_dspOutputTrimDb{};
 
     // Private helpers for DSP node lookup and signal dispatch (P1-1, P1-2)
     void emitDspNodeSignal(const QString& nodeName);

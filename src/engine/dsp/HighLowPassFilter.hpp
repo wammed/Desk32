@@ -35,6 +35,10 @@ public:
 
     HighLowPassFilter()
     {
+        m_hpfInTrimGain.setImmediate(1.0);
+        m_hpfOutTrimGain.setImmediate(1.0);
+        m_lpfInTrimGain.setImmediate(1.0);
+        m_lpfOutTrimGain.setImmediate(1.0);
         configure(48000.0);
     }
 
@@ -53,12 +57,20 @@ public:
             m_lpfSlope = other.m_lpfSlope;
             m_hpfQ = other.m_hpfQ;
             m_lpfQ = other.m_lpfQ;
+            m_hpfInputTrimDb = other.m_hpfInputTrimDb;
+            m_hpfOutputTrimDb = other.m_hpfOutputTrimDb;
+            m_lpfInputTrimDb = other.m_lpfInputTrimDb;
+            m_lpfOutputTrimDb = other.m_lpfOutputTrimDb;
             m_hpfEnabled.store(other.m_hpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             m_lpfEnabled.store(other.m_lpfEnabled.load(std::memory_order_relaxed), std::memory_order_relaxed);
             m_hpfMix = other.m_hpfMix;
             m_lpfMix = other.m_lpfMix;
             m_hpfSlopeMix = other.m_hpfSlopeMix;
             m_lpfSlopeMix = other.m_lpfSlopeMix;
+            m_hpfInTrimGain = other.m_hpfInTrimGain;
+            m_hpfOutTrimGain = other.m_hpfOutTrimGain;
+            m_lpfInTrimGain = other.m_lpfInTrimGain;
+            m_lpfOutTrimGain = other.m_lpfOutTrimGain;
             m_hpfLeft1 = other.m_hpfLeft1;
             m_hpfRight1 = other.m_hpfRight1;
             m_hpfLeft2 = other.m_hpfLeft2;
@@ -167,6 +179,33 @@ public:
     [[nodiscard]] FilterSlope lpfSlope() const noexcept { return m_lpfSlope; }
     [[nodiscard]] double hpfQ() const noexcept { return m_hpfQ; }
     [[nodiscard]] double lpfQ() const noexcept { return m_lpfQ; }
+    [[nodiscard]] double hpfInputTrimDb() const noexcept { return m_hpfInputTrimDb; }
+    [[nodiscard]] double hpfOutputTrimDb() const noexcept { return m_hpfOutputTrimDb; }
+    [[nodiscard]] double lpfInputTrimDb() const noexcept { return m_lpfInputTrimDb; }
+    [[nodiscard]] double lpfOutputTrimDb() const noexcept { return m_lpfOutputTrimDb; }
+
+    [[nodiscard]] static inline double trimDbToLinear(double db) noexcept {
+        const double clamped = std::clamp(db, -12.0, 12.0);
+        return (std::abs(clamped) <= 1e-9) ? 1.0 : std::pow(10.0, clamped / 20.0);
+    }
+
+    void setHpfTrimDb(double inDb, double outDb, size_t smoothSamples = 0) noexcept {
+        const double cin = std::clamp(inDb, -12.0, 12.0);
+        const double cout = std::clamp(outDb, -12.0, 12.0);
+        m_hpfInputTrimDb = (std::abs(cin) <= 1e-9) ? 0.0 : cin;
+        m_hpfOutputTrimDb = (std::abs(cout) <= 1e-9) ? 0.0 : cout;
+        m_hpfInTrimGain.setTarget(trimDbToLinear(m_hpfInputTrimDb), smoothSamples);
+        m_hpfOutTrimGain.setTarget(trimDbToLinear(m_hpfOutputTrimDb), smoothSamples);
+    }
+
+    void setLpfTrimDb(double inDb, double outDb, size_t smoothSamples = 0) noexcept {
+        const double cin = std::clamp(inDb, -12.0, 12.0);
+        const double cout = std::clamp(outDb, -12.0, 12.0);
+        m_lpfInputTrimDb = (std::abs(cin) <= 1e-9) ? 0.0 : cin;
+        m_lpfOutputTrimDb = (std::abs(cout) <= 1e-9) ? 0.0 : cout;
+        m_lpfInTrimGain.setTarget(trimDbToLinear(m_lpfInputTrimDb), smoothSamples);
+        m_lpfOutTrimGain.setTarget(trimDbToLinear(m_lpfOutputTrimDb), smoothSamples);
+    }
 
     void setHpfFrequency(double freq) {
         m_hpfFreq = std::clamp(freq, 10.0, 1000.0);
@@ -261,12 +300,47 @@ public:
 
     inline void process(double& left, double& right)
     {
+        processWithBypass(left, right, false);
+    }
+
+    inline void processWithBypass(double& left, double& right, bool bypassFilters) noexcept
+    {
+        applyTrimSample(left, right, m_hpfInTrimGain);
+        if (!bypassFilters) {
+            processSection(left, right,
+                           m_hpfLeft1, m_hpfRight1, m_hpfLeft2, m_hpfRight2,
+                           m_hpfMix, m_hpfSlopeMix);
+        }
+        applyTrimSample(left, right, m_hpfOutTrimGain);
+        applyTrimSample(left, right, m_lpfInTrimGain);
+        if (!bypassFilters) {
+            processSection(left, right,
+                           m_lpfLeft1, m_lpfRight1, m_lpfLeft2, m_lpfRight2,
+                           m_lpfMix, m_lpfSlopeMix);
+        }
+        applyTrimSample(left, right, m_lpfOutTrimGain);
+    }
+
+    inline void processWithDry(double& left, double& right, double& dryLeft, double& dryRight) noexcept
+    {
+        applyTrimSamplePair(left, right, dryLeft, dryRight, m_hpfInTrimGain);
         processSection(left, right,
                        m_hpfLeft1, m_hpfRight1, m_hpfLeft2, m_hpfRight2,
                        m_hpfMix, m_hpfSlopeMix);
+        applyTrimSamplePair(left, right, dryLeft, dryRight, m_hpfOutTrimGain);
+        applyTrimSamplePair(left, right, dryLeft, dryRight, m_lpfInTrimGain);
         processSection(left, right,
                        m_lpfLeft1, m_lpfRight1, m_lpfLeft2, m_lpfRight2,
                        m_lpfMix, m_lpfSlopeMix);
+        applyTrimSamplePair(left, right, dryLeft, dryRight, m_lpfOutTrimGain);
+    }
+
+    inline void processBypassedTrimsStatic(double& left, double& right) const noexcept
+    {
+        if (m_hpfInTrimGain.current != 1.0) { left *= m_hpfInTrimGain.current; right *= m_hpfInTrimGain.current; }
+        if (m_hpfOutTrimGain.current != 1.0) { left *= m_hpfOutTrimGain.current; right *= m_hpfOutTrimGain.current; }
+        if (m_lpfInTrimGain.current != 1.0) { left *= m_lpfInTrimGain.current; right *= m_lpfInTrimGain.current; }
+        if (m_lpfOutTrimGain.current != 1.0) { left *= m_lpfOutTrimGain.current; right *= m_lpfOutTrimGain.current; }
     }
 
 private:
@@ -347,6 +421,26 @@ private:
         }
     }
 
+    static inline void applyTrimSample(double& left, double& right, MixRamp& ramp) noexcept
+    {
+        const double g = ramp.advance();
+        if (g != 1.0) {
+            left *= g;
+            right *= g;
+        }
+    }
+
+    static inline void applyTrimSamplePair(double& l1, double& r1, double& l2, double& r2, MixRamp& ramp) noexcept
+    {
+        const double g = ramp.advance();
+        if (g != 1.0) {
+            l1 *= g;
+            r1 *= g;
+            l2 *= g;
+            r2 *= g;
+        }
+    }
+
     double m_sampleRate = 48000.0;
     double m_hpfFreq = 20.0;
     double m_lpfFreq = 20000.0;
@@ -354,12 +448,20 @@ private:
     FilterSlope m_lpfSlope = FilterSlope::Slope12dB;
     double m_hpfQ = 0.7071067811865475;
     double m_lpfQ = 0.7071067811865475;
+    double m_hpfInputTrimDb = 0.0;
+    double m_hpfOutputTrimDb = 0.0;
+    double m_lpfInputTrimDb = 0.0;
+    double m_lpfOutputTrimDb = 0.0;
     std::atomic<bool> m_hpfEnabled{false};
     std::atomic<bool> m_lpfEnabled{false};
     MixRamp m_hpfMix;
     MixRamp m_lpfMix;
     MixRamp m_hpfSlopeMix;
     MixRamp m_lpfSlopeMix;
+    MixRamp m_hpfInTrimGain;
+    MixRamp m_hpfOutTrimGain;
+    MixRamp m_lpfInTrimGain;
+    MixRamp m_lpfOutTrimGain;
 
     BiquadFilter m_hpfLeft1, m_hpfRight1;
     BiquadFilter m_hpfLeft2, m_hpfRight2;

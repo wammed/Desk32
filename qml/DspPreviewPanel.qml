@@ -65,6 +65,41 @@ Rectangle {
             revTailCheck.checked = rev.tailPreserving !== undefined ? rev.tailPreserving : true;
         }
 
+        // 5. DSP Input / Output Trims (All 7 DSPs)
+        var trims = EngineController.getAllDspTrims();
+        if (trims) {
+            if (trims.PEQ) {
+                peqInTrimSlider.value = trims.PEQ.inputDb !== undefined ? trims.PEQ.inputDb : 0.0;
+                peqOutTrimSlider.value = trims.PEQ.outputDb !== undefined ? trims.PEQ.outputDb : 0.0;
+            }
+            if (trims.GEQ) {
+                geqInTrimSlider.value = trims.GEQ.inputDb !== undefined ? trims.GEQ.inputDb : 0.0;
+                geqOutTrimSlider.value = trims.GEQ.outputDb !== undefined ? trims.GEQ.outputDb : 0.0;
+            }
+            if (trims.HPF) {
+                hpfInTrimSlider.value = trims.HPF.inputDb !== undefined ? trims.HPF.inputDb : 0.0;
+                hpfOutTrimSlider.value = trims.HPF.outputDb !== undefined ? trims.HPF.outputDb : 0.0;
+            }
+            if (trims.LPF) {
+                lpfInTrimSlider.value = trims.LPF.inputDb !== undefined ? trims.LPF.inputDb : 0.0;
+                lpfOutTrimSlider.value = trims.LPF.outputDb !== undefined ? trims.LPF.outputDb : 0.0;
+            }
+            if (trims.Compressor) {
+                compInTrimSlider.value = trims.Compressor.inputDb !== undefined ? trims.Compressor.inputDb : 0.0;
+                compOutTrimSlider.value = trims.Compressor.outputDb !== undefined ? trims.Compressor.outputDb : 0.0;
+            }
+            if (trims.Limiter) {
+                limInTrimSlider.value = trims.Limiter.inputDb !== undefined ? trims.Limiter.inputDb : 0.0;
+                limOutTrimSlider.value = trims.Limiter.outputDb !== undefined ? trims.Limiter.outputDb : 0.0;
+            }
+            if (trims.Reverb) {
+                revInTrimSlider.value = trims.Reverb.inputDb !== undefined ? trims.Reverb.inputDb : 0.0;
+                revOutTrimSlider.value = trims.Reverb.outputDb !== undefined ? trims.Reverb.outputDb : 0.0;
+            }
+        }
+        peqPreampValueLabel.text = EngineController.getPeqPreampDb().toFixed(1) + " dB";
+        lcPreampValueLabel.text = EngineController.getListeningPreampDb().toFixed(1) + " dB";
+
         updatingFromEngine = false;
     }
 
@@ -76,6 +111,9 @@ Rectangle {
         function onCompressorParametersChanged() { if (!updatingFromEngine) reloadParameters(); }
         function onLimiterParametersChanged() { if (!updatingFromEngine) reloadParameters(); }
         function onReverbParametersChanged() { if (!updatingFromEngine) reloadParameters(); }
+        function onDspTrimsChanged() { if (!updatingFromEngine) reloadParameters(); }
+        function onPeqParametersChanged() { if (!updatingFromEngine) reloadParameters(); }
+        function onListeningPresetChanged() { if (!updatingFromEngine) reloadParameters(); }
     }
 
     function applyFilter() {
@@ -208,6 +246,11 @@ Rectangle {
                 font.pixelSize: 10
                 font.bold: true
             }
+            TabButton {
+                text: "EQ Trim"
+                font.pixelSize: 10
+                font.bold: true
+            }
         }
 
         // Stacked DSP Parameter Views
@@ -249,6 +292,10 @@ Rectangle {
                                 lpfSlopeCombo.currentIndex = 0;
                                 lpfQSlider.value = 0.70710678;
                                 applyFilter();
+                                EngineController.setDspTrim("HPF", false, 0.0);
+                                EngineController.setDspTrim("HPF", true, 0.0);
+                                EngineController.setDspTrim("LPF", false, 0.0);
+                                EngineController.setDspTrim("LPF", true, 0.0);
                             }
                         }
                     }
@@ -325,6 +372,38 @@ Rectangle {
                                     Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
                                 }
                             }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("HPF In Trim:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: hpfInTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("HPF", false, value)
+                                }
+                                Label {
+                                    text: (hpfInTrimSlider.value > 0 ? "+" : "") + hpfInTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: hpfInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("HPF Out Trim:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: hpfOutTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("HPF", true, value)
+                                }
+                                Label {
+                                    text: (hpfOutTrimSlider.value > 0 ? "+" : "") + hpfOutTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: hpfOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
+                                }
+                            }
                         }
                     }
 
@@ -395,6 +474,38 @@ Rectangle {
                                 Label {
                                     text: lpfQSlider.value.toFixed(2)
                                     font.pixelSize: 10; font.family: "Monospace"; color: "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("LPF In Trim:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: lpfInTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("LPF", false, value)
+                                }
+                                Label {
+                                    text: (lpfInTrimSlider.value > 0 ? "+" : "") + lpfInTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: lpfInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("LPF Out Trim:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                Slider {
+                                    id: lpfOutTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("LPF", true, value)
+                                }
+                                Label {
+                                    text: (lpfOutTrimSlider.value > 0 ? "+" : "") + lpfOutTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: lpfOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
                                     Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight
                                 }
                             }
@@ -571,6 +682,40 @@ Rectangle {
                             horizontalAlignment: Text.AlignRight
                         }
                     }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: "#222730" }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Input Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: compInTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Compressor", false, value)
+                        }
+                        Label {
+                            text: (compInTrimSlider.value > 0 ? "+" : "") + compInTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: compInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Output Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: compOutTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Compressor", true, value)
+                        }
+                        Label {
+                            text: (compOutTrimSlider.value > 0 ? "+" : "") + compOutTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: compOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                        }
+                    }
                 }
             }
 
@@ -679,6 +824,40 @@ Rectangle {
                             color: "#00E5FF"
                             Layout.preferredWidth: 55
                             horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: "#222730" }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Input Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: limInTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Limiter", false, value)
+                        }
+                        Label {
+                            text: (limInTrimSlider.value > 0 ? "+" : "") + limInTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: limInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Output Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: limOutTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Limiter", true, value)
+                        }
+                        Label {
+                            text: (limOutTrimSlider.value > 0 ? "+" : "") + limOutTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: limOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
                         }
                     }
                 }
@@ -795,6 +974,167 @@ Rectangle {
                             Layout.preferredWidth: 55
                             horizontalAlignment: Text.AlignRight
                         }
+                    }
+
+                    Rectangle { Layout.fillWidth: true; height: 1; color: "#222730" }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Input Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: revInTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Reverb", false, value)
+                        }
+                        Label {
+                            text: (revInTrimSlider.value > 0 ? "+" : "") + revInTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: revInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Output Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                        Slider {
+                            id: revOutTrimSlider
+                            Layout.fillWidth: true
+                            from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                            onMoved: if (!updatingFromEngine) EngineController.setDspTrim("Reverb", true, value)
+                        }
+                        Label {
+                            text: (revOutTrimSlider.value > 0 ? "+" : "") + revOutTrimSlider.value.toFixed(1) + " dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: revOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                            Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                        }
+                    }
+                }
+            }
+
+            // ================= 5. PEQ / GEQ TRIM & PRESET PREAMP =================
+            ScrollView {
+                clip: true
+                ColumnLayout {
+                    width: dspStack.width - 12
+                    spacing: 10
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Input/Output trims (±12 dB) remain active when DSPs are bypassed and are excluded from presets.")
+                        font.pixelSize: 9
+                        color: "#78909C"
+                        wrapMode: Text.WordWrap
+                    }
+
+                    GroupBox {
+                        Layout.fillWidth: true
+                        title: qsTr("MASTER PEQ TRIM")
+                        font.pixelSize: 10
+                        font.bold: true
+                        ColumnLayout {
+                            anchors.fill: parent
+                            spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("Input Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                                Slider {
+                                    id: peqInTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("PEQ", false, value)
+                                }
+                                Label {
+                                    text: (peqInTrimSlider.value > 0 ? "+" : "") + peqInTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: peqInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("Output Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                                Slider {
+                                    id: peqOutTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("PEQ", true, value)
+                                }
+                                Label {
+                                    text: (peqOutTrimSlider.value > 0 ? "+" : "") + peqOutTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: peqOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("Preset Preamp:"); font.pixelSize: 10; color: "#78909C" }
+                                Item { Layout.fillWidth: true }
+                                Label {
+                                    id: peqPreampValueLabel
+                                    text: "0.0 dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: "#00E5FF"
+                                }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        Layout.fillWidth: true
+                        title: qsTr("32-BAND GEQ TRIM")
+                        font.pixelSize: 10
+                        font.bold: true
+                        ColumnLayout {
+                            anchors.fill: parent
+                            spacing: 6
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("Input Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                                Slider {
+                                    id: geqInTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("GEQ", false, value)
+                                }
+                                Label {
+                                    text: (geqInTrimSlider.value > 0 ? "+" : "") + geqInTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: geqInTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label { text: qsTr("Output Trim:"); font.pixelSize: 10; color: "#A0AAB2"; Layout.preferredWidth: 70 }
+                                Slider {
+                                    id: geqOutTrimSlider
+                                    Layout.fillWidth: true
+                                    from: -12.0; to: 12.0; stepSize: 0.1; value: 0.0
+                                    onMoved: if (!updatingFromEngine) EngineController.setDspTrim("GEQ", true, value)
+                                }
+                                Label {
+                                    text: (geqOutTrimSlider.value > 0 ? "+" : "") + geqOutTrimSlider.value.toFixed(1) + " dB"
+                                    font.pixelSize: 10; font.family: "Monospace"; color: geqOutTrimSlider.value !== 0 ? "#FFB300" : "#00E5FF"
+                                    Layout.preferredWidth: 55; horizontalAlignment: Text.AlignRight
+                                }
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label { text: qsTr("Listening Preamp:"); font.pixelSize: 10; color: "#78909C" }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            id: lcPreampValueLabel
+                            text: "0.0 dB"
+                            font.pixelSize: 10; font.family: "Monospace"; color: "#00E5FF"
+                        }
+                    }
+
+                    Button {
+                        Layout.fillWidth: true
+                        text: qsTr("Reset All Trims (0 dB)")
+                        font.pixelSize: 10
+                        onClicked: EngineController.resetAllDspTrims()
                     }
                 }
             }

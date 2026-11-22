@@ -299,6 +299,22 @@
         <translation>不一致</translation>
     </message>
     <message>
+        <source>DSP Trims (dspTrimsZero):</source>
+        <translation>DSP トリム (dspTrimsZero):</translation>
+    </message>
+    <message>
+        <source>true (ALL 0.0 dB)</source>
+        <translation>true (すべて 0.0 dB)</translation>
+    </message>
+    <message>
+        <source>false (BYPASSED BY DIRECT MODE)</source>
+        <translation>false (Direct Mode でバイパス中)</translation>
+    </message>
+    <message>
+        <source>false (NON-ZERO TRIM ACTIVE)</source>
+        <translation>false (0 dB 以外の Trim 有効)</translation>
+    </message>
+    <message>
         <source>L2 // BACKEND &amp; TRANSPORT VERIFICATION</source>
         <translation>L2 // バックエンド &amp; トランスポート検証</translation>
     </message>
@@ -511,6 +527,57 @@
     <message>
         <source>Exclusive:</source>
         <translation>排他アクセス:</translation>
+    </message>
+</context>
+<context>
+    <name>DspPreviewPanel</name>
+    <message>
+        <source>HPF In Trim:</source>
+        <translation>HPF 入力トリム:</translation>
+    </message>
+    <message>
+        <source>HPF Out Trim:</source>
+        <translation>HPF 出力トリム:</translation>
+    </message>
+    <message>
+        <source>LPF In Trim:</source>
+        <translation>LPF 入力トリム:</translation>
+    </message>
+    <message>
+        <source>LPF Out Trim:</source>
+        <translation>LPF 出力トリム:</translation>
+    </message>
+    <message>
+        <source>Input Trim:</source>
+        <translation>入力トリム:</translation>
+    </message>
+    <message>
+        <source>Output Trim:</source>
+        <translation>出力トリム:</translation>
+    </message>
+    <message>
+        <source>Input/Output trims (±12 dB) remain active when DSPs are bypassed and are excluded from presets.</source>
+        <translation>入出力トリム (±12 dB) は DSP バイパス中も有効で、プリセットには含まれません。</translation>
+    </message>
+    <message>
+        <source>MASTER PEQ TRIM</source>
+        <translation>マスター PEQ トリム</translation>
+    </message>
+    <message>
+        <source>Preset Preamp:</source>
+        <translation>プリセット Preamp:</translation>
+    </message>
+    <message>
+        <source>32-BAND GEQ TRIM</source>
+        <translation>32バンド GEQ トリム</translation>
+    </message>
+    <message>
+        <source>Listening Preamp:</source>
+        <translation>リスニング Preamp:</translation>
+    </message>
+    <message>
+        <source>Reset All Trims (0 dB)</source>
+        <translation>全トリムをリセット (0 dB)</translation>
     </message>
 </context>
 </TS>

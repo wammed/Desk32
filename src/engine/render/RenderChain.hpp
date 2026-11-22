@@ -21,6 +21,7 @@ struct RenderDspSnapshot {
 
     // PEQ
     bool peqEnabled = true;
+    double peqPreampDb = 0.0;
     std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> peqLeftBands{};
     std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL> peqRightBands{};
 
@@ -65,6 +66,22 @@ struct RenderDspSnapshot {
     double limiterCeilingDb = -0.1;
     double limiterReleaseMs = 50.0;
     double limiterLookaheadMs = 1.0;
+
+    // Per-DSP Input / Output Trims (dB, excluded from bypass & presets)
+    double peqInputTrimDb = 0.0;
+    double peqOutputTrimDb = 0.0;
+    double geqInputTrimDb = 0.0;
+    double geqOutputTrimDb = 0.0;
+    double hpfInputTrimDb = 0.0;
+    double hpfOutputTrimDb = 0.0;
+    double lpfInputTrimDb = 0.0;
+    double lpfOutputTrimDb = 0.0;
+    double compInputTrimDb = 0.0;
+    double compOutputTrimDb = 0.0;
+    double limiterInputTrimDb = 0.0;
+    double limiterOutputTrimDb = 0.0;
+    double reverbInputTrimDb = 0.0;
+    double reverbOutputTrimDb = 0.0;
 
     // External Insert live-session exclusion notice (§6.6)
     bool externalInsertWasActiveInLive = false;
@@ -127,6 +144,24 @@ public:
     [[nodiscard]] AlgorithmicReverb& reverb() noexcept { return m_reverb; }
     [[nodiscard]] const AlgorithmicReverb& reverb() const noexcept { return m_reverb; }
 
+    void setTrims(const std::array<double, 7>& inDb, const std::array<double, 7>& outDb) noexcept {
+        for (size_t i = 0; i < 7; ++i) {
+            const double ci = std::clamp(inDb[i], -12.0, 12.0);
+            const double co = std::clamp(outDb[i], -12.0, 12.0);
+            m_inputTrimDb[i] = (std::abs(ci) <= 1e-9) ? 0.0 : ci;
+            m_outputTrimDb[i] = (std::abs(co) <= 1e-9) ? 0.0 : co;
+        }
+        m_filter.setHpfTrimDb(m_inputTrimDb[2], m_outputTrimDb[2], 0);
+        m_filter.setLpfTrimDb(m_inputTrimDb[3], m_outputTrimDb[3], 0);
+    }
+
+    [[nodiscard]] double inputTrimDb(size_t idx) const noexcept {
+        return (idx < 7) ? m_inputTrimDb[idx] : 0.0;
+    }
+    [[nodiscard]] double outputTrimDb(size_t idx) const noexcept {
+        return (idx < 7) ? m_outputTrimDb[idx] : 0.0;
+    }
+
     /// Synchronize parameters from live console Master Chain
     void copyParametersFrom(const ParametricEQ& peq,
                             const GraphicEQ& geq,
@@ -140,6 +175,7 @@ public:
             m_peq.setLeftBand(b, peq.leftBand(b));
             m_peq.setRightBand(b, peq.rightBand(b));
         }
+        m_peq.setPreampDb(peq.preampDb());
         m_peq.setEnabled(peq.isEnabled());
 
         // 2. Graphic EQ
@@ -158,6 +194,12 @@ public:
         m_filter.setLpfSlope(flt.lpfSlope());
         m_filter.setLpfQ(flt.lpfQ());
         m_filter.setLpfEnabled(flt.isLpfEnabled());
+        m_inputTrimDb[2] = flt.hpfInputTrimDb();
+        m_outputTrimDb[2] = flt.hpfOutputTrimDb();
+        m_inputTrimDb[3] = flt.lpfInputTrimDb();
+        m_outputTrimDb[3] = flt.lpfOutputTrimDb();
+        m_filter.setHpfTrimDb(m_inputTrimDb[2], m_outputTrimDb[2], 0);
+        m_filter.setLpfTrimDb(m_inputTrimDb[3], m_outputTrimDb[3], 0);
 
         // 4. Compressor
         m_comp.configure(m_sampleRate, comp.thresholdDb(), comp.ratio(), comp.attackMs(), comp.releaseMs(), comp.makeupGainDb(), comp.kneeDb());
@@ -179,6 +221,7 @@ public:
 
         // 1. PEQ
         s.peqEnabled = m_peq.isEnabled();
+        s.peqPreampDb = m_peq.preampDb();
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             s.peqLeftBands[b] = m_peq.leftBand(b);
             s.peqRightBands[b] = m_peq.rightBand(b);
@@ -227,6 +270,22 @@ public:
         s.externalInsertWasActiveInLive = m_externalInsertWasActiveInLive;
         s.externalInsertNodeName = m_externalInsertNodeName;
 
+        // 7. Trims
+        s.peqInputTrimDb = m_inputTrimDb[0];
+        s.peqOutputTrimDb = m_outputTrimDb[0];
+        s.geqInputTrimDb = m_inputTrimDb[1];
+        s.geqOutputTrimDb = m_outputTrimDb[1];
+        s.hpfInputTrimDb = m_inputTrimDb[2];
+        s.hpfOutputTrimDb = m_outputTrimDb[2];
+        s.lpfInputTrimDb = m_inputTrimDb[3];
+        s.lpfOutputTrimDb = m_outputTrimDb[3];
+        s.compInputTrimDb = m_inputTrimDb[4];
+        s.compOutputTrimDb = m_outputTrimDb[4];
+        s.limiterInputTrimDb = m_inputTrimDb[5];
+        s.limiterOutputTrimDb = m_outputTrimDb[5];
+        s.reverbInputTrimDb = m_inputTrimDb[6];
+        s.reverbOutputTrimDb = m_outputTrimDb[6];
+
         return s;
     }
 
@@ -237,6 +296,7 @@ public:
 
         // 1. PEQ
         m_peq.setEnabled(s.peqEnabled);
+        m_peq.setPreampDb(s.peqPreampDb);
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             m_peq.setLeftBand(b, s.peqLeftBands[b]);
             m_peq.setRightBand(b, s.peqRightBands[b]);
@@ -270,54 +330,84 @@ public:
         // 6. Peak Limiter
         m_limiter.configure(sampleRate, s.limiterCeilingDb, s.limiterReleaseMs, s.limiterLookaheadMs);
         m_limiter.setEnabled(s.limiterEnabled);
+
+        // 7. Trims
+        setTrims(
+            {s.peqInputTrimDb, s.geqInputTrimDb, s.hpfInputTrimDb, s.lpfInputTrimDb,
+             s.compInputTrimDb, s.limiterInputTrimDb, s.reverbInputTrimDb},
+            {s.peqOutputTrimDb, s.geqOutputTrimDb, s.hpfOutputTrimDb, s.lpfOutputTrimDb,
+             s.compOutputTrimDb, s.limiterOutputTrimDb, s.reverbOutputTrimDb});
     }
 
-    /// Process planar double stereo block through offline Render Chain
+    /// Process planar double stereo block through offline Render Chain.
+    /// Note: DSP input/output trims remain in the signal path even when individual DSPs are disabled.
     void process(double* left, double* right, size_t frameCount) {
         if (!m_enabled || !left || !right || frameCount == 0) return;
 
+        auto applyTrim = [](double* l, double* r, size_t n, double db) noexcept {
+            const double g = pipeline::AudioNode::dbToLinearExact(db);
+            if (g == 1.0) return;
+            for (size_t i = 0; i < n; ++i) {
+                l[i] *= g;
+                r[i] *= g;
+            }
+        };
+
         // Upstream DSP Chain in Mastering Order:
         // 1. PEQ
+        applyTrim(left, right, frameCount, m_inputTrimDb[0]);
         if (m_peq.isEnabled()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_peq.process(left[i], right[i]);
             }
         }
+        applyTrim(left, right, frameCount, m_outputTrimDb[0]);
 
         // 2. GEQ
+        applyTrim(left, right, frameCount, m_inputTrimDb[1]);
         if (m_geq.isEnabled()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_geq.process(left[i], right[i]);
             }
         }
+        applyTrim(left, right, frameCount, m_outputTrimDb[1]);
 
-        // 3. HPF / LPF
-        if (m_filter.isHpfEnabled() || m_filter.isLpfEnabled()) {
+        // 3. HPF / LPF (includes HPF in/out trims & LPF in/out trims)
+        const bool fltActive = m_filter.isHpfEnabled() || m_filter.isLpfEnabled();
+        const bool anyFilterTrim = (m_inputTrimDb[2] != 0.0 || m_outputTrimDb[2] != 0.0 ||
+                                    m_inputTrimDb[3] != 0.0 || m_outputTrimDb[3] != 0.0);
+        if (fltActive || anyFilterTrim) {
             for (size_t i = 0; i < frameCount; ++i) {
-                m_filter.process(left[i], right[i]);
+                m_filter.processWithBypass(left[i], right[i], !fltActive);
             }
         }
 
         // 4. Compressor
+        applyTrim(left, right, frameCount, m_inputTrimDb[4]);
         if (m_comp.isEnabled()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_comp.process(left[i], right[i]);
             }
         }
+        applyTrim(left, right, frameCount, m_outputTrimDb[4]);
 
         // 5. Algorithmic Reverb
+        applyTrim(left, right, frameCount, m_inputTrimDb[6]);
         if (m_reverb.isEnabled()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_reverb.process(left[i], right[i]);
             }
         }
+        applyTrim(left, right, frameCount, m_outputTrimDb[6]);
 
         // 6. Peak Limiter (brickwall safeguard for render)
+        applyTrim(left, right, frameCount, m_inputTrimDb[5]);
         if (m_limiter.isEnabled()) {
             for (size_t i = 0; i < frameCount; ++i) {
                 m_limiter.process(left[i], right[i]);
             }
         }
+        applyTrim(left, right, frameCount, m_outputTrimDb[5]);
 
         // NOTE: Strictly NO Listening Correction here!
         // Listening Correction is isolated to Listening Path only.
@@ -328,6 +418,8 @@ private:
     bool m_enabled = true;
     bool m_externalInsertWasActiveInLive = false;
     std::string m_externalInsertNodeName;
+    std::array<double, 7> m_inputTrimDb{};
+    std::array<double, 7> m_outputTrimDb{};
 
     ParametricEQ m_peq;
     GraphicEQ m_geq;

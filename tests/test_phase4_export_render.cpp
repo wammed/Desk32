@@ -267,6 +267,9 @@ private slots:
     // 30. Phase 4 Audit: independent path mutes, real pipeline clone tap check, External Insert warning, .aiff album filter, WavFileWriter close error check
     void testPhase4AuditRenderRoutingCloneAndWavClose();
 
+    // 31. Phase 4 Addendum: All 7 DSP in/out trims & PEQ Preamp sync to RenderEngine & WAV output verification
+    void testDspTrimsAndPeqPreampRenderSync();
+
 private:
     struct CleanupEvaluation {
         bool passed = true;
@@ -2637,6 +2640,122 @@ void TestPhase4ExportRender::testPhase4AuditRenderRoutingCloneAndWavClose()
     errWriter.setForceCloseErrorForTest(true);
     QVERIFY(!errWriter.close());
     QVERIFY(!errWriter.lastError().empty());
+}
+
+void TestPhase4ExportRender::testDspTrimsAndPeqPreampRenderSync()
+{
+    using namespace desk32::engine::workspace;
+    using namespace desk32::engine::preset;
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    RenderEngine& engine = RenderEngine::instance();
+
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString wsDir = tmp.filePath("ws_trim_render");
+    const QString srcDir = wsDir + "/src_tones";
+    QDir().mkpath(srcDir);
+    auto& wsMgr = WorkspaceManager::instance();
+    wsMgr.simulateAppRestartForTesting();
+    wsMgr.setConfigFilePathForTesting(tmp.filePath("ws_trim_cfg.json"));
+    QString err;
+    QVERIFY2(wsMgr.registerAndOpenWorkspace(wsDir, err), qPrintable(err));
+
+    const QString srcWav = srcDir + "/sine_025.wav";
+    // Create steady 1 kHz 0.25 amplitude WAV (createTestWav creates a 440Hz/0.5 tone; build exact 0.25 tone)
+    {
+        QFile wf(srcWav);
+        QVERIFY(wf.open(QIODevice::WriteOnly));
+        const uint32_t sr = 48000, nFrames = 4800, dataSz = nFrames * 2 * 4, riffSz = 36 + dataSz, br = sr * 8;
+        const uint16_t pcmFmt = 3 /*IEEE float*/, ch = 2, bits = 32, ba = 8;
+        const uint32_t fmtSz = 16;
+        QByteArray hdr;
+        hdr.append("RIFF", 4); hdr.append(reinterpret_cast<const char*>(&riffSz), 4);
+        hdr.append("WAVE", 4); hdr.append("fmt ", 4);
+        hdr.append(reinterpret_cast<const char*>(&fmtSz), 4); hdr.append(reinterpret_cast<const char*>(&pcmFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&ch), 2); hdr.append(reinterpret_cast<const char*>(&sr), 4);
+        hdr.append(reinterpret_cast<const char*>(&br), 4); hdr.append(reinterpret_cast<const char*>(&ba), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2); hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSz), 4);
+        wf.write(hdr);
+        std::vector<float> samples(nFrames * 2);
+        for (uint32_t i = 0; i < nFrames; ++i) {
+            const float v = 0.25f * std::sin(2.0f * 3.14159265f * 1000.0f * static_cast<float>(i) / 48000.0f);
+            samples[i * 2] = v;
+            samples[i * 2 + 1] = v;
+        }
+        wf.write(reinterpret_cast<const char*>(samples.data()), static_cast<qsizetype>(dataSz));
+        wf.close();
+    }
+    wsMgr.refreshIndexAfterInternalWrite();
+    QVERIFY(ctrl.loadTrack("A", srcWav));
+
+    // Configure trims across bypassed DSPs (HPF +6.0206 dB in, LPF -0.0 dB, Reverb +0.0 dB) AND active PEQ with preamp -6.0206 dB + trim +6.0206 dB
+    ctrl.setDspNodeBypass("Filter", true);
+    ctrl.setDspNodeBypass("Compressor", true);
+    ctrl.setDspNodeBypass("Limiter", true);
+    ctrl.setDspNodeBypass("Reverb", true);
+    ctrl.setDspNodeBypass("GEQ", true);
+    ctrl.setDspNodeBypass("PEQ", false);
+
+    // Load flat PEQ with -6.0206 dB preamp + add +6.0206 dB HPF in trim & +6.0206 dB PEQ out trim -> net +6.0206 dB (0.25 -> 0.50 peak)
+    PresetManager::instance().setCustomRootPath(tmp.filePath("presets_render"));
+    QVariantMap masterPeqPreset;
+    QVariantMap peqObj;
+    peqObj["enabled"] = true;
+    peqObj["preamp_db"] = -6.0206;
+    QVariantList flatBands;
+    for (int i = 0; i < 12; ++i) {
+        QVariantMap b;
+        b["index"] = i;
+        b["frequency"] = 100.0 + i * 500.0;
+        b["gain_db"] = 0.0;
+        b["q"] = 1.0;
+        b["type"] = 0;
+        b["enabled"] = false;
+        flatBands.append(b);
+    }
+    peqObj["left_bands"] = flatBands;
+    peqObj["right_bands"] = flatBands;
+    masterPeqPreset["peq"] = peqObj;
+    QVERIFY(ctrl.savePreset(PresetCategories::MasterDsp, "PreampRenderCheck", masterPeqPreset));
+    QVERIFY(ctrl.applyPresetProfile(PresetCategories::MasterDsp, "PreampRenderCheck"));
+
+    ctrl.setDspTrim("HPF", false, 6.0206);
+    ctrl.setDspTrim("PEQ", true, 6.0206);
+
+    const QVariantMap tapRep = ctrl.verifyRenderTapConsistency();
+    QVERIFY(tapRep["consistent"].toBool());
+    QVERIFY(tapRep["maxAbsDiff"].toDouble() <= 1e-12);
+
+    // Even when includeFilter is OFF for render, HPF/LPF trims remain active in render output
+    ctrl.setRenderNodeEnabled("Filter", false);
+    QSignalSpy doneSpy(&engine, &RenderEngine::renderTaskFinished);
+    QVERIFY(!ctrl.startTrackRender("A", 2 /*Float32*/, 0, 48000.0, false, true).isEmpty());
+    QVERIFY(doneSpy.wait(10000));
+    QCOMPARE(ctrl.renderStatus(), static_cast<int>(RenderStatus::Completed));
+
+    const QStringList files = ctrl.renderOutputFiles();
+    QCOMPARE(files.size(), 1);
+    FFmpegAudioDecoder dec;
+    QVERIFY(dec.open(files[0].toStdString()));
+    std::vector<double> rL(4800), rR(4800);
+    const size_t got = dec.readFrames(rL.data(), rR.data(), 4800);
+    QCOMPARE(got, size_t(4800));
+    double peak = 0.0;
+    for (size_t i = 0; i < got; ++i) {
+        peak = std::max(peak, std::abs(rL[i]));
+    }
+    // 0.25 * (-6.0206 dB preamp) * (+6.0206 dB PEQ out) * (+6.0206 dB HPF in) = 0.50
+    QVERIFY2(std::abs(peak - 0.5) < 5e-3,
+             qPrintable(QString("Expected rendered peak ~0.50, got %1").arg(peak)));
+
+    ctrl.setRenderNodeEnabled("Filter", true);
+    ctrl.resetRenderStatus();
+    ctrl.resetAllDspTrims();
+    ctrl.applyPeqPreset("Monitor Flat");
+    ctrl.setDspNodeBypass("PEQ", true);
+    ctrl.stop("A");
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

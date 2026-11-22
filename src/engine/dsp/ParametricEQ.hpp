@@ -6,6 +6,7 @@
 #include <string>
 #include <atomic>
 #include <algorithm>
+#include <cmath>
 
 // 32-Band PEQ (Left 16 Bands, Right 16 Bands) strictly independent
 class ParametricEQ
@@ -53,6 +54,8 @@ public:
             m_overflowRightBands = other.m_overflowRightBands;
             m_leftFilters = other.m_leftFilters;
             m_rightFilters = other.m_rightFilters;
+            m_preampDb = other.m_preampDb;
+            m_preampLinear = other.m_preampLinear;
         }
         return *this;
     }
@@ -190,7 +193,27 @@ public:
     }
 
     /// Import bands from dynamic vector serialization: first 16 activate in DSP, excess (>16) retained in variable overflow vector (§5.2)
+    /// Any remaining slots beyond bands.size() up to BANDS_PER_CHANNEL are reset to flat / OFF (enabled = false).
     void importBands(bool rightChannel, const std::vector<BandConfig>& bands) {
+        const double defaultFreqs[BANDS_PER_CHANNEL] = {
+            25.0, 40.0, 63.0, 100.0, 160.0, 250.0, 400.0, 630.0,
+            1000.0, 1600.0, 2500.0, 4000.0, 6300.0, 10000.0, 14000.0, 18000.0
+        };
+        for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
+            BandConfig offBand;
+            offBand.enabled = false;
+            offBand.frequency = defaultFreqs[i];
+            offBand.Q = 1.0;
+            offBand.gainDb = 0.0;
+            offBand.type = (i == 0) ? BiquadFilterType::LowShelf
+                                    : ((i == BANDS_PER_CHANNEL - 1) ? BiquadFilterType::HighShelf
+                                                                    : BiquadFilterType::Peak);
+            if (rightChannel) {
+                setRightBand(i, offBand);
+            } else {
+                setLeftBand(i, offBand);
+            }
+        }
         const size_t n = std::min(bands.size(), BANDS_PER_CHANNEL);
         for (size_t i = 0; i < n; ++i) {
             if (rightChannel) {
@@ -339,10 +362,21 @@ public:
         if (!getPresetBandConfigs(presetName, m_leftBands, m_rightBands)) {
             return false;
         }
+        setPreampDb(0.0);
         clearOverflowBands();
         configure(m_sampleRate);
         return true;
     }
+
+    void setPreampDb(double db) noexcept
+    {
+        const double clamped = std::clamp(db, -24.0, 24.0);
+        m_preampDb = (std::abs(clamped) <= 1e-9) ? 0.0 : clamped;
+        m_preampLinear = (m_preampDb == 0.0) ? 1.0 : std::pow(10.0, m_preampDb / 20.0);
+    }
+
+    [[nodiscard]] double preampDb() const noexcept { return m_preampDb; }
+    [[nodiscard]] double preampLinear() const noexcept { return m_preampLinear; }
 
     void reset()
     {
@@ -350,9 +384,28 @@ public:
         for (auto& f : m_rightFilters) f.reset();
     }
 
+    inline void processBandsOnly(double& left, double& right)
+    {
+        if (!m_enabled.load(std::memory_order_relaxed)) return;
+
+        for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
+            if (m_leftBands[i].enabled) {
+                left = m_leftFilters[i].process(left);
+            }
+            if (m_rightBands[i].enabled) {
+                right = m_rightFilters[i].process(right);
+            }
+        }
+    }
+
     inline void process(double& left, double& right)
     {
         if (!m_enabled.load(std::memory_order_relaxed)) return;
+
+        if (m_preampLinear != 1.0) {
+            left *= m_preampLinear;
+            right *= m_preampLinear;
+        }
 
         for (size_t i = 0; i < BANDS_PER_CHANNEL; ++i) {
             if (m_leftBands[i].enabled) {
@@ -369,6 +422,8 @@ public:
 
 private:
     double m_sampleRate = 48000.0;
+    double m_preampDb = 0.0;
+    double m_preampLinear = 1.0;
     std::atomic<bool> m_enabled{false};
     std::array<BandConfig, BANDS_PER_CHANNEL> m_leftBands;
     std::array<BandConfig, BANDS_PER_CHANNEL> m_rightBands;

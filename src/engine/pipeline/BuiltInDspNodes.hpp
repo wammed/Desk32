@@ -28,18 +28,46 @@ public:
     void configure(double sampleRate) override {
         AudioNode::configure(sampleRate);
         m_eq.configure(sampleRate);
+        m_preampSmoother.configure(sampleRate, 10.0);
         m_eq.setEnabled(true);
     }
 
     void reset() override {
+        AudioNode::reset();
         m_eq.reset();
+        m_preampSmootherInit = false;
         m_eq.setEnabled(true);
     }
 
     void process(double* left, double* right, size_t frameCount) override {
         if (isEffectivelyBypassed()) return;
+        const double targetPreamp = m_eq.preampLinear();
+        if (!m_preampSmootherInit) {
+            m_preampSmoother.reset(targetPreamp);
+            m_preampSmootherInit = true;
+        } else {
+            m_preampSmoother.setTarget(targetPreamp);
+        }
+        if (!m_preampSmoother.isSmoothing()) {
+            const double p = m_preampSmoother.target();
+            if (p == 1.0) {
+                for (size_t i = 0; i < frameCount; ++i) {
+                    m_eq.processBandsOnly(left[i], right[i]);
+                }
+            } else {
+                for (size_t i = 0; i < frameCount; ++i) {
+                    left[i] *= p;
+                    right[i] *= p;
+                    m_eq.processBandsOnly(left[i], right[i]);
+                }
+            }
+            return;
+        }
         for (size_t i = 0; i < frameCount; ++i) {
-            m_eq.process(left[i], right[i]);
+            const double p = m_preampSmoother.next();
+            left[i] *= p;
+            right[i] *= p;
+            m_eq.processBandsOnly(left[i], right[i]);
         }
     }
 
@@ -51,17 +79,33 @@ public:
         m_eq.applyCoefficients(leftCoeffs, rightCoeffs, leftEnabled, rightEnabled, smoothSamples);
     }
 
+    void setPreampDb(double preampDb, bool snapImmediate = false) noexcept {
+        m_eq.setPreampDb(preampDb);
+        if (snapImmediate) {
+            m_preampSmoother.reset(m_eq.preampLinear());
+            m_preampSmootherInit = true;
+        } else {
+            m_preampSmoother.setTarget(m_eq.preampLinear());
+        }
+    }
+
     [[nodiscard]] const ParametricEQ& dsp() const noexcept { return m_eq; }
 
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
         auto node = std::make_shared<ParametricEqNode>(m_name, m_affiliation);
         node->setBypassed(isBypassed());
         node->m_eq = m_eq;
+        node->copyTrimFrom(*this);
+        node->m_preampSmoother.configure(m_sampleRate, 10.0);
+        node->m_preampSmoother.reset(m_eq.preampLinear());
+        node->m_preampSmootherInit = true;
         return node;
     }
 
 private:
     ParametricEQ m_eq;
+    dsp::ParameterSmoother m_preampSmoother{1.0, 10.0, 48000.0};
+    bool m_preampSmootherInit{false};
 };
 
 /// Node 2: 32-band Graphic Equalizer (Console-style GEQ)
@@ -80,6 +124,7 @@ public:
     }
 
     void reset() override {
+        AudioNode::reset();
         m_geq.reset();
         m_geq.setEnabled(true);
     }
@@ -106,6 +151,7 @@ public:
         auto node = std::make_shared<GraphicEqNode>(m_name);
         node->setBypassed(isBypassed());
         node->m_geq = m_geq;
+        node->copyTrimFrom(*this);
         return node;
     }
 
@@ -138,6 +184,7 @@ public:
     }
 
     void reset() override {
+        AudioNode::reset();
         m_filter.reset();
         m_hpfEnabledResetRestore();
     }
@@ -151,15 +198,45 @@ public:
         m_filter.setLpfEnabled(true);
     }
 
-    void process(double* left, double* right, size_t frameCount) override {
-        if (isEffectivelyBypassed()) return;
+    void applyInputTrim(double* /*left*/, double* /*right*/, size_t /*frameCount*/) noexcept override {}
+    void applyOutputTrim(double* /*left*/, double* /*right*/, size_t /*frameCount*/) noexcept override {}
+    void applyInputTrimStatic(double* /*left*/, double* /*right*/, size_t /*frameCount*/) const noexcept override {}
+    void applyOutputTrimStatic(double* /*left*/, double* /*right*/, size_t /*frameCount*/) const noexcept override {}
+
+    void processBypassedTrimsOnly(double* left, double* right, size_t frameCount) noexcept override {
         for (size_t i = 0; i < frameCount; ++i) {
-            m_filter.process(left[i], right[i]);
+            m_filter.processWithBypass(left[i], right[i], true);
+        }
+    }
+
+    void processBypassedTrimsStatic(double* left, double* right, size_t frameCount) const noexcept override {
+        for (size_t i = 0; i < frameCount; ++i) {
+            m_filter.processBypassedTrimsStatic(left[i], right[i]);
+        }
+    }
+
+    void processFadePair(double* wetLeft, double* wetRight,
+                         double* dryLeft, double* dryRight,
+                         size_t frameCount) override {
+        for (size_t i = 0; i < frameCount; ++i) {
+            m_filter.processWithDry(wetLeft[i], wetRight[i], dryLeft[i], dryRight[i]);
+        }
+    }
+
+    void process(double* left, double* right, size_t frameCount) override {
+        const bool bypassFilters = isEffectivelyBypassed();
+        for (size_t i = 0; i < frameCount; ++i) {
+            m_filter.processWithBypass(left[i], right[i], bypassFilters);
         }
     }
 
     void applyCoefficients(const HighLowPassCoefficients& coeffs, size_t smoothSamples = 0) noexcept {
         m_filter.applyCoefficients(coeffs, smoothSamples);
+    }
+
+    void applyTrimDb(double hpfInDb, double hpfOutDb, double lpfInDb, double lpfOutDb, size_t smoothSamples = 0) noexcept {
+        m_filter.setHpfTrimDb(hpfInDb, hpfOutDb, smoothSamples);
+        m_filter.setLpfTrimDb(lpfInDb, lpfOutDb, smoothSamples);
     }
 
     [[nodiscard]] const HighLowPassFilter& dsp() const noexcept { return m_filter; }
@@ -242,6 +319,7 @@ public:
     }
 
     void reset() override {
+        AudioNode::reset();
         if (m_active) m_active->reset();
     }
 
@@ -316,6 +394,7 @@ public:
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
         auto node = std::make_shared<CompressorNode>(m_name);
         node->setBypassed(isBypassed());
+        node->copyTrimFrom(*this);
         Config cfg;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
@@ -416,6 +495,7 @@ public:
     }
 
     void reset() override {
+        AudioNode::reset();
         if (m_active) m_active->reset();
     }
 
@@ -479,6 +559,7 @@ public:
     [[nodiscard]] std::shared_ptr<AudioNode> clone() const override {
         auto node = std::make_shared<PeakLimiterNode>(m_name);
         node->setBypassed(isBypassed());
+        node->copyTrimFrom(*this);
         Config cfg;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
@@ -669,6 +750,7 @@ public:
     }
 
     void reset() override {
+        AudioNode::reset();
         if (m_active) m_active->reset();
         for (auto& slot : m_ringoutSlots) {
             if (slot.reverb) {
@@ -1034,6 +1116,7 @@ public:
         auto node = std::make_shared<ReverbNode>(m_name);
         node->setBypassed(isBypassed());
         node->setBypassBehavior(bypassBehavior());
+        node->copyTrimFrom(*this);
         Config cfg;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);

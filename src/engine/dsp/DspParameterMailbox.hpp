@@ -14,6 +14,17 @@
 
 namespace desk32::engine::dsp {
 
+enum class DspTrimTarget : size_t {
+    Peq = 0,
+    Geq = 1,
+    Hpf = 2,
+    Lpf = 3,
+    Compressor = 4,
+    Limiter = 5,
+    Reverb = 6,
+    Count = 7
+};
+
 // P0-24, P0-25: Compile-time verification that atomics used in the Triple Buffer are always lock-free
 static_assert(std::atomic<uint32_t>::is_always_lock_free, "std::atomic<uint32_t> must be lock-free for DspParameterMailbox");
 static_assert(std::atomic<uint64_t>::is_always_lock_free, "std::atomic<uint64_t> must be lock-free for DspParameterMailbox");
@@ -64,6 +75,15 @@ struct ContinuousDspParameters {
     std::array<bool, ParametricEQ::BANDS_PER_CHANNEL> listeningLeftEnabled{};
     std::array<bool, ParametricEQ::BANDS_PER_CHANNEL> listeningRightEnabled{};
     bool listeningModified = false;
+
+    // Preset input Preamp (dB) - isolated per PEQ / Listening Correction
+    float peqPreampDb = 0.0f;
+    float listeningPreampDb = 0.0f;
+
+    // Per-DSP Input / Output Trim (dB, ±12.0 dB, default 0.0 dB, excluded from bypass & presets)
+    std::array<float, static_cast<size_t>(DspTrimTarget::Count)> inputTrimDb{};
+    std::array<float, static_cast<size_t>(DspTrimTarget::Count)> outputTrimDb{};
+    uint32_t trimModifiedMask = 0;
 
     uint64_t epoch = 1;
     uint64_t sequenceNumber = 0;
@@ -142,9 +162,56 @@ public:
         m_staging.peqLeftModifiedMask = 0x00FFFFFF;
         m_staging.peqRightModifiedMask = 0x00FFFFFF;
         m_staging.filterModified = true;
+        m_staging.trimModifiedMask = 0xFFFFFFFFu;
         if (m_listeningPresetConfigured) {
             m_staging.listeningModified = true;
         }
+        publishStaging();
+    }
+
+    void setDspTrim(size_t targetIndex, bool isOutput, float gainDb) {
+        if (targetIndex >= static_cast<size_t>(DspTrimTarget::Count)) return;
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        float clamped = std::clamp(gainDb, -12.0f, 12.0f);
+        if (std::abs(clamped) < 1e-6f) clamped = 0.0f;
+        if (isOutput) {
+            m_staging.outputTrimDb[targetIndex] = clamped;
+            m_staging.trimModifiedMask |= (1u << (8u + targetIndex));
+        } else {
+            m_staging.inputTrimDb[targetIndex] = clamped;
+            m_staging.trimModifiedMask |= (1u << targetIndex);
+        }
+        publishStaging();
+    }
+
+    void resetAllDspTrims() {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        m_staging.inputTrimDb.fill(0.0f);
+        m_staging.outputTrimDb.fill(0.0f);
+        m_staging.trimModifiedMask = 0xFFFFFFFFu;
+        publishStaging();
+    }
+
+    void setPeqPreampDb(float preampDb) {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        float clamped = std::clamp(preampDb, -24.0f, 24.0f);
+        if (std::abs(clamped) < 1e-6f) clamped = 0.0f;
+        m_staging.peqPreampDb = clamped;
+        m_staging.peqLeftModifiedMask |= 1u;
+        publishStaging();
+    }
+
+    void setListeningPreampDb(float preampDb) {
+        std::lock_guard<std::mutex> lock(m_producerMutex);
+        prepareStaging();
+        float clamped = std::clamp(preampDb, -24.0f, 24.0f);
+        if (std::abs(clamped) < 1e-6f) clamped = 0.0f;
+        m_staging.listeningPreampDb = clamped;
+        m_staging.listeningModified = true;
+        m_listeningPresetConfigured = true;
         publishStaging();
     }
 
@@ -283,13 +350,17 @@ public:
 
     // Apply entire PEQ preset (Thread-safe, P0-27 precomputed)
     void applyPeqPreset(const std::array<ContinuousDspParameters::PeqBandConfig, 24>& leftBands,
-                        const std::array<ContinuousDspParameters::PeqBandConfig, 24>& rightBands) {
+                        const std::array<ContinuousDspParameters::PeqBandConfig, 24>& rightBands,
+                        float preampDb = 0.0f) {
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
         m_staging.peqLeftBands = leftBands;
         m_staging.peqRightBands = rightBands;
         m_staging.peqLeftModifiedMask = 0x00FFFFFF;
         m_staging.peqRightModifiedMask = 0x00FFFFFF;
+        float clampedPre = std::clamp(preampDb, -24.0f, 24.0f);
+        if (std::abs(clampedPre) < 1e-6f) clampedPre = 0.0f;
+        m_staging.peqPreampDb = clampedPre;
 
         for (size_t b = 0; b < 24; ++b) {
             const auto& l = leftBands[b];
@@ -380,6 +451,7 @@ public:
         }
 
         m_listeningPresetConfigured = true;
+        m_staging.listeningPreampDb = 0.0f;
         m_staging.listeningModified = true;
         publishStaging();
         return true;
@@ -428,12 +500,16 @@ public:
 
     void applyListeningBands(
         const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& leftBands,
-        const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& rightBands)
+        const std::array<ParametricEQ::BandConfig, ParametricEQ::BANDS_PER_CHANNEL>& rightBands,
+        float preampDb = 0.0f)
     {
         std::lock_guard<std::mutex> lock(m_producerMutex);
         prepareStaging();
         m_listeningLeftConfigs = leftBands;
         m_listeningRightConfigs = rightBands;
+        float clampedPre = std::clamp(preampDb, -24.0f, 24.0f);
+        if (std::abs(clampedPre) < 1e-6f) clampedPre = 0.0f;
+        m_staging.listeningPreampDb = clampedPre;
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             const auto& l = leftBands[b];
             const double lFreq = std::clamp(l.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
@@ -450,6 +526,7 @@ public:
             m_staging.listeningRightEnabled[b] = r.enabled;
         }
         m_listeningPresetConfigured = true;
+        m_staging.listeningPreampDb = 0.0f;
         m_staging.listeningModified = true;
         publishStaging();
     }
@@ -592,6 +669,7 @@ private:
             m_staging.peqRightModifiedMask = 0;
             m_staging.filterModified = false;
             m_staging.listeningModified = false;
+            m_staging.trimModifiedMask = 0;
         }
         m_staging.epoch = m_epoch.load(std::memory_order_relaxed);
         m_staging.sequenceNumber = m_updateCounter.load(std::memory_order_relaxed) + 1;

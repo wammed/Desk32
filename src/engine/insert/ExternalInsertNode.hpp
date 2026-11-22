@@ -96,6 +96,7 @@ public:
         auto node = std::make_shared<ExternalInsertNode>(m_name, m_affiliation, m_bridge);
         node->pipeline::AudioNode::setBypassed(wasBypassed);
         node->configure(m_sampleRate);
+        node->copyTrimFrom(*this);
         node->delayBuffer().setDelayFrames(m_delayBuffer->delayFrames());
         return node;
     }

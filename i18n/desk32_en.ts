@@ -310,6 +310,22 @@
         <source>Workspace Import Notice</source>
         <translation>Workspace Import Notice</translation>
     </message>
+    <message>
+        <source>DSP Trims (dspTrimsZero):</source>
+        <translation>DSP Trims (dspTrimsZero):</translation>
+    </message>
+    <message>
+        <source>true (ALL 0.0 dB)</source>
+        <translation>true (ALL 0.0 dB)</translation>
+    </message>
+    <message>
+        <source>false (BYPASSED BY DIRECT MODE)</source>
+        <translation>false (BYPASSED BY DIRECT MODE)</translation>
+    </message>
+    <message>
+        <source>false (NON-ZERO TRIM ACTIVE)</source>
+        <translation>false (NON-ZERO TRIM ACTIVE)</translation>
+    </message>
 </context>
 <context>
     <name>WorkspacePanel</name>
@@ -455,6 +471,57 @@
     <message>
         <source>Exclusive:</source>
         <translation>Exclusive:</translation>
+    </message>
+</context>
+<context>
+    <name>DspPreviewPanel</name>
+    <message>
+        <source>HPF In Trim:</source>
+        <translation>HPF In Trim:</translation>
+    </message>
+    <message>
+        <source>HPF Out Trim:</source>
+        <translation>HPF Out Trim:</translation>
+    </message>
+    <message>
+        <source>LPF In Trim:</source>
+        <translation>LPF In Trim:</translation>
+    </message>
+    <message>
+        <source>LPF Out Trim:</source>
+        <translation>LPF Out Trim:</translation>
+    </message>
+    <message>
+        <source>Input Trim:</source>
+        <translation>Input Trim:</translation>
+    </message>
+    <message>
+        <source>Output Trim:</source>
+        <translation>Output Trim:</translation>
+    </message>
+    <message>
+        <source>Input/Output trims (±12 dB) remain active when DSPs are bypassed and are excluded from presets.</source>
+        <translation>Input/Output trims (±12 dB) remain active when DSPs are bypassed and are excluded from presets.</translation>
+    </message>
+    <message>
+        <source>MASTER PEQ TRIM</source>
+        <translation>MASTER PEQ TRIM</translation>
+    </message>
+    <message>
+        <source>Preset Preamp:</source>
+        <translation>Preset Preamp:</translation>
+    </message>
+    <message>
+        <source>32-BAND GEQ TRIM</source>
+        <translation>32-BAND GEQ TRIM</translation>
+    </message>
+    <message>
+        <source>Listening Preamp:</source>
+        <translation>Listening Preamp:</translation>
+    </message>
+    <message>
+        <source>Reset All Trims (0 dB)</source>
+        <translation>Reset All Trims (0 dB)</translation>
     </message>
 </context>
 </TS>

@@ -3826,6 +3826,11 @@ ApplicationWindow {
                     bitPerfectDetailPopup.refreshReport()
                 }
             }
+            function onDspTrimsChanged() {
+                if (bitPerfectDetailPopup.visible) {
+                    bitPerfectDetailPopup.refreshReport()
+                }
+            }
         }
 
         background: Rectangle {
@@ -3959,6 +3964,21 @@ ApplicationWindow {
                             font.family: "Monospace"
                             color: l1Col.l1.hashMatched ? "#00E676" : "#FF5252"
                             elide: Text.ElideMiddle
+                            Layout.fillWidth: true
+                        }
+
+                        Label { text: qsTr("DSP Trims (dspTrimsZero):"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            property bool trimsZero: bitPerfectDetailPopup.report.dspTrimsZero !== false
+                            text: trimsZero
+                                  ? qsTr("true (ALL 0.0 dB)")
+                                  : (EngineController.directModeEnabled
+                                     ? qsTr("false (BYPASSED BY DIRECT MODE)")
+                                     : qsTr("false (NON-ZERO TRIM ACTIVE)"))
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: trimsZero ? "#00E676" : (EngineController.directModeEnabled ? "#00E5FF" : "#FFB300")
+                            wrapMode: Text.WordWrap
                             Layout.fillWidth: true
                         }
                     }

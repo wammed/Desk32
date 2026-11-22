@@ -743,6 +743,7 @@ private:
                             params.peqRightEnabled,
                             smoothSamples
                         );
+                        peqNode->setPreampDb(params.peqPreampDb, smoothSamples == 0);
                         appliedAny = true;
                         break;
                     }
@@ -759,10 +760,53 @@ private:
                     }
                 }
             }
+
+            // 4. Per-DSP Input / Output Trims (all 7 DSPs)
+            if (params.trimModifiedMask != 0) {
+                const bool snap = (smoothSamples == 0);
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    auto* node = master->node(i);
+                    if (!node) continue;
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(node)) {
+                        constexpr size_t idx = static_cast<size_t>(dsp::DspTrimTarget::Peq);
+                        peqNode->setInputTrimDb(params.inputTrimDb[idx], snap);
+                        peqNode->setOutputTrimDb(params.outputTrimDb[idx], snap);
+                        appliedAny = true;
+                    } else if (auto* geqNode = dynamic_cast<GraphicEqNode*>(node)) {
+                        constexpr size_t idx = static_cast<size_t>(dsp::DspTrimTarget::Geq);
+                        geqNode->setInputTrimDb(params.inputTrimDb[idx], snap);
+                        geqNode->setOutputTrimDb(params.outputTrimDb[idx], snap);
+                        appliedAny = true;
+                    } else if (auto* filterNode = dynamic_cast<HighLowPassNode*>(node)) {
+                        constexpr size_t hIdx = static_cast<size_t>(dsp::DspTrimTarget::Hpf);
+                        constexpr size_t lIdx = static_cast<size_t>(dsp::DspTrimTarget::Lpf);
+                        filterNode->applyTrimDb(
+                            params.inputTrimDb[hIdx], params.outputTrimDb[hIdx],
+                            params.inputTrimDb[lIdx], params.outputTrimDb[lIdx],
+                            smoothSamples);
+                        appliedAny = true;
+                    } else if (auto* compNode = dynamic_cast<CompressorNode*>(node)) {
+                        constexpr size_t idx = static_cast<size_t>(dsp::DspTrimTarget::Compressor);
+                        compNode->setInputTrimDb(params.inputTrimDb[idx], snap);
+                        compNode->setOutputTrimDb(params.outputTrimDb[idx], snap);
+                        appliedAny = true;
+                    } else if (auto* limNode = dynamic_cast<PeakLimiterNode*>(node)) {
+                        constexpr size_t idx = static_cast<size_t>(dsp::DspTrimTarget::Limiter);
+                        limNode->setInputTrimDb(params.inputTrimDb[idx], snap);
+                        limNode->setOutputTrimDb(params.outputTrimDb[idx], snap);
+                        appliedAny = true;
+                    } else if (auto* revNode = dynamic_cast<ReverbNode*>(node)) {
+                        constexpr size_t idx = static_cast<size_t>(dsp::DspTrimTarget::Reverb);
+                        revNode->setInputTrimDb(params.inputTrimDb[idx], snap);
+                        revNode->setOutputTrimDb(params.outputTrimDb[idx], snap);
+                        appliedAny = true;
+                    }
+                }
+            }
         }
 
         if (listening) {
-            // 4. Listening Correction: O(1) bulk assignment of precalculated coefficients (P0-27)
+            // 5. Listening Correction: O(1) bulk assignment of precalculated coefficients (P0-27)
             if (params.listeningModified) {
                 for (size_t i = 0; i < listening->nodeCount(); ++i) {
                     if (auto* listenNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
@@ -773,6 +817,7 @@ private:
                             params.listeningRightEnabled,
                             smoothSamples
                         );
+                        listenNode->setPreampDb(params.listeningPreampDb, smoothSamples == 0);
                         appliedAny = true;
                         break;
                     }

@@ -137,6 +137,7 @@ public:
 
     /// Real-time audio processing (zero heap allocations).
     /// Executes sequentially across active nodes and applies ~5ms linear dry/wet smoothing on bypass transitions (§5.9).
+    /// Node input/output trims remain in the signal path even when individual nodes or the chain are bypassed.
     inline void process(double* left, double* right, size_t frameCount) {
         const bool curChainBypass = m_bypassed.load(std::memory_order_relaxed);
         const size_t nNodes = std::min(m_nodes.size(), MAX_NODES);
@@ -148,13 +149,18 @@ public:
             }
             m_hasProcessedBlock = true;
             if (curChainBypass) {
+                applyAllNodeTrimsWhileBypassed(left, right, frameCount, nNodes);
                 return;
             }
             for (size_t i = 0; i < nNodes; ++i) {
                 auto& node = m_nodes[i];
+                node->applyInputTrim(left, right, frameCount);
                 if (!node->isBypassed() || node->wantsProcessWhileBypassed()) {
                     node->process(left, right, frameCount);
+                } else {
+                    node->processBypassedTrimsOnly(left, right, frameCount);
                 }
+                node->applyOutputTrim(left, right, frameCount);
             }
             return;
         }
@@ -168,6 +174,7 @@ public:
         }
 
         if (curChainBypass && m_chainFadeRemaining == 0) {
+            applyAllNodeTrimsWhileBypassed(left, right, frameCount, nNodes);
             return;
         }
 
@@ -176,6 +183,7 @@ public:
             std::memcpy(m_chainDryL.data(), left, frameCount * sizeof(double));
             std::memcpy(m_chainDryR.data(), right, frameCount * sizeof(double));
         } else if (curChainBypass) {
+            applyAllNodeTrimsWhileBypassed(left, right, frameCount, nNodes);
             return;
         }
 
@@ -195,12 +203,14 @@ public:
                 }
             }
 
+            node->applyInputTrim(left, right, frameCount);
+
             const bool fadingNode = (m_nodeFadeRemaining[i] > 0) && (frameCount <= DRY_SCRATCH_FRAMES);
             if (!nodeBypass) {
                 if (fadingNode) {
                     std::memcpy(m_nodeDryL.data(), left, frameCount * sizeof(double));
                     std::memcpy(m_nodeDryR.data(), right, frameCount * sizeof(double));
-                    node->process(left, right, frameCount);
+                    node->processFadePair(left, right, m_nodeDryL.data(), m_nodeDryR.data(), frameCount);
                     applyCrossfade(left, right, m_nodeDryL.data(), m_nodeDryR.data(),
                                    frameCount, m_nodeFadeRemaining[i], m_nodeFadeTotal[i], m_nodeFadeToBypass[i]);
                 } else {
@@ -214,22 +224,43 @@ public:
                 std::memcpy(m_nodeDryL.data(), left, frameCount * sizeof(double));
                 std::memcpy(m_nodeDryR.data(), right, frameCount * sizeof(double));
                 node->setRtFadeForceActive(true);
-                node->process(left, right, frameCount);
+                node->processFadePair(left, right, m_nodeDryL.data(), m_nodeDryR.data(), frameCount);
                 node->setRtFadeForceActive(false);
                 applyCrossfade(left, right, m_nodeDryL.data(), m_nodeDryR.data(),
                                frameCount, m_nodeFadeRemaining[i], m_nodeFadeTotal[i], true);
             } else {
                 m_nodeFadeRemaining[i] = 0;
+                node->processBypassedTrimsOnly(left, right, frameCount);
             }
+
+            node->applyOutputTrim(left, right, frameCount);
         }
 
         if (applyChainFade) {
+            applyAllNodeTrimsStatic(m_chainDryL.data(), m_chainDryR.data(), frameCount, nNodes);
             applyCrossfade(left, right, m_chainDryL.data(), m_chainDryR.data(),
                            frameCount, m_chainFadeRemaining, m_chainFadeTotal, m_chainFadeToBypass);
         }
     }
 
 private:
+    inline void applyAllNodeTrimsWhileBypassed(double* left, double* right, size_t frameCount, size_t nNodes) noexcept {
+        for (size_t i = 0; i < nNodes; ++i) {
+            auto& node = m_nodes[i];
+            node->applyInputTrim(left, right, frameCount);
+            node->processBypassedTrimsOnly(left, right, frameCount);
+            node->applyOutputTrim(left, right, frameCount);
+        }
+    }
+
+    inline void applyAllNodeTrimsStatic(double* left, double* right, size_t frameCount, size_t nNodes) const noexcept {
+        for (size_t i = 0; i < nNodes; ++i) {
+            const auto& node = m_nodes[i];
+            node->applyInputTrimStatic(left, right, frameCount);
+            node->processBypassedTrimsStatic(left, right, frameCount);
+            node->applyOutputTrimStatic(left, right, frameCount);
+        }
+    }
     static inline void applyCrossfade(double* wetL, double* wetR,
                                       const double* dryL, const double* dryR,
                                       size_t frameCount,
