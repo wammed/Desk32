@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QVariantMap>
 #include <QVariantList>
+#include <QTimer>
 #include <memory>
 #include <array>
 #include <atomic>
@@ -93,6 +94,8 @@ class EngineController : public QObject {
     Q_PROPERTY(QString externalInsertReturnPortR READ externalInsertReturnPortR NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(int externalInsertPosition READ externalInsertPosition WRITE setExternalInsertPosition NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(int externalInsertDisconnectPolicy READ externalInsertDisconnectPolicy WRITE setExternalInsertDisconnectPolicy NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(bool externalInsertCalibrating READ isExternalInsertCalibrating NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(bool externalInsertSimulationMode READ isExternalInsertSimulationMode NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(bool syncMasterDspToRender READ syncMasterDspToRenderEnabled WRITE setSyncMasterDspToRender NOTIFY renderStateChanged)
     Q_PROPERTY(bool levelMatchInProgress READ isLevelMatchInProgress NOTIFY levelMatchStateChanged)
 
@@ -359,10 +362,13 @@ public:
     Q_INVOKABLE QVariantMap getLatencyAlignmentReport() const;
     Q_INVOKABLE QVariantMap getExternalInsertStatus() const;
     Q_INVOKABLE void disconnectExternalInsert();
+    Q_INVOKABLE bool reconnectExternalInsert();
     Q_INVOKABLE void resetInsertXRuns();
     Q_INVOKABLE void simulateInsertDisconnect();
     Q_INVOKABLE void simulateInsertRecovery();
     Q_INVOKABLE void setInsertDelayCompensation(int frames);
+    [[nodiscard]] bool isExternalInsertCalibrating() const noexcept { return m_calActive; }
+    [[nodiscard]] bool isExternalInsertSimulationMode() const noexcept;
 
     // Phase 3: Common Preset Management (Specification Section 11.1)
     Q_INVOKABLE QStringList listPresets(const QString& category) const;
@@ -461,6 +467,9 @@ private:
         double durationMs,
         const std::string& trackPath);
     void checkAudioHealthAndGraph();
+    void pollExternalInsertHealth();
+    void syncExternalInsertBypassToPipeline(bool bypass);
+    void pollHardwareCalibrationProbe();
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
@@ -554,6 +563,13 @@ private:
     int m_healthCheckTick{0};
     std::array<uint64_t, 4> m_lastDeckUnderruns{0, 0, 0, 0};
     size_t m_lastDroppedLogCount{0};
+
+    // Real-time multi-sample hardware latency calibration state (Control Thread)
+    QTimer* m_calProbeTimer{nullptr};
+    uint32_t m_calTargetProbes{3};
+    uint32_t m_calCompletedProbes{0};
+    bool m_calActive{false};
+    bool m_calRestoreBypass{false};
 };
 
 } // namespace desk32::core

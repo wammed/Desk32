@@ -40,6 +40,11 @@ public:
     PipeWireInsertTransport(const PipeWireInsertTransport&) = delete;
     PipeWireInsertTransport& operator=(const PipeWireInsertTransport&) = delete;
 
+    /// Native PipeWire registry host/port discovery (control thread, zero subprocess spawn).
+    [[nodiscard]] static std::vector<ExternalPortInfo> discoverHosts(
+        double defaultSampleRate = 48000.0,
+        size_t defaultBufferSize = 256);
+
     bool configureAndConnect(const ExternalPortInfo& target,
                              double engineSampleRate,
                              size_t engineBufferSize) override;
@@ -104,14 +109,29 @@ public:
     static void onReturnParamChanged(void* data, uint32_t id, const struct ::spa_pod* param);
     static void onSendProcess(void* data);
     static void onReturnProcess(void* data);
+    static void onLinkProxyRemoved(void* data);
+    static void onLinkProxyError(void* data, int seq, int res, const char* message);
 
 private:
+    struct DiscoveredNode {
+        std::string name;
+        std::string appName;
+        std::string nick;
+    };
+
     struct DiscoveredPort {
         uint32_t id = 0;
         uint32_t nodeId = 0;
+        uint32_t portOrder = 0;
         std::string name;
         std::string alias;
+        std::string channel;
         std::string direction; // "in" or "out"
+    };
+
+    struct LinkBinding {
+        struct pw_proxy* proxy = nullptr;
+        std::unique_ptr<struct spa_hook> listener;
     };
 
     void tryResolveAndCreateLinksLocked();
@@ -170,9 +190,9 @@ private:
     bool m_syncDone = false;
     bool m_threadLoopStarted = false;
 
-    std::map<uint32_t, std::string> m_nodesById;
+    std::map<uint32_t, DiscoveredNode> m_nodesById;
     std::map<uint32_t, DiscoveredPort> m_portsById;
-    std::vector<struct pw_proxy*> m_linkProxies;
+    std::vector<LinkBinding> m_linkBindings;
     std::set<uint32_t> m_watchedIds;
 };
 

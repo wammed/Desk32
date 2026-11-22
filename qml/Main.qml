@@ -2227,20 +2227,53 @@ ApplicationWindow {
                             Layout.fillHeight: true
                             color: "transparent"
 
+                            property var discoveredHosts: []
+                            property var insertStatus: EngineController.getExternalInsertStatus()
+                            property var latencyReport: EngineController.getLatencyAlignmentReport()
+                            property var audioCaps: EngineController.getAudioCapabilities()
+                            property bool selectedLatencyReported: true
+                            property int selectedReportedLatency: 0
+
+                            function refreshInsertState() {
+                                insertStatus = EngineController.getExternalInsertStatus();
+                                latencyReport = EngineController.getLatencyAlignmentReport();
+                                audioCaps = EngineController.getAudioCapabilities();
+                            }
+
+                            function scanExternalHosts() {
+                                discoveredHosts = EngineController.discoverExternalInsertPorts();
+                                var names = [];
+                                for (var i = 0; i < discoveredHosts.length; ++i) {
+                                    var h = discoveredHosts[i];
+                                    var latTxt = h.latencyReported ? (h.reportedLatencyFrames + " smp") : "N/A";
+                                    names.push(h.clientName + " [" + h.sampleRate + " Hz / " + h.bufferSize + " smp / lat " + latTxt + "]");
+                                }
+                                if (names.length === 0) {
+                                    names.push(qsTr("No stereo external hosts found (start Carla / JACK host)"));
+                                }
+                                discoveredHostsCombo.model = names;
+                            }
+
                             Connections {
                                 target: EngineController
                                 function onExternalInsertStatusChanged() {
+                                    insertControlCenter.refreshInsertState();
                                     if (!insertClientNameInput.activeFocus) insertClientNameInput.text = EngineController.externalInsertClientName;
                                     if (!insertSendLInput.activeFocus) insertSendLInput.text = EngineController.externalInsertSendPortL;
                                     if (!insertSendRInput.activeFocus) insertSendRInput.text = EngineController.externalInsertSendPortR;
                                     if (!insertReturnLInput.activeFocus) insertReturnLInput.text = EngineController.externalInsertReturnPortL;
                                     if (!insertReturnRInput.activeFocus) insertReturnRInput.text = EngineController.externalInsertReturnPortR;
                                 }
+                                function onDiagnosticsChanged() {
+                                    insertControlCenter.refreshInsertState();
+                                }
                             }
 
                             StackLayout.onIsCurrentItemChanged: {
                                 if (StackLayout.isCurrentItem) {
                                     insertPresetCombo.model = EngineController.listPresets("external_insert");
+                                    insertControlCenter.refreshInsertState();
+                                    insertControlCenter.scanExternalHosts();
                                 }
                             }
 
@@ -2259,8 +2292,8 @@ ApplicationWindow {
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 14
-                                        spacing: 10
+                                        anchors.margins: 12
+                                        spacing: 6
 
                                         // Card Header with Accent Line
                                         RowLayout {
@@ -2273,16 +2306,47 @@ ApplicationWindow {
                                                 font.pixelSize: 12
                                                 color: "#00E5FF"
                                             }
+                                            Item { Layout.fillWidth: true }
+                                            Button {
+                                                text: qsTr("Scan PipeWire")
+                                                font.pixelSize: 10
+                                                Layout.preferredHeight: 24
+                                                onClicked: insertControlCenter.scanExternalHosts()
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            ComboBox {
+                                                id: discoveredHostsCombo
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 28
+                                                font.pixelSize: 10
+                                                model: [qsTr("Click Scan PipeWire to discover hosts...")]
+                                                onActivated: function(idx) {
+                                                    if (idx >= 0 && idx < insertControlCenter.discoveredHosts.length) {
+                                                        var h = insertControlCenter.discoveredHosts[idx];
+                                                        insertClientNameInput.text = h.clientName;
+                                                        insertSendLInput.text = h.sendPortL;
+                                                        insertSendRInput.text = h.sendPortR;
+                                                        insertReturnLInput.text = h.returnPortL;
+                                                        insertReturnRInput.text = h.returnPortR;
+                                                        insertControlCenter.selectedLatencyReported = h.latencyReported;
+                                                        insertControlCenter.selectedReportedLatency = h.reportedLatencyFrames;
+                                                    }
+                                                }
+                                            }
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 4
-                                            Label { text: qsTr("Target Host Client Name:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
+                                            spacing: 2
+                                            Label { text: qsTr("Target Host Client Name:"); font.pixelSize: 10; font.bold: true; color: "#A0AAB2" }
                                             TextField {
                                                 id: insertClientNameInput
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 32
+                                                Layout.preferredHeight: 28
                                                 font.pixelSize: 11
                                                 text: EngineController.externalInsertClientName
                                                 placeholderText: "e.g. Carla, lsp-plugins"
@@ -2291,16 +2355,16 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 8
+                                            spacing: 6
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 4
-                                                Label { text: qsTr("Send Port L:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
+                                                spacing: 2
+                                                Label { text: qsTr("Send Port L:"); font.pixelSize: 10; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertSendLInput
                                                     Layout.fillWidth: true
-                                                    Layout.preferredHeight: 32
-                                                    font.pixelSize: 11
+                                                    Layout.preferredHeight: 28
+                                                    font.pixelSize: 10
                                                     font.family: "Monospace"
                                                     text: EngineController.externalInsertSendPortL
                                                     placeholderText: "carla:audio_in_1"
@@ -2308,13 +2372,13 @@ ApplicationWindow {
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 4
-                                                Label { text: qsTr("Send Port R:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
+                                                spacing: 2
+                                                Label { text: qsTr("Send Port R:"); font.pixelSize: 10; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertSendRInput
                                                     Layout.fillWidth: true
-                                                    Layout.preferredHeight: 32
-                                                    font.pixelSize: 11
+                                                    Layout.preferredHeight: 28
+                                                    font.pixelSize: 10
                                                     font.family: "Monospace"
                                                     text: EngineController.externalInsertSendPortR
                                                     placeholderText: "carla:audio_in_2"
@@ -2324,16 +2388,16 @@ ApplicationWindow {
 
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 8
+                                            spacing: 6
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 4
-                                                Label { text: qsTr("Return Port L:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
+                                                spacing: 2
+                                                Label { text: qsTr("Return Port L:"); font.pixelSize: 10; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertReturnLInput
                                                     Layout.fillWidth: true
-                                                    Layout.preferredHeight: 32
-                                                    font.pixelSize: 11
+                                                    Layout.preferredHeight: 28
+                                                    font.pixelSize: 10
                                                     font.family: "Monospace"
                                                     text: EngineController.externalInsertReturnPortL
                                                     placeholderText: "carla:audio_out_1"
@@ -2341,18 +2405,60 @@ ApplicationWindow {
                                             }
                                             ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 4
-                                                Label { text: qsTr("Return Port R:"); font.pixelSize: 11; font.bold: true; color: "#A0AAB2" }
+                                                spacing: 2
+                                                Label { text: qsTr("Return Port R:"); font.pixelSize: 10; font.bold: true; color: "#A0AAB2" }
                                                 TextField {
                                                     id: insertReturnRInput
                                                     Layout.fillWidth: true
-                                                    Layout.preferredHeight: 32
-                                                    font.pixelSize: 11
+                                                    Layout.preferredHeight: 28
+                                                    font.pixelSize: 10
                                                     font.family: "Monospace"
                                                     text: EngineController.externalInsertReturnPortR
                                                     placeholderText: "carla:audio_out_2"
                                                 }
                                             }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("Chain Position:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                                ComboBox {
+                                                    Layout.fillWidth: true
+                                                    Layout.preferredHeight: 26
+                                                    font.pixelSize: 10
+                                                    model: ["Slot 0 (Pre-PEQ)", "Slot 1 (Post-PEQ)", "Slot 2 (Post-GEQ)", "Slot 3 (Post-Filter)", "Slot 4 (Post-Comp)", "Slot 5 (Post-Reverb)", "Slot 6 (Post-Limiter)"]
+                                                    currentIndex: EngineController.externalInsertPosition
+                                                    onActivated: function(idx) { EngineController.setExternalInsertPosition(idx); }
+                                                }
+                                            }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 2
+                                                Label { text: qsTr("On Disconnect:"); font.pixelSize: 10; color: "#A0AAB2" }
+                                                ComboBox {
+                                                    Layout.fillWidth: true
+                                                    Layout.preferredHeight: 26
+                                                    font.pixelSize: 10
+                                                    model: [qsTr("Auto-Bypass"), qsTr("Mute Output"), qsTr("Stop Playback")]
+                                                    currentIndex: EngineController.externalInsertDisconnectPolicy
+                                                    onActivated: function(idx) { EngineController.setExternalInsertDisconnectPolicy(idx); }
+                                                }
+                                            }
+                                        }
+
+                                        Label {
+                                            Layout.fillWidth: true
+                                            visible: (EngineController.externalInsertLastError || "").length > 0
+                                            text: EngineController.externalInsertLastError
+                                            font.pixelSize: 10
+                                            color: "#FF5252"
+                                            wrapMode: Text.WordWrap
+                                            maximumLineCount: 2
+                                            elide: Text.ElideRight
                                         }
 
                                         Item { Layout.fillHeight: true }
@@ -2363,28 +2469,34 @@ ApplicationWindow {
                                             Button {
                                                 text: qsTr("Connect / Reconfigure")
                                                 highlighted: true
-                                                font.pixelSize: 12
+                                                font.pixelSize: 11
                                                 font.bold: true
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 34
+                                                Layout.preferredHeight: 32
                                                 onClicked: {
-                                                    EngineController.configureExternalInsert(
+                                                    var q = (insertControlCenter.audioCaps && insertControlCenter.audioCaps.negotiatedQuantum > 0)
+                                                            ? insertControlCenter.audioCaps.negotiatedQuantum : 0;
+                                                    EngineController.configureExternalInsertWithMetadata(
                                                         insertClientNameInput.text,
                                                         insertSendLInput.text,
                                                         insertSendRInput.text,
                                                         insertReturnLInput.text,
                                                         insertReturnRInput.text,
                                                         EngineController.graphSampleRate,
-                                                        256,
-                                                        EngineController.externalInsertReportedLatency
+                                                        q,
+                                                        insertControlCenter.selectedReportedLatency,
+                                                        insertControlCenter.selectedLatencyReported,
+                                                        insertClientNameInput.text,
+                                                        "",
+                                                        ""
                                                     );
                                                 }
                                             }
                                             Button {
                                                 text: qsTr("Disconnect")
                                                 font.pixelSize: 11
-                                                Layout.preferredWidth: 100
-                                                Layout.preferredHeight: 34
+                                                Layout.preferredWidth: 92
+                                                Layout.preferredHeight: 32
                                                 onClicked: EngineController.disconnectExternalInsert()
                                             }
                                         }
@@ -2402,8 +2514,8 @@ ApplicationWindow {
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 14
-                                        spacing: 10
+                                        anchors.margins: 12
+                                        spacing: 8
 
                                         // Card Header
                                         RowLayout {
@@ -2418,7 +2530,7 @@ ApplicationWindow {
                                             }
                                         }
 
-                                        // Status Hero Panel
+                                        // Status Hero Panel (InsertState: 0=NotCfg,1=HostNotFound,2=PortsFound,3=Connected,4=Active,5=RateMismatch,6=BufferMismatch,7=XRun,8=Disconnected,9=Recovering,10=Error)
                                         Rectangle {
                                             id: insertBadgeFull
                                             Layout.fillWidth: true
@@ -2426,8 +2538,13 @@ ApplicationWindow {
                                             radius: 4
                                             property int st: EngineController.externalInsertState
                                             property bool isByp: EngineController.externalInsertBypassed
-                                            color: st === 2 ? (isByp ? "#FFD60020" : "#00E67620") : (st === 1 ? "#00E5FF20" : (st === 0 ? "#1c2128" : "#FF525220"))
-                                            border.color: st === 2 ? (isByp ? "#FFD600" : "#00E676") : (st === 1 ? "#00E5FF" : (st === 0 ? "#2c333e" : "#FF5252"))
+                                            property bool isLiveOk: (st === 3 || st === 4)
+                                            color: isLiveOk ? (isByp ? "#FFD60020" : "#00E67620")
+                                                            : ((st === 2 || st === 9) ? "#00E5FF20"
+                                                            : (st === 0 ? "#1c2128" : "#FF525220"))
+                                            border.color: isLiveOk ? (isByp ? "#FFD600" : "#00E676")
+                                                                   : ((st === 2 || st === 9) ? "#00E5FF"
+                                                                   : (st === 0 ? "#2c333e" : "#FF5252"))
 
                                             RowLayout {
                                                 anchors.fill: parent
@@ -2449,9 +2566,17 @@ ApplicationWindow {
                                                         color: insertBadgeFull.border.color
                                                     }
                                                     Label {
-                                                        text: EngineController.externalInsertBypassed ? qsTr("Dry Bypass Active (Lossless passthrough)") : qsTr("Active Stream passing through Insert Node")
+                                                        text: !insertBadgeFull.isLiveOk
+                                                              ? ((EngineController.externalInsertLastError || "").length > 0
+                                                                 ? EngineController.externalInsertLastError
+                                                                 : qsTr("Not linked to external host"))
+                                                              : (EngineController.externalInsertBypassed
+                                                                 ? qsTr("Dry Bypass Active (Lossless passthrough)")
+                                                                 : qsTr("Active Stream passing through Insert Node"))
                                                         font.pixelSize: 10
                                                         color: "#A0AAB2"
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
                                                     }
                                                 }
                                             }
@@ -2459,9 +2584,10 @@ ApplicationWindow {
 
                                         Button {
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: 34
+                                            Layout.preferredHeight: 32
                                             font.pixelSize: 11
                                             font.bold: true
+                                            enabled: insertBadgeFull.isLiveOk
                                             text: EngineController.externalInsertBypassed ? qsTr("ENGAGE INSERT (DISABLE BYPASS)") : qsTr("FORCE DRY BYPASS (MUTE INSERT)")
                                             highlighted: !EngineController.externalInsertBypassed
                                             onClicked: EngineController.setExternalInsertBypass(!EngineController.externalInsertBypassed)
@@ -2469,27 +2595,67 @@ ApplicationWindow {
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 6
+                                            spacing: 5
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Label { text: qsTr("Transport / Links:"); font.pixelSize: 11; color: "#A0AAB2" }
+                                                Item { Layout.fillWidth: true }
+                                                Label {
+                                                    property var stMap: insertControlCenter.insertStatus
+                                                    text: stMap.transportConnected
+                                                          ? (stMap.transportSimulationMode
+                                                             ? qsTr("SIMULATION (4/4)")
+                                                             : qsTr("LIVE PIPEWIRE (%1/4 links)").arg(stMap.transportActiveLinks || 0))
+                                                          : qsTr("DISCONNECTED (0/4)")
+                                                    font.pixelSize: 10
+                                                    font.bold: true
+                                                    color: stMap.transportConnected ? (stMap.transportSimulationMode ? "#FFB300" : "#00E676") : "#A0AAB2"
+                                                }
+                                            }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Label { text: qsTr("Feedback Protection:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: qsTr("PASSED (SAFE)"); font.pixelSize: 11; font.bold: true; color: "#00E676" }
+                                                Label {
+                                                    property bool fbErr: EngineController.externalInsertState === 10 &&
+                                                                         (EngineController.externalInsertLastError || "").indexOf("Feedback") >= 0
+                                                    text: fbErr ? qsTr("BLOCKED (LOOP)") : qsTr("PASSED (SAFE)")
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: fbErr ? "#FF5252" : "#00E676"
+                                                }
                                             }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Label { text: qsTr("Sample Rate Match:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz (MATCHED)"; font.pixelSize: 11; font.bold: true; color: "#00E676" }
+                                                Label {
+                                                    property bool rateBad: EngineController.externalInsertState === 5
+                                                    text: rateBad
+                                                          ? qsTr("MISMATCH")
+                                                          : ((EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz (MATCHED)")
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: rateBad ? "#FF5252" : "#00E676"
+                                                }
                                             }
 
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Label { text: qsTr("Buffer Size Match:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
-                                                Label { text: "256 smp (MATCHED)"; font.pixelSize: 11; font.bold: true; color: "#00E676" }
+                                                Label {
+                                                    property bool bufBad: EngineController.externalInsertState === 6
+                                                    property int qVal: (insertControlCenter.audioCaps && insertControlCenter.audioCaps.negotiatedQuantum > 0)
+                                                                       ? insertControlCenter.audioCaps.negotiatedQuantum : 256
+                                                    text: bufBad ? qsTr("MISMATCH") : (qVal + " smp (MATCHED)")
+                                                    font.pixelSize: 11
+                                                    font.bold: true
+                                                    color: bufBad ? "#FF5252" : "#00E676"
+                                                }
                                             }
 
                                             RowLayout {
@@ -2514,23 +2680,14 @@ ApplicationWindow {
 
                                         Item { Layout.fillHeight: true }
 
-                                        RowLayout {
+                                        Button {
+                                            text: qsTr("Reconnect / Re-link Host")
+                                            font.pixelSize: 11
+                                            font.bold: true
                                             Layout.fillWidth: true
-                                            spacing: 8
-                                            Button {
-                                                text: qsTr("Simulate Drop")
-                                                font.pixelSize: 10
-                                                Layout.fillWidth: true
-                                                Layout.preferredHeight: 28
-                                                onClicked: EngineController.simulateInsertDisconnect()
-                                            }
-                                            Button {
-                                                text: qsTr("Simulate Recovery")
-                                                font.pixelSize: 10
-                                                Layout.fillWidth: true
-                                                Layout.preferredHeight: 28
-                                                onClicked: EngineController.simulateInsertRecovery()
-                                            }
+                                            Layout.preferredHeight: 30
+                                            enabled: (EngineController.externalInsertClientName || "").length > 0
+                                            onClicked: EngineController.reconnectExternalInsert()
                                         }
                                     }
                                 }
@@ -2546,8 +2703,8 @@ ApplicationWindow {
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 14
-                                        spacing: 10
+                                        anchors.margins: 12
+                                        spacing: 7
 
                                         // Card Header
                                         RowLayout {
@@ -2564,7 +2721,7 @@ ApplicationWindow {
 
                                         Rectangle {
                                             Layout.fillWidth: true
-                                            height: 40
+                                            height: 34
                                             color: "#07090b"
                                             border.color: "#1d232c"
                                             radius: 3
@@ -2574,7 +2731,10 @@ ApplicationWindow {
                                                 Label { text: qsTr("Reported Latency:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
-                                                    text: EngineController.externalInsertReportedLatency + " smp (" + (EngineController.externalInsertReportedLatency / 48.0).toFixed(2) + " ms)"
+                                                    property double srKhz: Math.max(1.0, EngineController.graphSampleRate / 1000.0)
+                                                    text: (insertControlCenter.insertStatus && insertControlCenter.insertStatus.latencyReported === false)
+                                                          ? qsTr("Not Reported")
+                                                          : (EngineController.externalInsertReportedLatency + " smp (" + (EngineController.externalInsertReportedLatency / srKhz).toFixed(2) + " ms)")
                                                     font.family: "Monospace"
                                                     font.pixelSize: 11
                                                     font.bold: true
@@ -2585,7 +2745,7 @@ ApplicationWindow {
 
                                         Rectangle {
                                             Layout.fillWidth: true
-                                            height: 40
+                                            height: 34
                                             color: "#07090b"
                                             border.color: "#1d232c"
                                             radius: 3
@@ -2607,24 +2767,72 @@ ApplicationWindow {
                                         }
 
                                         Button {
-                                            text: qsTr("CALIBRATE IMPULSE LATENCY NOW")
+                                            text: EngineController.externalInsertCalibrating
+                                                  ? qsTr("MEASURING LIVE ROUND-TRIP IMPULSE...")
+                                                  : qsTr("CALIBRATE IMPULSE LATENCY NOW")
                                             font.bold: true
                                             font.pixelSize: 11
                                             highlighted: true
+                                            enabled: !EngineController.externalInsertCalibrating &&
+                                                     (EngineController.externalInsertState === 3 || EngineController.externalInsertState === 4)
                                             Layout.fillWidth: true
-                                            Layout.preferredHeight: 34
+                                            Layout.preferredHeight: 32
                                             onClicked: EngineController.calibrateInsertLatency()
+                                        }
+
+                                        Label {
+                                            Layout.fillWidth: true
+                                            visible: insertControlCenter.latencyReport && (insertControlCenter.latencyReport.sessionActive || insertControlCenter.latencyReport.hasMeasurement)
+                                            text: {
+                                                var r = insertControlCenter.latencyReport;
+                                                if (!r) return "";
+                                                if (r.hasMeasurement) {
+                                                    return qsTr("Candidate: %1 smp | Jitter: %2 smp | SNR: %3 dB [%4]")
+                                                        .arg(r.recommendedFrames)
+                                                        .arg(r.spreadFrames)
+                                                        .arg(Number(r.peakSnrDb).toFixed(1))
+                                                        .arg(r.confidenceText);
+                                                }
+                                                return r.summary || "";
+                                            }
+                                            font.pixelSize: 10
+                                            color: (insertControlCenter.latencyReport && insertControlCenter.latencyReport.confidenceText === "High") ? "#00E676" : "#FFB300"
+                                            wrapMode: Text.WordWrap
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+                                            visible: insertControlCenter.latencyReport && insertControlCenter.latencyReport.hasMeasurement && !insertControlCenter.latencyReport.confirmed
+                                            Button {
+                                                text: qsTr("Confirm & Apply PDC")
+                                                font.pixelSize: 10
+                                                font.bold: true
+                                                highlighted: true
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 26
+                                                enabled: insertControlCenter.latencyReport && insertControlCenter.latencyReport.confidenceText === "High"
+                                                onClicked: EngineController.confirmRecommendedInsertLatency(false)
+                                            }
+                                            Button {
+                                                text: qsTr("Cancel")
+                                                font.pixelSize: 10
+                                                Layout.preferredWidth: 68
+                                                Layout.preferredHeight: 26
+                                                onClicked: EngineController.cancelInsertLatencyCalibration()
+                                            }
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
-                                            spacing: 4
+                                            spacing: 2
                                             RowLayout {
                                                 Layout.fillWidth: true
                                                 Label { text: qsTr("Delay Compensation Buffer:"); font.pixelSize: 11; color: "#A0AAB2" }
                                                 Item { Layout.fillWidth: true }
                                                 Label {
-                                                    text: EngineController.externalInsertDelayCompensation + " smp (" + (EngineController.externalInsertDelayCompensation / 48.0).toFixed(2) + " ms)"
+                                                    property double srKhz: Math.max(1.0, EngineController.graphSampleRate / 1000.0)
+                                                    text: EngineController.externalInsertDelayCompensation + " smp (" + (EngineController.externalInsertDelayCompensation / srKhz).toFixed(2) + " ms)"
                                                     font.family: "Monospace"
                                                     font.pixelSize: 11
                                                     font.bold: true
@@ -2652,7 +2860,7 @@ ApplicationWindow {
                                                 font.pixelSize: 10
                                                 font.bold: true
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 30
+                                                Layout.preferredHeight: 28
                                                 enabled: EngineController.externalInsertMeasuredLatency >= 0
                                                 onClicked: {
                                                     if (EngineController.externalInsertMeasuredLatency >= 0) {
@@ -2665,14 +2873,14 @@ ApplicationWindow {
                                                 font.pixelSize: 10
                                                 font.bold: true
                                                 Layout.fillWidth: true
-                                                Layout.preferredHeight: 30
+                                                Layout.preferredHeight: 28
                                                 onClicked: EngineController.setInsertDelayCompensation(EngineController.externalInsertReportedLatency)
                                             }
                                             Button {
                                                 text: qsTr("Zero (0)")
                                                 font.pixelSize: 10
                                                 Layout.preferredWidth: 70
-                                                Layout.preferredHeight: 30
+                                                Layout.preferredHeight: 28
                                                 onClicked: EngineController.setInsertDelayCompensation(0)
                                             }
                                         }

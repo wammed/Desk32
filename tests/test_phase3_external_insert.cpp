@@ -117,6 +117,9 @@ private slots:
     // 14. PipeWireInsertTransport loopback/disconnect/mismatch & 2-step latency calibration stability judgment
     void testPipeWireInsertTransportAndTwoStepLatencyCalibration();
 
+    // 15. Live connection enforcement, pipeline bypass sync, isolated probe calibration, reconnect & pw-dump filtering
+    void testLiveTransportEnforcementCalibrationAndReconnect();
+
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
 };
@@ -470,7 +473,7 @@ void TestPhase3ExternalInsert::testPresetManagerXdgPathsAndSerialization() {
 
 void TestPhase3ExternalInsert::testEngineControllerIntegration() {
     EngineController& controller = EngineController::instance();
-    QVERIFY(controller.initialize());
+    QVERIFY(controller.initialize(true));
 
     QSignalSpy insertSpy(&controller, &EngineController::externalInsertStatusChanged);
     QSignalSpy presetSpy(&controller, &EngineController::presetManagementChanged);
@@ -1126,6 +1129,107 @@ void TestPhase3ExternalInsert::testPipeWireInsertTransportAndTwoStepLatencyCalib
     QVERIFY(ctrl.confirmRecommendedInsertLatency());
     QCOMPARE(ctrl.insertDelayCompensation(), 64);
     QCOMPARE(ctrl.getLatencyAlignmentReport()["confirmed"].toBool(), true);
+}
+
+void TestPhase3ExternalInsert::testLiveTransportEnforcementCalibrationAndReconnect()
+{
+    // 1. Live mode (simulationMode == false) with requireLiveTransport == true must NOT fake Connected
+    auto liveTr = std::make_shared<PipeWireInsertTransport>();
+    liveTr->setSimulationMode(false);
+    ExternalInsertBridge strictBridge;
+    strictBridge.setTransport(liveTr);
+    strictBridge.setRequireLiveTransport(true);
+    ExternalPortInfo bogusCfg{"NonExistentHost_XYZ", "bogus:in_1", "bogus:in_2", "bogus:out_1", "bogus:out_2", 48000.0, 256, 0};
+    QVERIFY(!strictBridge.configure(bogusCfg, 48000.0, 256));
+    QCOMPARE(strictBridge.state(), InsertState::HostNotFound);
+    QVERIFY(strictBridge.isBypassed());
+    QVERIFY(!strictBridge.isTransportLiveConnected());
+
+    // 2. pw-dump parser skips desk32-* nodes and orders _2 / _1 naturally to L / R
+    const std::string dumpJson = R"([
+      {"id": 1, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "desk32-insert-send"}}},
+      {"id": 2, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 1, "media.type": "Audio", "port.name": "in_1"}}},
+      {"id": 3, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 1, "media.type": "Audio", "port.name": "in_2"}}},
+      {"id": 4, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 1, "media.type": "Audio", "port.name": "out_1"}}},
+      {"id": 5, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 1, "media.type": "Audio", "port.name": "out_2"}}},
+      {"id": 10, "type": "PipeWire:Interface:Node", "info": {"props": {"node.name": "Carla", "node.rate": "1/48000"}}},
+      {"id": 11, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_in_2"}}},
+      {"id": 12, "type": "PipeWire:Interface:Port", "info": {"direction": "input", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_in_1"}}},
+      {"id": 13, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_out_2"}}},
+      {"id": 14, "type": "PipeWire:Interface:Port", "info": {"direction": "output", "props": {"node.id": 10, "media.type": "Audio", "port.name": "audio_out_1"}}}
+    ])";
+    const auto parsed = ExternalInsertBridge::parsePwDumpPorts(dumpJson, 44100.0, 256);
+    QCOMPARE(parsed.size(), size_t(1));
+    QCOMPARE(parsed[0].clientName, std::string("Carla"));
+    QCOMPARE(parsed[0].sendPortL, std::string("Carla:audio_in_1"));
+    QCOMPARE(parsed[0].sendPortR, std::string("Carla:audio_in_2"));
+    QCOMPARE(parsed[0].returnPortL, std::string("Carla:audio_out_1"));
+    QCOMPARE(parsed[0].returnPortR, std::string("Carla:audio_out_2"));
+    QCOMPARE(parsed[0].sampleRate, 48000.0);
+
+    // 3. EngineController::calibrateInsertLatency() refuses when disconnected,
+    //    measures actual loopback delay through transport (not fake 128) when connected,
+    //    and syncs pipeline node bypass + reconnects cleanly.
+    EngineController& ctrl = EngineController::instance();
+    QVERIFY(ctrl.initialize(true));
+    QVERIFY(ctrl.insertNode()->bridge().requireLiveTransport());
+
+    // Disconnected calibration must NOT fabricate 128 frames
+    ctrl.calibrateInsertLatency();
+    QCOMPARE(ctrl.externalInsertMeasuredLatency(), -1);
+
+    // Connect with 48-frame loopback latency and verify pipeline bypass sync + real probe calibration
+    ctrl.insertTransport()->setSimulationLoopbackLatencyFrames(48);
+    QVERIFY(ctrl.configureExternalInsert("CalibHost", "c:in1", "c:in2", "c:out1", "c:out2", 48000.0, 256, 0));
+    std::vector<float> dummyOut(256 * 2, 0.0f);
+    ctrl.renderOfflineBlock(dummyOut.data(), 256); // Drain SetNodeBypass command on audio pipeline
+    QCOMPARE(ctrl.isDspNodeAppliedBypassed("ExternalInsert"), false);
+
+    ctrl.calibrateInsertLatency();
+    QCOMPARE(ctrl.externalInsertMeasuredLatency(), 48);
+    const QVariantMap rep = ctrl.getLatencyAlignmentReport();
+    QCOMPARE(rep["hasMeasurement"].toBool(), true);
+    QCOMPARE(rep["recommendedFrames"].toLongLong(), qint64(48));
+    QCOMPARE(rep["confidenceText"].toString(), QString("High"));
+    QVERIFY(rep["peakSnrDb"].toDouble() > 18.0);
+    QVERIFY(ctrl.confirmRecommendedInsertLatency(false));
+    QCOMPARE(ctrl.insertDelayCompensation(), 48);
+
+    // Disconnect -> pipeline node bypassed -> reconnect restores connection & pipeline unbypass
+    ctrl.disconnectExternalInsert();
+    QCOMPARE(ctrl.externalInsertStateText(), QString("Disconnected"));
+    ctrl.renderOfflineBlock(dummyOut.data(), 256);
+    QCOMPARE(ctrl.isDspNodeAppliedBypassed("ExternalInsert"), true);
+
+    QVERIFY(ctrl.reconnectExternalInsert());
+    QCOMPARE(ctrl.externalInsertStateText(), QString("Connected"));
+    ctrl.renderOfflineBlock(dummyOut.data(), 256);
+    QCOMPARE(ctrl.isDspNodeAppliedBypassed("ExternalInsert"), false);
+    QCOMPARE(ctrl.externalInsertStateText(), QString("Active"));
+
+    // 4. Regression: RT Audio Thread consumes graph disconnect event first while Active,
+    //    auto-engages Dry bypass, and Control Thread polling MUST still record GraphDisconnect log.
+    QSignalSpy statusSpy(&ctrl, &EngineController::externalInsertStatusChanged);
+    ctrl.insertTransport()->simulateGraphNodeRemoved();
+    ctrl.renderOfflineBlock(dummyOut.data(), 256); // Audio thread runs before Control thread timer
+    QCOMPARE(ctrl.externalInsertStateText(), QString("Disconnected"));
+    QVERIFY(ctrl.isExternalInsertBypassed());
+
+    // Wait for 33ms dspTimer -> pollExternalInsertHealth() to detect RT notice and log GraphDisconnect
+    QTRY_VERIFY_WITH_TIMEOUT(statusSpy.count() > 0, 1000);
+    desk32::core::log::LogService::instance().flush();
+    QVariantMap logFilter;
+    logFilter["category"] = QString("ExternalInsert");
+    const QVariantList logs = desk32::core::log::LogService::instance().fetchLogs(logFilter);
+    bool foundGraphDisconnect = false;
+    for (const QVariant& v : logs) {
+        const QVariantMap row = v.toMap();
+        if (row["operation"].toString() == QString("GraphDisconnect")) {
+            foundGraphDisconnect = true;
+            break;
+        }
+    }
+    QVERIFY(foundGraphDisconnect);
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

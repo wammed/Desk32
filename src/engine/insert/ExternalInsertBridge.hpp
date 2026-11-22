@@ -526,6 +526,12 @@ public:
                         if (okQ && q > 0) bucket.quantum = q;
                         if (okR && r > 0.0) bucket.rate = r;
                     }
+                    if (props.contains("node.rate")) {
+                        const QString nr = props["node.rate"].toString();
+                        bool okR = false;
+                        double r = nr.contains('/') ? nr.section('/', 1, 1).toDouble(&okR) : nr.toDouble(&okR);
+                        if (okR && r > 0.0 && bucket.rate <= 0.0) bucket.rate = r;
+                    }
                     if (props.contains("latency.internal.rate")) {
                         bucket.latency = static_cast<uint32_t>(std::max(0, props["latency.internal.rate"].toInt()));
                         bucket.hasLatency = true;
@@ -571,8 +577,29 @@ public:
             }
         }
 
-        for (const auto& b : nodes) {
+        auto sortPortsNatural = [](std::vector<std::string>& ports) {
+            auto rank = [](const std::string& p) -> int {
+                std::string low = p;
+                for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (low.find("fl") != std::string::npos || low.ends_with("_1") || low.ends_with("_l") || low.ends_with("left")) return 0;
+                if (low.find("fr") != std::string::npos || low.ends_with("_2") || low.ends_with("_r") || low.ends_with("right")) return 1;
+                return 2;
+            };
+            std::stable_sort(ports.begin(), ports.end(), [&](const std::string& a, const std::string& b) {
+                const int ra = rank(a);
+                const int rb = rank(b);
+                if (ra != rb) return ra < rb;
+                return a < b;
+            });
+        };
+
+        for (auto& b : nodes) {
+            if (b.name.rfind("desk32-", 0) == 0 || b.name == "Desk32") {
+                continue;
+            }
             if (b.inPorts.size() >= 2 && b.outPorts.size() >= 2) {
+                sortPortsNatural(b.inPorts);
+                sortPortsNatural(b.outPorts);
                 ExternalPortInfo ep;
                 ep.clientName = b.name;
                 ep.sendPortL = b.inPorts[0];
@@ -601,15 +628,53 @@ public:
         return parsePwDumpPorts(out, currentSampleRate, currentBufferSize);
     }
 
-    /// Simulate disconnect event (e.g. external host crashed or port closed)
+    /// Disconnect external insert (and tear down live transport if attached)
     void handleDisconnect() {
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
-            m_lastError = "External host disconnected or port lost";
+            std::string trDetail;
+            if (m_transport) {
+                trDetail = m_transport->diagnostics().errorDetail;
+                m_transport->disconnect();
+            }
+            m_lastError = trDetail.empty()
+                              ? "External host disconnected or port lost"
+                              : ("External host disconnected: " + trDetail);
         }
+        m_probeActive.store(false, std::memory_order_release);
+        m_rtDisconnectNotice.store(false, std::memory_order_release);
+        m_rtMismatchNotice.store(false, std::memory_order_release);
         m_state.store(InsertState::Disconnected, std::memory_order_release);
         // Activate hardware bypass (or mute/stop depending on DisconnectPolicy in process())
         m_isBypassed.store(true, std::memory_order_release);
+    }
+
+    /// Transition into RateMismatch / BufferMismatch / Error preserving transport diagnostic message
+    void handleTransportMismatch(InsertState mismatchState, const std::string& detail) {
+        {
+            std::lock_guard<std::mutex> lock(m_configMutex);
+            if (m_transport) {
+                m_transport->disconnect();
+            }
+            m_lastError = detail;
+        }
+        m_probeActive.store(false, std::memory_order_release);
+        m_rtDisconnectNotice.store(false, std::memory_order_release);
+        m_rtMismatchNotice.store(false, std::memory_order_release);
+        m_state.store(mismatchState, std::memory_order_release);
+        m_isBypassed.store(true, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool consumeRtDisconnectNotice() noexcept {
+        return m_rtDisconnectNotice.exchange(false, std::memory_order_acq_rel);
+    }
+
+    [[nodiscard]] bool consumeRtMismatchNotice(bool& outIsRate) noexcept {
+        if (m_rtMismatchNotice.exchange(false, std::memory_order_acq_rel)) {
+            outIsRate = m_rtMismatchIsRate.load(std::memory_order_acquire);
+            return true;
+        }
+        return false;
     }
 
     /// Simulate or verify port recovery against live discovered ports
@@ -678,13 +743,18 @@ public:
             if (tr->consumeGraphDisconnectEvent()) {
                 m_state.store(InsertState::Disconnected, std::memory_order_release);
                 m_isBypassed.store(true, std::memory_order_release);
+                m_rtDisconnectNotice.store(true, std::memory_order_release);
             } else if (tr->hasRateMismatch()) {
                 m_state.store(InsertState::RateMismatch, std::memory_order_release);
                 m_isBypassed.store(true, std::memory_order_release);
+                m_rtMismatchIsRate.store(true, std::memory_order_release);
+                m_rtMismatchNotice.store(true, std::memory_order_release);
                 return;
             } else if (tr->hasBufferMismatch()) {
                 m_state.store(InsertState::BufferMismatch, std::memory_order_release);
                 m_isBypassed.store(true, std::memory_order_release);
+                m_rtMismatchIsRate.store(false, std::memory_order_release);
+                m_rtMismatchNotice.store(true, std::memory_order_release);
                 return;
             }
         }
@@ -719,56 +789,171 @@ public:
         }
 
         const uint64_t baseFrame = m_totalFramesProcessed.load(std::memory_order_relaxed);
+        const bool probeActive = m_probeActive.load(std::memory_order_acquire);
         const bool measuring = m_measuringLatency.load(std::memory_order_acquire);
         const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
         const bool hasMock = (m_activeMock && m_activeMock->func);
         IExternalInsertTransport* tr = m_rtTransport.load(std::memory_order_acquire);
         const bool hasLiveTransport = (!hasMock && tr && tr->isConnected());
 
-        if (measuring && (hasMock || hasLiveTransport)) {
-            // Inject impulse before external loopback processor/transport so loopback sees it
+        if (probeActive && (hasMock || hasLiveTransport)) {
+            // Silent isolated impulse probe: prevents program audio from corrupting peak/SNR and keeps monitors silent.
+            std::fill_n(inOutLeft, frames, 0.0);
+            std::fill_n(inOutRight, frames, 0.0);
+            const uint64_t sendFrame = m_probeSendFrame.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; ++i) {
-                if (baseFrame + i == targetFrame) {
-                    inOutLeft[i] += 1.0;
-                    inOutRight[i] += 1.0;
+                if (baseFrame + i == sendFrame) {
+                    inOutLeft[i] = 0.9;
+                    inOutRight[i] = 0.9;
                 }
             }
-        }
 
-        // Execute active mock processor or live transport without any locks or allocations on Audio Thread
-        if (hasMock) {
-            m_activeMock->func(inOutLeft, inOutRight, frames);
-            if (measuring) {
-                // Automatic peak detection on returned buffer after send frame
+            bool processedOk = false;
+            if (hasMock) {
+                m_activeMock->func(inOutLeft, inOutRight, frames);
+                processedOk = true;
+            } else {
+                processedOk = tr->exchangeBlock(inOutLeft, inOutRight, frames);
+            }
+
+            if (processedOk) {
                 for (size_t i = 0; i < frames; ++i) {
-                    if (baseFrame + i > targetFrame &&
-                        (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
-                        recordImpulseReturn(baseFrame + i, LatencySource::SimulatedMock);
-                        break;
+                    const uint64_t f = baseFrame + i;
+                    if (f > sendFrame) {
+                        const double mag = std::max(std::abs(inOutLeft[i]), std::abs(inOutRight[i]));
+                        const double energy = 0.5 * (inOutLeft[i] * inOutLeft[i] + inOutRight[i] * inOutRight[i]);
+                        m_probeEnergySqSum += energy;
+                        ++m_probeSampleCount;
+                        if (mag > m_probePeakAmp) {
+                            m_probePeakAmp = mag;
+                            m_probePeakFrame = f;
+                        }
                     }
                 }
             }
-        } else if (hasLiveTransport) {
-            if (tr->exchangeBlock(inOutLeft, inOutRight, frames) && measuring) {
+
+            // Mute probe audio before sending downstream to speakers/headphones
+            std::fill_n(inOutLeft, frames, 0.0);
+            std::fill_n(inOutRight, frames, 0.0);
+
+            const uint64_t endFrame = baseFrame + frames;
+            const uint64_t captureEnd = m_probeCaptureEndFrame.load(std::memory_order_relaxed);
+            const uint64_t timeoutEnd = m_probeTimeoutFrame.load(std::memory_order_relaxed);
+            if ((endFrame >= captureEnd && m_probePeakAmp >= 0.05) || endFrame >= timeoutEnd) {
+                if (m_probePeakAmp >= 0.05 && m_probePeakFrame > sendFrame) {
+                    const int64_t delayFrames = static_cast<int64_t>(m_probePeakFrame - sendFrame);
+                    const double peakSq = 0.5 * (m_probePeakAmp * m_probePeakAmp);
+                    const double residualSq = std::max(0.0, m_probeEnergySqSum - peakSq);
+                    const double residualCount = static_cast<double>(std::max<uint64_t>(1, m_probeSampleCount > 1 ? (m_probeSampleCount - 1) : 1));
+                    const double noiseFloor = std::max(1e-7, std::sqrt(residualSq / residualCount));
+                    const double snrDb = 20.0 * std::log10(m_probePeakAmp / noiseFloor);
+                    const double sr = std::max(1.0, m_engineSampleRate.load(std::memory_order_acquire));
+
+                    m_probeMeasuredFrames.store(delayFrames, std::memory_order_release);
+                    m_probeMeasuredSnrDb.store(snrDb, std::memory_order_release);
+                    m_measuredLatencyFrames.store(delayFrames, std::memory_order_release);
+                    m_measuredLatencyMs.store((static_cast<double>(delayFrames) / sr) * 1000.0, std::memory_order_release);
+                    m_latencySource.store(hasMock ? LatencySource::SimulatedMock : LatencySource::HardwareMeasured,
+                                          std::memory_order_release);
+                    m_probeTimedOut.store(false, std::memory_order_release);
+                    m_probeResultReady.store(true, std::memory_order_release);
+                } else {
+                    m_probeTimedOut.store(true, std::memory_order_release);
+                    m_probeResultReady.store(false, std::memory_order_release);
+                }
+                m_probeActive.store(false, std::memory_order_release);
+            }
+        } else {
+            if (measuring && (hasMock || hasLiveTransport)) {
+                // Inject impulse before external loopback processor/transport so loopback sees it
                 for (size_t i = 0; i < frames; ++i) {
-                    if (baseFrame + i > targetFrame &&
-                        (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
-                        recordImpulseReturn(baseFrame + i, LatencySource::HardwareMeasured);
-                        break;
+                    if (baseFrame + i == targetFrame) {
+                        inOutLeft[i] += 1.0;
+                        inOutRight[i] += 1.0;
                     }
                 }
             }
-        } else if (measuring) {
-            // Legacy manual mode (no active processor attached): inject after dry check
-            for (size_t i = 0; i < frames; ++i) {
-                if (baseFrame + i == targetFrame) {
-                    inOutLeft[i] += 1.0;
-                    inOutRight[i] += 1.0;
+
+            // Execute active mock processor or live transport without any locks or allocations on Audio Thread
+            if (hasMock) {
+                m_activeMock->func(inOutLeft, inOutRight, frames);
+                if (measuring) {
+                    // Automatic peak detection on returned buffer after send frame
+                    for (size_t i = 0; i < frames; ++i) {
+                        if (baseFrame + i > targetFrame &&
+                            (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
+                            recordImpulseReturn(baseFrame + i, LatencySource::SimulatedMock);
+                            break;
+                        }
+                    }
+                }
+            } else if (hasLiveTransport) {
+                if (tr->exchangeBlock(inOutLeft, inOutRight, frames) && measuring) {
+                    for (size_t i = 0; i < frames; ++i) {
+                        if (baseFrame + i > targetFrame &&
+                            (std::abs(inOutLeft[i]) >= 0.5 || std::abs(inOutRight[i]) >= 0.5)) {
+                            recordImpulseReturn(baseFrame + i, LatencySource::HardwareMeasured);
+                            break;
+                        }
+                    }
+                }
+            } else if (measuring) {
+                // Legacy manual mode (no active processor attached): inject after dry check
+                for (size_t i = 0; i < frames; ++i) {
+                    if (baseFrame + i == targetFrame) {
+                        inOutLeft[i] += 1.0;
+                        inOutRight[i] += 1.0;
+                    }
                 }
             }
         }
 
         m_totalFramesProcessed.store(baseFrame + frames, std::memory_order_release);
+    }
+
+    /// Initiate RT-safe isolated hardware impulse probe (for live PipeWire/external host latency measurement)
+    void startHardwareProbe(size_t captureWindowFrames = 8192, size_t maxTimeoutFrames = 48000) noexcept {
+        m_probeActive.store(false, std::memory_order_release);
+        m_probeResultReady.store(false, std::memory_order_release);
+        m_probeTimedOut.store(false, std::memory_order_release);
+        m_probeMeasuredFrames.store(-1, std::memory_order_release);
+        m_probeMeasuredSnrDb.store(0.0, std::memory_order_release);
+        m_probePeakAmp = 0.0;
+        m_probePeakFrame = 0;
+        m_probeEnergySqSum = 0.0;
+        m_probeSampleCount = 0;
+        const uint64_t curFrames = m_totalFramesProcessed.load(std::memory_order_acquire);
+        const uint64_t sendAt = curFrames + 64;
+        m_probeSendFrame.store(sendAt, std::memory_order_release);
+        m_probeCaptureEndFrame.store(sendAt + std::max<uint64_t>(512, captureWindowFrames), std::memory_order_release);
+        m_probeTimeoutFrame.store(sendAt + std::max<uint64_t>(captureWindowFrames, maxTimeoutFrames), std::memory_order_release);
+        m_probeActive.store(true, std::memory_order_release);
+    }
+
+    void cancelHardwareProbe() noexcept {
+        m_probeActive.store(false, std::memory_order_release);
+        m_probeResultReady.store(false, std::memory_order_release);
+        m_probeTimedOut.store(false, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isHardwareProbeActive() const noexcept {
+        return m_probeActive.load(std::memory_order_acquire);
+    }
+
+    bool pollHardwareProbe(int64_t& outFrames, double& outSnrDb, bool& outTimedOut) noexcept {
+        if (m_probeTimedOut.exchange(false, std::memory_order_acq_rel)) {
+            outTimedOut = true;
+            outFrames = -1;
+            outSnrDb = 0.0;
+            return true;
+        }
+        if (m_probeResultReady.exchange(false, std::memory_order_acq_rel)) {
+            outTimedOut = false;
+            outFrames = m_probeMeasuredFrames.load(std::memory_order_acquire);
+            outSnrDb = m_probeMeasuredSnrDb.load(std::memory_order_acquire);
+            return true;
+        }
+        return false;
     }
 
     /// Initiate round-trip latency measurement using an impulse signal
@@ -857,12 +1042,27 @@ private:
     std::atomic<bool> m_measuringLatency{false};
     std::atomic<uint64_t> m_impulseSendFrame{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};
+    std::atomic<bool> m_probeActive{false};
+    std::atomic<bool> m_probeResultReady{false};
+    std::atomic<bool> m_probeTimedOut{false};
+    std::atomic<uint64_t> m_probeSendFrame{0};
+    std::atomic<uint64_t> m_probeCaptureEndFrame{0};
+    std::atomic<uint64_t> m_probeTimeoutFrame{0};
+    std::atomic<int64_t> m_probeMeasuredFrames{-1};
+    std::atomic<double> m_probeMeasuredSnrDb{0.0};
+    double m_probePeakAmp{0.0};
+    uint64_t m_probePeakFrame{0};
+    double m_probeEnergySqSum{0.0};
+    uint64_t m_probeSampleCount{0};
     std::atomic<int64_t> m_measuredLatencyFrames{-1};
     std::atomic<double> m_measuredLatencyMs{-1.0};
     std::atomic<uint32_t> m_reportedLatencyFrames{0};
     std::atomic<bool> m_latencyReported{true};
     std::atomic<DisconnectPolicy> m_disconnectPolicy{DisconnectPolicy::AutoBypass};
     std::atomic<bool> m_stopPlaybackRequested{false};
+    std::atomic<bool> m_rtDisconnectNotice{false};
+    std::atomic<bool> m_rtMismatchNotice{false};
+    std::atomic<bool> m_rtMismatchIsRate{false};
     std::atomic<int64_t> m_delayCompensationFrames{-1};
     std::atomic<LatencySource> m_latencySource{LatencySource::Uncalibrated};
 };

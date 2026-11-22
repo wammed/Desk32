@@ -240,11 +240,17 @@ bool EngineController::initialize(bool offlineMode) {
   m_uiListeningCorrection.applyPreset("Monitor Flat");
 
   // Phase 3: External Insert Node (Default to OFF / Bypassed) + PipeWire Transport
+  m_calActive = false;
+  m_calCompletedProbes = 0;
+  if (m_calProbeTimer) {
+    m_calProbeTimer->stop();
+  }
   m_insertNode = std::make_shared<engine::insert::ExternalInsertNode>(
       "External Insert", engine::pipeline::NodeAffiliation::RenderCommon);
   m_insertTransport = std::make_shared<engine::insert::PipeWireInsertTransport>();
   m_insertTransport->setSimulationMode(offlineMode);
   m_insertNode->bridge().setTransport(m_insertTransport);
+  m_insertNode->bridge().setRequireLiveTransport(true);
   m_insertNode->setBypassed(true);
 
   // 3. Construct Master and Listening Chains with isolated DSP nodes (P0-08,
@@ -712,6 +718,7 @@ bool EngineController::initialize(bool offlineMode) {
   connect(dspTimer, &QTimer::timeout, this, [this]() {
     emit dspTelemetryChanged();
     emit diagnosticsChanged();
+    pollExternalInsertHealth();
     if (++m_healthCheckTick >= 30) { // ~1 second interval
       m_healthCheckTick = 0;
       checkAudioHealthAndGraph();
@@ -1098,9 +1105,19 @@ void EngineController::checkAudioHealthAndGraph() {
         QString(), QString(), log::ErrorCode::LogQueueOverflow, 0.0);
   }
 
-  // 5. External Insert DisconnectPolicy::StopPlayback enforcement
-  if (m_insertNode && m_insertNode->bridge().stopPlaybackRequested()) {
-    m_insertNode->bridge().clearStopPlaybackRequested();
+  // 5 & 6. External Insert DisconnectPolicy::StopPlayback & live graph disconnect/mismatch polling (§8.3)
+  pollExternalInsertHealth();
+}
+
+void EngineController::pollExternalInsertHealth() {
+  if (!m_insertNode) {
+    return;
+  }
+
+  auto &bridge = m_insertNode->bridge();
+
+  if (bridge.stopPlaybackRequested()) {
+    bridge.clearStopPlaybackRequested();
     if (m_deckManager) {
       for (char cid : {'A', 'B', 'C', 'D'}) {
         if (auto *d = m_deckManager->deck(cid)) {
@@ -1114,41 +1131,77 @@ void EngineController::checkAudioHealthAndGraph() {
         QStringLiteral("Warning"),
         QStringLiteral("External Insert disconnected with StopPlayback policy: stopped active deck playback."),
         QStringLiteral("InsertBridge"),
-        QString::fromStdString(m_insertNode->bridge().config().clientName),
+        QString::fromStdString(bridge.config().clientName),
         QStringLiteral("{}"), QString(), QString(),
         log::ErrorCode::ExternalHostFailed, 0.0);
     emit externalInsertStatusChanged();
     emit diagnosticsChanged();
   }
 
-  // 6. Poll live External Insert transport mismatch / graph disconnect events (§8.3)
-  if (m_insertNode && m_insertTransport) {
-    const auto st = m_insertNode->bridge().state();
-    if (st == engine::insert::InsertState::Connected ||
-        st == engine::insert::InsertState::Active) {
-      if (m_insertTransport->consumeGraphDisconnectEvent()) {
-        m_insertNode->bridge().handleDisconnect();
-        m_insertNode->setBypassed(true);
-        m_insertBypassed.store(true, std::memory_order_relaxed);
-        log::LogService::instance().log(
-            QStringLiteral("ExternalInsert"), QStringLiteral("GraphDisconnect"),
-            QStringLiteral("Warning"),
-            QStringLiteral("PipeWire external insert node/port removed; auto-bypassed."),
-            QStringLiteral("InsertBridge"),
-            QString::fromStdString(m_insertNode->bridge().config().clientName),
-            QStringLiteral("{}"), QString(), QString(),
-            log::ErrorCode::ExternalHostFailed, 0.0);
-        emit externalInsertStatusChanged();
-        emit diagnosticsChanged();
-      } else if (m_insertTransport->hasRateMismatch() ||
-                 m_insertTransport->hasBufferMismatch()) {
-        m_insertNode->bridge().handleDisconnect();
-        m_insertNode->setBypassed(true);
-        m_insertBypassed.store(true, std::memory_order_relaxed);
-        emit externalInsertStatusChanged();
-        emit diagnosticsChanged();
-      }
+  if (!m_insertTransport) {
+    return;
+  }
+
+  const auto st = bridge.state();
+  const bool rtDisconnected = bridge.consumeRtDisconnectNotice();
+  bool rtMismatchIsRate = false;
+  const bool rtMismatch = bridge.consumeRtMismatchNotice(rtMismatchIsRate);
+
+  const bool activeOrConnected =
+      (st == engine::insert::InsertState::Connected ||
+       st == engine::insert::InsertState::Active);
+
+  if (rtDisconnected || (activeOrConnected && m_insertTransport->consumeGraphDisconnectEvent())) {
+    if (m_calActive) {
+      m_calActive = false;
+      if (m_calProbeTimer) m_calProbeTimer->stop();
+      bridge.cancelHardwareProbe();
+      bridge.cancelLatencyCalibrationSession();
     }
+    bridge.handleDisconnect();
+    syncExternalInsertBypassToPipeline(true);
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"), QStringLiteral("GraphDisconnect"),
+        QStringLiteral("Warning"),
+        QString::fromStdString(bridge.lastError()),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(bridge.config().clientName),
+        QStringLiteral("{}"), QString(), QString(),
+        log::ErrorCode::ExternalHostFailed, 0.0);
+    emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
+  } else if (rtMismatch ||
+             (activeOrConnected &&
+              (m_insertTransport->hasRateMismatch() ||
+               m_insertTransport->hasBufferMismatch()))) {
+    if (m_calActive) {
+      m_calActive = false;
+      if (m_calProbeTimer) m_calProbeTimer->stop();
+      bridge.cancelHardwareProbe();
+      bridge.cancelLatencyCalibrationSession();
+    }
+    const bool isRate = rtMismatch ? rtMismatchIsRate : m_insertTransport->hasRateMismatch();
+    const auto diag = m_insertTransport->diagnostics();
+    const std::string detail = diag.errorDetail.empty()
+                                   ? (isRate ? "PipeWire insert sample rate mismatch"
+                                             : "PipeWire insert buffer quantum mismatch")
+                                   : diag.errorDetail;
+    bridge.handleTransportMismatch(
+        isRate ? engine::insert::InsertState::RateMismatch
+               : engine::insert::InsertState::BufferMismatch,
+        detail);
+    syncExternalInsertBypassToPipeline(true);
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"),
+        isRate ? QStringLiteral("RateMismatch") : QStringLiteral("BufferMismatch"),
+        QStringLiteral("Warning"),
+        QString::fromStdString(detail),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(bridge.config().clientName),
+        QStringLiteral("{}"), QString(), QString(),
+        log::ErrorCode::ExternalHostFailed, 0.0);
+    emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
   }
 }
 
@@ -1313,6 +1366,18 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
     }
     m_gainSmootherL.configure(targetRateD, 15.0);
     m_gainSmootherR.configure(targetRateD, 15.0);
+    if (m_insertNode) {
+      const auto st = m_insertNode->bridge().state();
+      if ((st == engine::insert::InsertState::Connected ||
+           st == engine::insert::InsertState::Active) &&
+          std::abs(m_insertNode->bridge().config().sampleRate - targetRateD) > 0.5) {
+        m_insertNode->bridge().handleTransportMismatch(
+            engine::insert::InsertState::RateMismatch,
+            "Sample rate mismatch after graph rate change");
+        syncExternalInsertBypassToPipeline(true);
+        emit externalInsertStatusChanged();
+      }
+    }
     emit graphSampleRateChanged(targetRateD);
     emit diagnosticsChanged();
     log::LogService::instance().log(
@@ -1353,6 +1418,18 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
   }
   m_gainSmootherL.configure(sampleRate, 15.0);
   m_gainSmootherR.configure(sampleRate, 15.0);
+  if (m_insertNode) {
+    const auto st = m_insertNode->bridge().state();
+    if ((st == engine::insert::InsertState::Connected ||
+         st == engine::insert::InsertState::Active) &&
+        std::abs(m_insertNode->bridge().config().sampleRate - sampleRate) > 0.5) {
+      m_insertNode->bridge().handleTransportMismatch(
+          engine::insert::InsertState::RateMismatch,
+          "Sample rate mismatch after fixed graph rate change");
+      syncExternalInsertBypassToPipeline(true);
+      emit externalInsertStatusChanged();
+    }
+  }
   emit graphSampleRateChanged(sampleRate);
   emit diagnosticsChanged();
   log::LogService::instance().log(
@@ -1467,6 +1544,18 @@ bool EngineController::setOutputBufferFrames(int bufferFrames) {
     return false;
   const bool ok = m_audioControlManager->applyLatencySetting(
       static_cast<uint32_t>(bufferFrames), graphSampleRate());
+  if (ok && m_insertNode) {
+    const auto st = m_insertNode->bridge().state();
+    if ((st == engine::insert::InsertState::Connected ||
+         st == engine::insert::InsertState::Active) &&
+        m_insertNode->bridge().config().bufferSize != static_cast<size_t>(bufferFrames)) {
+      m_insertNode->bridge().handleTransportMismatch(
+          engine::insert::InsertState::BufferMismatch,
+          "Buffer size mismatch after output quantum change");
+      syncExternalInsertBypassToPipeline(true);
+      emit externalInsertStatusChanged();
+    }
+  }
   emit diagnosticsChanged();
   return ok;
 }
@@ -1899,6 +1988,12 @@ QString EngineController::externalInsertReturnPortR() const {
   QString p =
       QString::fromStdString(m_insertNode->bridge().config().returnPortR);
   return p.isEmpty() ? QStringLiteral("carla:audio_out_2") : p;
+}
+
+bool EngineController::isExternalInsertSimulationMode() const noexcept {
+  if (!m_insertTransport)
+    return false;
+  return m_insertTransport->diagnostics().simulationMode;
 }
 
 bool EngineController::isRenderIdle() const { return m_renderEngine.isIdle(); }
@@ -3963,11 +4058,42 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
 // Phase 3: External Insert Host Operations (Section 6.0)
 // =========================================================================
 
+void EngineController::syncExternalInsertBypassToPipeline(bool bypass) {
+  m_insertBypassed.store(bypass, std::memory_order_relaxed);
+  if (m_insertNode) {
+    m_insertNode->setBypassed(bypass);
+  }
+  if (m_pipeline) {
+    uint8_t chain = 0, idx = 0;
+    if (findDspNode(QStringLiteral("ExternalInsert"), chain, idx)) {
+      engine::dsp::DspCommand cmd;
+      cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
+      cmd.subIndex = chain;
+      cmd.index = idx;
+      cmd.boolFlag1 = bypass ? 1 : 0;
+      m_pipeline->paramQueue().push(cmd);
+    }
+  }
+}
+
 QVariantList EngineController::discoverExternalInsertPorts() const {
   QVariantList out;
   const double sr = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
-  const size_t bs = m_audioOutput ? m_audioOutput->diagnostics().bufferFrames : 256;
-  const auto ports = engine::insert::ExternalInsertBridge::discoverPorts(sr, bs);
+  size_t bs = 256;
+  if (m_audioOutput) {
+    const auto diag = m_audioOutput->diagnostics();
+    bs = (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum
+                                      : (diag.bufferFrames > 0 ? diag.bufferFrames : 256);
+  }
+
+  std::vector<engine::insert::ExternalPortInfo> ports;
+  if (m_insertTransport && !m_insertTransport->diagnostics().simulationMode) {
+    ports = engine::insert::PipeWireInsertTransport::discoverHosts(sr, bs);
+  }
+  if (ports.empty()) {
+    ports = engine::insert::ExternalInsertBridge::discoverPorts(sr, bs);
+  }
+
   for (const auto &p : ports) {
     QVariantMap m;
     m["clientName"] = QString::fromStdString(p.clientName);
@@ -4003,10 +4129,26 @@ bool EngineController::configureExternalInsertWithMetadata(
   if (!m_insertNode)
     return false;
 
+  if (m_calActive) {
+    m_calActive = false;
+    if (m_calProbeTimer) m_calProbeTimer->stop();
+    m_insertNode->bridge().cancelHardwareProbe();
+    m_insertNode->bridge().cancelLatencyCalibrationSession();
+  }
+
   double sRate = (sampleRate > 0.0)
                      ? sampleRate
                      : (m_pipeline ? m_pipeline->graphSampleRate() : 48000.0);
-  size_t bSize = (bufferSize > 0) ? static_cast<size_t>(bufferSize) : 256;
+  size_t activeQuantum = 256;
+  if (m_audioOutput) {
+    const auto diag = m_audioOutput->diagnostics();
+    if (diag.negotiatedQuantum > 0) {
+      activeQuantum = diag.negotiatedQuantum;
+    } else if (diag.bufferFrames > 0) {
+      activeQuantum = diag.bufferFrames;
+    }
+  }
+  size_t bSize = (bufferSize > 0) ? static_cast<size_t>(bufferSize) : activeQuantum;
 
   engine::insert::ExternalPortInfo info{
       clientName.toStdString(),
@@ -4024,8 +4166,8 @@ bool EngineController::configureExternalInsertWithMetadata(
 
   bool ok = m_insertNode->bridge().configure(info, sRate, bSize);
   if (ok) {
-    m_insertNode->setBypassed(false);
-    m_insertBypassed.store(false, std::memory_order_relaxed);
+    syncExternalInsertBypassToPipeline(false);
+    const auto trDiag = m_insertNode->bridge().transportDiagnostics();
     QJsonObject det;
     det.insert(QStringLiteral("host_name"), clientName);
     det.insert(QStringLiteral("plugin_id"),
@@ -4042,16 +4184,23 @@ bool EngineController::configureExternalInsertWithMetadata(
     det.insert(QStringLiteral("latency_source"),
                latencyReported ? QStringLiteral("host_reported")
                                : QStringLiteral("not_reported"));
+    det.insert(QStringLiteral("transport_simulation_mode"), trDiag.simulationMode);
+    det.insert(QStringLiteral("transport_active_links"),
+               static_cast<int>(trDiag.activeLinksCreated));
     log::LogService::instance().log(
         "ExternalInsert", "Configure", "Success",
         QString("Connected external insert host '%1' [Send: %2/%3, Return: "
-                "%4/%5, Latency: %6]")
-            .arg(clientName, sendL, sendR, returnL, returnR,
-                 latencyReported ? (QString::number(reportedLatencyFrames) + " frames")
+                "%4/%5, Links: %6, Mode: %7, Latency: %8]")
+            .arg(clientName, sendL, sendR, returnL, returnR)
+            .arg(trDiag.activeLinksCreated)
+            .arg(trDiag.simulationMode ? QStringLiteral("Simulation")
+                                       : QStringLiteral("LivePipeWire"))
+            .arg(latencyReported ? (QString::number(reportedLatencyFrames) + " frames")
                                  : QStringLiteral("Not Reported")),
         "InsertBridge", clientName,
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
   } else {
+    syncExternalInsertBypassToPipeline(true);
     QJsonObject det;
     det.insert(QStringLiteral("host_name"), clientName);
     det.insert(QStringLiteral("stage"), QStringLiteral("bridge_configure"));
@@ -4115,19 +4264,7 @@ int EngineController::externalInsertDisconnectPolicy() const noexcept {
 void EngineController::setExternalInsertBypass(bool bypass) {
   if (!m_insertNode)
     return;
-  m_insertBypassed.store(bypass, std::memory_order_relaxed);
-  m_insertNode->setBypassed(bypass);
-  if (m_pipeline) {
-    uint8_t chain = 0, idx = 0;
-    if (findDspNode(QStringLiteral("ExternalInsert"), chain, idx)) {
-      engine::dsp::DspCommand cmd;
-      cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
-      cmd.subIndex = chain;
-      cmd.index = idx;
-      cmd.boolFlag1 = bypass ? 1 : 0;
-      m_pipeline->paramQueue().push(cmd);
-    }
-  }
+  syncExternalInsertBypassToPipeline(bypass);
   log::LogService::instance().log(
       "ExternalInsert", "SetBypass", "Success",
       bypass ? "External insert bypassed (Dry)."
@@ -4152,19 +4289,161 @@ void EngineController::triggerInsertLatencyMeasurement() {
 void EngineController::calibrateInsertLatency() {
   if (!m_insertNode)
     return;
-  triggerInsertLatencyMeasurement();
-  uint64_t sendFrame = m_insertNode->bridge().impulseSendFrame();
-  uint32_t repLat = m_insertNode->bridge().reportedLatencyFrames();
-  uint64_t delta = (repLat > 0) ? static_cast<uint64_t>(repLat) : 128ULL;
-  uint64_t returnFrame = sendFrame + delta;
-  m_insertNode->bridge().recordImpulseReturn(
-      returnFrame, engine::insert::LatencySource::SimulatedMock);
+
+  auto &bridge = m_insertNode->bridge();
+  const auto st = bridge.state();
+  if ((st != engine::insert::InsertState::Connected &&
+       st != engine::insert::InsertState::Active) ||
+      !bridge.isTransportLiveConnected()) {
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
+        QStringLiteral("Failed"),
+        QStringLiteral("Cannot calibrate latency: external insert host is not connected."),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(bridge.config().clientName),
+        QStringLiteral("{}"), QString(), QString(),
+        log::ErrorCode::ExternalHostFailed, 0.0);
+    emit externalInsertStatusChanged();
+    return;
+  }
+
+  if (m_calActive) {
+    return;
+  }
+
+  m_calRestoreBypass = m_insertNode->isBypassed();
+  if (m_calRestoreBypass) {
+    syncExternalInsertBypassToPipeline(false);
+  }
+
+  bridge.beginLatencyCalibrationSession();
+  m_calTargetProbes = 3;
+  m_calCompletedProbes = 0;
+  m_calActive = true;
+
+  // In headless/offline simulation mode, PipeWireAudioOutput's real-time thread is not running,
+  // so drive the isolated probe synchronously through ExternalInsertBridge::process() -> PipeWireInsertTransport.
+  if (m_audioOutput && m_audioOutput->isOfflineSimulationMode()) {
+    const size_t blockFrames = std::max<size_t>(64, bridge.config().bufferSize > 0 ? bridge.config().bufferSize : 256);
+    std::vector<double> bufL(blockFrames, 0.0);
+    std::vector<double> bufR(blockFrames, 0.0);
+    for (uint32_t p = 0; p < m_calTargetProbes; ++p) {
+      bridge.startHardwareProbe(4096, 16384);
+      int64_t frames = -1;
+      double snrDb = 0.0;
+      bool timedOut = false;
+      for (int iter = 0; iter < 128; ++iter) {
+        std::fill(bufL.begin(), bufL.end(), 0.0);
+        std::fill(bufR.begin(), bufR.end(), 0.0);
+        bridge.process(bufL.data(), bufR.data(), blockFrames);
+        if (bridge.pollHardwareProbe(frames, snrDb, timedOut)) {
+          break;
+        }
+      }
+      if (!timedOut && frames >= 0) {
+        recordInsertLatencyCalibrationSample(frames, snrDb);
+      }
+    }
+    m_calActive = false;
+    if (m_calRestoreBypass) {
+      syncExternalInsertBypassToPipeline(true);
+    }
+    const auto cand = bridge.latencyCalibrationCandidate();
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
+        cand.hasMeasurement ? QStringLiteral("Success") : QStringLiteral("Failed"),
+        QString::fromStdString(cand.summary),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(bridge.config().clientName));
+    emit externalInsertStatusChanged();
+    return;
+  }
+
+  // Live PipeWire graph mode: start non-blocking hardware impulse probes on the active audio thread
+  bridge.startHardwareProbe(8192, 48000);
+  if (!m_calProbeTimer) {
+    m_calProbeTimer = new QTimer(this);
+    m_calProbeTimer->setInterval(25);
+    connect(m_calProbeTimer, &QTimer::timeout, this,
+            &EngineController::pollHardwareCalibrationProbe);
+  }
+  m_calProbeTimer->start();
   log::LogService::instance().log(
-      "ExternalInsert", "CalibrateLatency", "Simulated",
-      "Calibrated latency using simulated mock loopback (NOT physical hardware "
-      "measurement)",
-      "InsertBridge",
-      QString::fromStdString(m_insertNode->bridge().config().clientName));
+      QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
+      QStringLiteral("Info"),
+      QStringLiteral("Started 3-sample live PipeWire hardware round-trip latency calibration."),
+      QStringLiteral("InsertBridge"),
+      QString::fromStdString(bridge.config().clientName));
+  emit externalInsertStatusChanged();
+}
+
+void EngineController::pollHardwareCalibrationProbe() {
+  if (!m_calActive || !m_insertNode) {
+    if (m_calProbeTimer) m_calProbeTimer->stop();
+    m_calActive = false;
+    return;
+  }
+
+  auto &bridge = m_insertNode->bridge();
+  int64_t frames = -1;
+  double snrDb = 0.0;
+  bool timedOut = false;
+  if (!bridge.pollHardwareProbe(frames, snrDb, timedOut)) {
+    return;
+  }
+
+  if (timedOut || frames < 0) {
+    if (m_calProbeTimer) m_calProbeTimer->stop();
+    m_calActive = false;
+    if (m_calRestoreBypass) {
+      syncExternalInsertBypassToPipeline(true);
+    }
+    log::LogService::instance().log(
+        QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
+        QStringLiteral("Failed"),
+        QStringLiteral("Hardware latency probe timed out: no return impulse received from external host."),
+        QStringLiteral("InsertBridge"),
+        QString::fromStdString(bridge.config().clientName),
+        QStringLiteral("{}"), QString(), QString(),
+        log::ErrorCode::ExternalHostFailed, 0.0);
+    emit externalInsertStatusChanged();
+    return;
+  }
+
+  recordInsertLatencyCalibrationSample(frames, snrDb);
+  ++m_calCompletedProbes;
+  if (m_calCompletedProbes < m_calTargetProbes) {
+    bridge.startHardwareProbe(8192, 48000);
+    emit externalInsertStatusChanged();
+    return;
+  }
+
+  if (m_calProbeTimer) m_calProbeTimer->stop();
+  m_calActive = false;
+  if (m_calRestoreBypass) {
+    syncExternalInsertBypassToPipeline(true);
+  }
+  const auto cand = bridge.latencyCalibrationCandidate();
+  QJsonObject det;
+  det.insert(QStringLiteral("recommended_frames"), static_cast<qint64>(cand.recommendedFrames));
+  det.insert(QStringLiteral("spread_frames"), static_cast<qint64>(cand.spreadFrames));
+  det.insert(QStringLiteral("peak_snr_db"), cand.peakSnrDb);
+  det.insert(QStringLiteral("confidence"),
+             QString::fromUtf8(engine::insert::ExternalInsertBridge::latencyConfidenceToString(cand.confidence)));
+  det.insert(QStringLiteral("sample_count"), static_cast<int>(cand.sampleCount));
+  log::LogService::instance().log(
+      QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
+      cand.confidence == engine::insert::LatencyConfidence::High
+          ? QStringLiteral("Success")
+          : QStringLiteral("Warning"),
+      QString("Hardware round-trip latency calibration completed: %1 frames (spread %2, SNR %3 dB, %4)")
+          .arg(cand.recommendedFrames)
+          .arg(cand.spreadFrames)
+          .arg(cand.peakSnrDb, 0, 'f', 1)
+          .arg(QString::fromUtf8(engine::insert::ExternalInsertBridge::latencyConfidenceToString(cand.confidence))),
+      QStringLiteral("InsertBridge"),
+      QString::fromStdString(bridge.config().clientName),
+      QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
   emit externalInsertStatusChanged();
 }
 
@@ -4263,6 +4542,14 @@ bool EngineController::confirmRecommendedInsertLatency(bool allowOverrideUnsafe)
 void EngineController::cancelInsertLatencyCalibration() {
   if (!m_insertNode)
     return;
+  if (m_calActive) {
+    m_calActive = false;
+    if (m_calProbeTimer) m_calProbeTimer->stop();
+    m_insertNode->bridge().cancelHardwareProbe();
+    if (m_calRestoreBypass) {
+      syncExternalInsertBypassToPipeline(true);
+    }
+  }
   m_insertNode->bridge().cancelLatencyCalibrationSession();
   emit externalInsertStatusChanged();
 }
@@ -4348,14 +4635,51 @@ QVariantMap EngineController::getExternalInsertStatus() const {
 void EngineController::disconnectExternalInsert() {
   if (!m_insertNode)
     return;
+  if (m_calActive) {
+    m_calActive = false;
+    if (m_calProbeTimer) m_calProbeTimer->stop();
+    m_insertNode->bridge().cancelHardwareProbe();
+    m_insertNode->bridge().cancelLatencyCalibrationSession();
+  }
   m_insertNode->bridge().handleDisconnect();
-  m_insertNode->setBypassed(true);
+  syncExternalInsertBypassToPipeline(true);
   log::LogService::instance().log(
       "ExternalInsert", "Disconnect", "Success",
       "External insert host disconnected by user.", "InsertBridge",
       QString::fromStdString(m_insertNode->bridge().config().clientName));
   emit externalInsertStatusChanged();
   emit diagnosticsChanged();
+}
+
+bool EngineController::reconnectExternalInsert() {
+  if (!m_insertNode)
+    return false;
+  const auto cfg = m_insertNode->bridge().config();
+  if (cfg.clientName.empty()) {
+    return false;
+  }
+  const double sr = m_pipeline ? m_pipeline->graphSampleRate() : cfg.sampleRate;
+  int bs = static_cast<int>(cfg.bufferSize);
+  if (m_audioOutput) {
+    const auto diag = m_audioOutput->diagnostics();
+    if (diag.negotiatedQuantum > 0) {
+      bs = static_cast<int>(diag.negotiatedQuantum);
+    } else if (diag.bufferFrames > 0) {
+      bs = static_cast<int>(diag.bufferFrames);
+    }
+  }
+  return configureExternalInsertWithMetadata(
+      QString::fromStdString(cfg.clientName),
+      QString::fromStdString(cfg.sendPortL),
+      QString::fromStdString(cfg.sendPortR),
+      QString::fromStdString(cfg.returnPortL),
+      QString::fromStdString(cfg.returnPortR),
+      sr, bs,
+      static_cast<int>(cfg.reportedLatencyFrames),
+      cfg.latencyReported,
+      QString::fromStdString(cfg.pluginName),
+      QString::fromStdString(cfg.pluginUri),
+      QString::fromStdString(cfg.hostPresetReference));
 }
 
 void EngineController::resetInsertXRuns() {
