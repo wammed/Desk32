@@ -351,9 +351,7 @@ std::vector<ExternalPortInfo> PipeWireInsertTransport::discoverHosts(double defa
 }
 
 PipeWireInsertTransport::PipeWireInsertTransport()
-    : m_simDelayL(RING_CAPACITY_FRAMES, 0.0)
-    , m_simDelayR(RING_CAPACITY_FRAMES, 0.0)
-    , m_coreListener(std::make_unique<struct spa_hook>())
+    : m_coreListener(std::make_unique<struct spa_hook>())
     , m_registryListener(std::make_unique<struct spa_hook>())
     , m_sendListener(std::make_unique<struct spa_hook>())
     , m_returnListener(std::make_unique<struct spa_hook>())
@@ -371,47 +369,18 @@ bool PipeWireInsertTransport::configureAndConnect(const ExternalPortInfo& target
                                                   size_t engineBufferSize)
 {
     disconnect();
+    resetCommonTransportState(target, engineSampleRate, engineBufferSize);
 
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_targetConfig = target;
-        m_expectedSampleRate = engineSampleRate > 0.0 ? engineSampleRate : 48000.0;
-        m_expectedBufferSize = engineBufferSize > 0 ? engineBufferSize : 256;
-        m_errorDetail.clear();
         m_nodesById.clear();
         m_portsById.clear();
         m_watchedIds.clear();
         m_syncDone = false;
     }
 
-    m_sendRing.fullReset();
-    m_returnRing.fullReset();
-    std::fill(m_simDelayL.begin(), m_simDelayL.end(), 0.0);
-    std::fill(m_simDelayR.begin(), m_simDelayR.end(), 0.0);
-    m_simWritePos = 0;
-
-    m_rateMismatch.store(false, std::memory_order_release);
-    m_bufferMismatch.store(false, std::memory_order_release);
-    m_graphDisconnected.store(false, std::memory_order_release);
-    m_resolvedTargetPorts.store(0, std::memory_order_release);
-    m_activeLinksCreated.store(0, std::memory_order_release);
-    m_sendBlocksWritten.store(0, std::memory_order_release);
-    m_returnBlocksRead.store(0, std::memory_order_release);
-    m_xrunOrUnderruns.store(0, std::memory_order_release);
-    m_negotiatedSendRate.store(0, std::memory_order_release);
-    m_negotiatedReturnRate.store(0, std::memory_order_release);
-    m_negotiatedQuantum.store(0, std::memory_order_release);
-    m_sendNodeId.store(0, std::memory_order_release);
-    m_returnNodeId.store(0, std::memory_order_release);
-
     if (m_simulationMode.load(std::memory_order_acquire)) {
-        m_resolvedTargetPorts.store(4, std::memory_order_release);
-        m_activeLinksCreated.store(4, std::memory_order_release);
-        m_negotiatedSendRate.store(static_cast<uint32_t>(m_expectedSampleRate), std::memory_order_release);
-        m_negotiatedReturnRate.store(static_cast<uint32_t>(m_expectedSampleRate), std::memory_order_release);
-        m_negotiatedQuantum.store(static_cast<uint32_t>(m_expectedBufferSize), std::memory_order_release);
-        m_connected.store(true, std::memory_order_release);
-        return true;
+        return completeSimulationConnect();
     }
 
     // Pre-prime 1 block of silence into send ring to absorb cycle-ordering jitter between
@@ -679,79 +648,6 @@ void PipeWireInsertTransport::teardownPipeWireLocked()
         pw_context_destroy(m_context);
         m_context = nullptr;
     }
-}
-
-bool PipeWireInsertTransport::exchangeBlock(double* inOutLeft, double* inOutRight, size_t frames) noexcept
-{
-    if (!inOutLeft || !inOutRight || frames == 0 || !m_connected.load(std::memory_order_acquire)) {
-        return false;
-    }
-
-    if (m_simulationMode.load(std::memory_order_acquire)) {
-        const size_t delay = static_cast<size_t>(m_simLatencyFrames.load(std::memory_order_acquire));
-        const size_t cap = m_simDelayL.size();
-        const size_t mask = cap - 1;
-        for (size_t i = 0; i < frames; ++i) {
-            const size_t wIdx = (m_simWritePos + delay) & mask;
-            m_simDelayL[wIdx] = inOutLeft[i];
-            m_simDelayR[wIdx] = inOutRight[i];
-
-            const size_t rIdx = m_simWritePos & mask;
-            inOutLeft[i] = m_simDelayL[rIdx];
-            inOutRight[i] = m_simDelayR[rIdx];
-            m_simDelayL[rIdx] = 0.0;
-            m_simDelayR[rIdx] = 0.0;
-            ++m_simWritePos;
-        }
-        m_sendBlocksWritten.fetch_add(1, std::memory_order_relaxed);
-        m_returnBlocksRead.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-
-    const size_t safeFrames = std::min(frames, m_rtReadL.size());
-    const size_t written = m_sendRing.writePlanar(inOutLeft, inOutRight, safeFrames);
-    if (written < safeFrames) {
-        m_xrunOrUnderruns.fetch_add(1, std::memory_order_relaxed);
-    }
-    m_sendBlocksWritten.fetch_add(1, std::memory_order_relaxed);
-
-    const size_t read = m_returnRing.readPlanar(m_rtReadL.data(), m_rtReadR.data(), safeFrames);
-    if (read < safeFrames) {
-        if (m_returnBlocksRead.load(std::memory_order_relaxed) > 4) {
-            m_xrunOrUnderruns.fetch_add(1, std::memory_order_relaxed);
-        }
-        std::fill(m_rtReadL.begin() + static_cast<std::ptrdiff_t>(read),
-                  m_rtReadL.begin() + static_cast<std::ptrdiff_t>(safeFrames), 0.0);
-        std::fill(m_rtReadR.begin() + static_cast<std::ptrdiff_t>(read),
-                  m_rtReadR.begin() + static_cast<std::ptrdiff_t>(safeFrames), 0.0);
-    }
-    std::copy_n(m_rtReadL.data(), safeFrames, inOutLeft);
-    std::copy_n(m_rtReadR.data(), safeFrames, inOutRight);
-    m_returnBlocksRead.fetch_add(1, std::memory_order_relaxed);
-    return read > 0;
-}
-
-InsertTransportDiagnostics PipeWireInsertTransport::diagnostics() const
-{
-    InsertTransportDiagnostics d;
-    d.connected = m_connected.load(std::memory_order_acquire);
-    d.simulationMode = m_simulationMode.load(std::memory_order_acquire);
-    d.sendNodeId = m_sendNodeId.load(std::memory_order_acquire);
-    d.returnNodeId = m_returnNodeId.load(std::memory_order_acquire);
-    d.resolvedTargetPorts = m_resolvedTargetPorts.load(std::memory_order_acquire);
-    d.activeLinksCreated = m_activeLinksCreated.load(std::memory_order_acquire);
-    d.sendBlocksWritten = m_sendBlocksWritten.load(std::memory_order_relaxed);
-    d.returnBlocksRead = m_returnBlocksRead.load(std::memory_order_relaxed);
-    d.xrunOrUnderruns = m_xrunOrUnderruns.load(std::memory_order_relaxed);
-    d.negotiatedSendRate = m_negotiatedSendRate.load(std::memory_order_acquire);
-    d.negotiatedReturnRate = m_negotiatedReturnRate.load(std::memory_order_acquire);
-    d.negotiatedQuantum = m_negotiatedQuantum.load(std::memory_order_acquire);
-    d.rateMismatchDetected = m_rateMismatch.load(std::memory_order_acquire);
-    d.bufferMismatchDetected = m_bufferMismatch.load(std::memory_order_acquire);
-    d.graphDisconnected = m_graphDisconnected.load(std::memory_order_acquire);
-    std::lock_guard<std::mutex> lock(m_stateMutex);
-    d.errorDetail = m_errorDetail;
-    return d;
 }
 
 void PipeWireInsertTransport::tryResolveAndCreateLinksLocked()

@@ -315,6 +315,14 @@
         <translation>DSP Trims (dspTrimsZero):</translation>
     </message>
     <message>
+        <source>Scan Graph</source>
+        <translation>Scan Graph</translation>
+    </message>
+    <message>
+        <source>Click Scan Graph to discover hosts...</source>
+        <translation>Click Scan Graph to discover hosts...</translation>
+    </message>
+    <message>
         <source>true (ALL 0.0 dB)</source>
         <translation>true (ALL 0.0 dB)</translation>
     </message>
@@ -471,6 +479,42 @@
     <message>
         <source>Exclusive:</source>
         <translation>Exclusive:</translation>
+    </message>
+    <message>
+        <source>Audio Backend:</source>
+        <translation>Audio Backend:</translation>
+    </message>
+    <message>
+        <source>JACK (PipeWire)</source>
+        <translation>JACK (PipeWire)</translation>
+    </message>
+    <message>
+        <source>System Default (JACK Physical Auto)</source>
+        <translation>System Default (JACK Physical Auto)</translation>
+    </message>
+    <message>
+        <source>Connect to default physical JACK playback ports</source>
+        <translation>Connect to default physical JACK playback ports</translation>
+    </message>
+    <message>
+        <source>No JACK playback target ports detected.</source>
+        <translation>No JACK playback target ports detected.</translation>
+    </message>
+    <message>
+        <source>Ensure PipeWire-JACK is active and target playback ports exist, then click Scan.</source>
+        <translation>Ensure PipeWire-JACK is active and target playback ports exist, then click Scan.</translation>
+    </message>
+    <message>
+        <source>Switched audio backend to %1.</source>
+        <translation>Switched audio backend to %1.</translation>
+    </message>
+    <message>
+        <source>Failed to switch audio backend to %1 (check Log Tab / server status).</source>
+        <translation>Failed to switch audio backend to %1 (check Log Tab / server status).</translation>
+    </message>
+    <message>
+        <source>Latency Ctrl:</source>
+        <translation>Latency Ctrl:</translation>
     </message>
 </context>
 <context>

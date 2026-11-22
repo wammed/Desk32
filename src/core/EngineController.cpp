@@ -187,6 +187,7 @@ EngineController::~EngineController() {
 }
 
 bool EngineController::initialize(bool offlineMode) {
+  m_offlineMode = offlineMode;
   // Reset bypass states to defaults matching node construction
   m_peqBypassed.store(true, std::memory_order_relaxed);
   m_geqBypassed.store(true, std::memory_order_relaxed);
@@ -374,8 +375,7 @@ bool EngineController::initialize(bool offlineMode) {
   m_uiListeningCorrection.setEnabled(true);
   m_uiListeningCorrection.applyPreset("Monitor Flat");
 
-  // Phase 3: External Insert Node (Default to OFF / Bypassed) + PipeWire
-  // Transport
+  // Phase 3: External Insert Node (Default to OFF / Bypassed); transport is bound in setupAudioBackend()
   m_calActive = false;
   m_calSettleTicks = 0;
   m_calCompletedProbes = 0;
@@ -384,10 +384,6 @@ bool EngineController::initialize(bool offlineMode) {
   }
   m_insertNode = std::make_shared<engine::insert::ExternalInsertNode>(
       "External Insert", engine::pipeline::NodeAffiliation::RenderCommon);
-  m_insertTransport =
-      std::make_shared<engine::insert::PipeWireInsertTransport>();
-  m_insertTransport->setSimulationMode(offlineMode);
-  m_insertNode->bridge().setTransport(m_insertTransport);
   m_insertNode->bridge().setRequireLiveTransport(true);
   m_insertNode->setBypassed(true);
 
@@ -451,165 +447,19 @@ bool EngineController::initialize(bool offlineMode) {
   m_gainSmootherL.reset(m_masterGainL.load(std::memory_order_relaxed));
   m_gainSmootherR.reset(m_masterGainR.load(std::memory_order_relaxed));
 
-  // 5. Initialize Native PipeWire AudioOutput
+  // 5. Initialize Active Audio Backend (PipeWire default or saved JACK)
   const bool hasSettings = SettingsManager::instance().isLoaded();
-  const uint32_t initSampleRate =
-      hasSettings ? static_cast<uint32_t>(std::llround(std::clamp(
-                        SettingsManager::instance().audioFixedSampleRate(),
-                        8000.0, 768000.0)))
-                  : 48000u;
-  const uint32_t initBufferFrames =
-      hasSettings
-          ? static_cast<uint32_t>(std::clamp(
-                SettingsManager::instance().audioBufferFrames(), 16, 16384))
-          : 256u;
-
-  m_audioOutput = std::make_unique<engine::backend::PipeWireAudioOutput>();
-  if (offlineMode) {
-    m_audioOutput->setOfflineSimulationMode(true);
+  QString initBackend = QStringLiteral("PipeWire");
+  if (hasSettings &&
+      SettingsManager::instance().audioBackend().trimmed().compare(
+          QStringLiteral("JACK"), Qt::CaseInsensitive) == 0) {
+    initBackend = QStringLiteral("JACK");
   }
-  bool initOk = m_audioOutput->initialize(initSampleRate, initBufferFrames);
-  if (!initOk) {
-    log::LogService::instance().start();
-    QJsonObject det;
-    det.insert(QStringLiteral("stage"),
-               QStringLiteral("pipewire_context_init"));
-    log::LogService::instance().log(
-        "AudioEngine", "Initialize", "Failed",
-        "Failed to initialize PipeWire audio output context.", "System",
-        "PipeWire",
-        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
-        QString(), QString(), log::ErrorCode::PipeWireInitFailed, 0.0);
-    emit diagnosticsChanged();
-    return false;
-  }
-
-  // Wire format-aware real-time audio callback (§3.4, §4.3, strictly ZERO RT
-  // allocs)
-  m_audioControlManager =
-      std::make_unique<engine::backend::AudioControlManager>(
-          std::make_unique<engine::backend::PipeWireControlAdapter>(
-              m_audioOutput.get()));
-
-  if (hasSettings) {
-    const QString savedDevice = SettingsManager::instance().audioTargetDevice();
-    if (!savedDevice.isEmpty()) {
-      std::string devErr;
-      if (!m_audioControlManager->selectOutputDevice(savedDevice.toStdString(),
-                                                     &devErr)) {
-        m_audioControlManager->selectOutputDevice("default");
-      }
-    }
-    const QString savedFmt =
-        SettingsManager::instance().audioPcmFormat().trimmed().toUpper();
-    using engine::backend::OutputPcmFormat;
-    OutputPcmFormat fmt = OutputPcmFormat::F32LE;
-    if (savedFmt == QStringLiteral("S24_32LE") ||
-        savedFmt == QStringLiteral("S24_32")) {
-      fmt = OutputPcmFormat::S24_32LE;
-    } else if (savedFmt == QStringLiteral("S16LE") ||
-               savedFmt == QStringLiteral("S16")) {
-      fmt = OutputPcmFormat::S16LE;
-    } else if (savedFmt == QStringLiteral("S32LE") ||
-               savedFmt == QStringLiteral("S32")) {
-      fmt = OutputPcmFormat::S32LE;
-    }
-    m_audioControlManager->setPreferredPcmFormat(fmt);
-  }
-
-  m_audioOutput->setRawPcmAudioCallback(
-      [this](void *outInterleaved, size_t frames,
-             engine::backend::OutputPcmFormat fmt) {
-        using engine::backend::OutputPcmFormat;
-        const size_t frameBytes =
-            static_cast<size_t>(
-                engine::backend::outputPcmFormatBytesPerSample(fmt)) *
-            2u;
-        if (!m_deckManager || !m_pipeline) {
-          std::memset(outInterleaved, 0, frames * frameBytes);
-          return;
-        }
-
-        engine::format::SampleFormat sampleFmt =
-            engine::format::SampleFormat::Float32;
-        switch (fmt) {
-        case OutputPcmFormat::F32LE:
-          sampleFmt = engine::format::SampleFormat::Float32;
-          break;
-        case OutputPcmFormat::S24_32LE:
-          sampleFmt = engine::format::SampleFormat::Int24_32;
-          break;
-        case OutputPcmFormat::S32LE:
-          sampleFmt = engine::format::SampleFormat::Int32;
-          break;
-        case OutputPcmFormat::S16LE:
-          sampleFmt = engine::format::SampleFormat::Int16;
-          break;
-        }
-
-        const int curRoute =
-            m_outputRoutingMode.load(std::memory_order_relaxed);
-        m_pipeline->setOutputMode(
-            curRoute == 1 ? engine::routing::OutputPathMode::RenderMonitorPath
-                          : engine::routing::OutputPathMode::ListeningPath);
-
-        size_t remaining = frames;
-        size_t offset = 0;
-        while (remaining > 0) {
-          const size_t chunk = std::min(remaining, size_t(4096));
-          m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(),
-                                           chunk);
-
-          const bool isMuted = m_masterMute.load(std::memory_order_relaxed);
-          m_gainSmootherL.setTarget(
-              isMuted ? 0.0 : m_masterGainL.load(std::memory_order_relaxed));
-          m_gainSmootherR.setTarget(
-              isMuted ? 0.0 : m_masterGainR.load(std::memory_order_relaxed));
-          const auto *activeD = m_deckManager->activeDeck();
-          const double levelMatchGain =
-              activeD ? activeD->levelMatchLinearGain() : 1.0;
-          const bool directBypass =
-              m_directModeEnabled.load(std::memory_order_acquire);
-          const bool formatUsesDither = (fmt == OutputPcmFormat::S24_32LE ||
-                                         fmt == OutputPcmFormat::S16LE);
-          if (m_audioOutput) {
-            m_audioOutput->setDitherActiveState(
-                formatUsesDither && m_pipeline->liveDitherEnabled() &&
-                !directBypass);
-          }
-
-          uint8_t *chunkOut =
-              static_cast<uint8_t *>(outInterleaved) + (offset * frameBytes);
-          m_pipeline->process(m_audioInL.data(), m_audioInR.data(), chunk,
-                              chunkOut, sampleFmt, true, &m_gainSmootherL,
-                              &m_gainSmootherR, levelMatchGain, directBypass);
-
-          remaining -= chunk;
-          offset += chunk;
-        }
-      });
-
-  bool startOk = m_audioOutput->start();
-  if (!startOk) {
-    // In headless testing or sandbox environments without an active PipeWire
-    // server, enable offline simulation mode to allow full engine operation.
-    m_audioOutput->setOfflineSimulationMode(true);
-    if (m_insertTransport) {
-      m_insertTransport->setSimulationMode(true);
-    }
-    startOk = m_audioOutput->start();
-  }
-  if (!startOk) {
-    log::LogService::instance().start();
-    QJsonObject det;
-    det.insert(QStringLiteral("stage"),
-               QStringLiteral("pipewire_stream_start"));
-    log::LogService::instance().log(
-        "AudioEngine", "StartStream", "Failed",
-        "Failed to start PipeWire audio output stream.", "System", "PipeWire",
-        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
-        QString(), QString(), log::ErrorCode::PipeWireStartFailed, 0.0);
-    emit diagnosticsChanged();
+  const bool backendOk = setupAudioBackend(
+      initBackend,
+      /*fallbackToOfflineOnStartFailure=*/(initBackend == QStringLiteral("PipeWire") || offlineMode),
+      /*preserveTargetDevice=*/true);
+  if (!backendOk && initBackend == QStringLiteral("PipeWire")) {
     return false;
   }
 
@@ -932,12 +782,316 @@ bool EngineController::initialize(bool offlineMode) {
 
   log::LogService::instance().log(
       "AudioEngine", "Initialize", "Success",
-      "Desk32 Studio Console engine initialized successfully.", "System",
-      "PipeWire");
+      QString("Desk32 Studio Console engine initialized successfully (backend=%1).")
+          .arg(m_activeAudioBackend),
+      "System", m_activeAudioBackend);
 
   applyInitialSettingsIfLoaded();
 
   return true;
+}
+
+bool EngineController::setupAudioBackend(const QString &backendName,
+                                         bool fallbackToOfflineOnStartFailure,
+                                         bool preserveTargetDevice) {
+  const bool isJack =
+      backendName.trimmed().compare(QStringLiteral("JACK"),
+                                    Qt::CaseInsensitive) == 0;
+  const QString normalizedBackend =
+      isJack ? QStringLiteral("JACK") : QStringLiteral("PipeWire");
+
+  if (m_calActive) {
+    finishHardwareCalibration(false, true);
+  }
+  if (m_insertNode) {
+    const auto st = m_insertNode->bridge().state();
+    if (st != engine::insert::InsertState::NotConfigured &&
+        st != engine::insert::InsertState::Disconnected) {
+      m_insertNode->bridge().handleDisconnect();
+      syncExternalInsertBypassToPipeline(true);
+      emit externalInsertStatusChanged();
+    }
+  }
+
+  if (m_audioOutput) {
+    m_audioOutput->shutdown();
+    m_audioOutput.reset();
+  }
+  m_audioControlManager.reset();
+  m_activeAudioBackend = normalizedBackend;
+
+  if (m_insertNode) {
+    if (isJack) {
+      m_insertTransport =
+          std::make_shared<engine::insert::JackInsertTransport>();
+    } else {
+      m_insertTransport =
+          std::make_shared<engine::insert::PipeWireInsertTransport>();
+    }
+    m_insertTransport->setSimulationMode(m_offlineMode);
+    m_insertNode->bridge().setTransport(m_insertTransport);
+  }
+
+  const bool hasSettings = SettingsManager::instance().isLoaded();
+  const double curFixed = m_fixedGraphSampleRate.load(std::memory_order_relaxed);
+  const uint32_t initSampleRate =
+      hasSettings
+          ? static_cast<uint32_t>(std::llround(std::clamp(
+                SettingsManager::instance().audioFixedSampleRate(), 8000.0,
+                768000.0)))
+          : static_cast<uint32_t>(
+                std::llround(std::clamp(curFixed, 8000.0, 768000.0)));
+  const uint32_t initBufferFrames =
+      hasSettings
+          ? static_cast<uint32_t>(std::clamp(
+                SettingsManager::instance().audioBufferFrames(), 16, 16384))
+          : 256u;
+
+  if (isJack) {
+    auto jackOut = std::make_unique<engine::backend::JackAudioOutput>();
+    if (hasSettings) {
+      const QString clientName =
+          SettingsManager::instance()
+              .value(QStringLiteral("audio.jack.client_name"),
+                     QStringLiteral("Desk32"))
+              .toString();
+      const bool autoConnect =
+          SettingsManager::instance()
+              .value(QStringLiteral("audio.jack.auto_connect"), true)
+              .toBool();
+      jackOut->setClientName(clientName.toStdString());
+      jackOut->setAutoConnect(autoConnect);
+    }
+    if (m_offlineMode) {
+      jackOut->setOfflineSimulationMode(true);
+    }
+    auto *jackPtr = jackOut.get();
+    m_audioOutput = std::move(jackOut);
+    m_audioControlManager =
+        std::make_unique<engine::backend::AudioControlManager>(
+            std::make_unique<engine::backend::JackControlAdapter>(jackPtr));
+  } else {
+    auto pwOut = std::make_unique<engine::backend::PipeWireAudioOutput>();
+    if (m_offlineMode) {
+      pwOut->setOfflineSimulationMode(true);
+    }
+    auto *pwPtr = pwOut.get();
+    m_audioOutput = std::move(pwOut);
+    m_audioControlManager =
+        std::make_unique<engine::backend::AudioControlManager>(
+            std::make_unique<engine::backend::PipeWireControlAdapter>(pwPtr));
+  }
+
+  if (!m_audioOutput->initialize(initSampleRate, initBufferFrames)) {
+    log::LogService::instance().start();
+    QJsonObject det;
+    det.insert(QStringLiteral("stage"),
+               isJack ? QStringLiteral("jack_client_init")
+                      : QStringLiteral("pipewire_context_init"));
+    log::LogService::instance().log(
+        "AudioEngine", "Initialize", "Failed",
+        QString("Failed to initialize %1 audio output.").arg(normalizedBackend),
+        "System", normalizedBackend,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(), QString(),
+        isJack ? log::ErrorCode::JackInitFailed
+               : log::ErrorCode::PipeWireInitFailed,
+        0.0);
+    emit diagnosticsChanged();
+    return false;
+  }
+
+  if (hasSettings && preserveTargetDevice) {
+    const QString savedDevice = SettingsManager::instance().audioTargetDevice();
+    if (!savedDevice.isEmpty()) {
+      std::string devErr;
+      if (!m_audioControlManager->selectOutputDevice(savedDevice.toStdString(),
+                                                     &devErr)) {
+        m_audioControlManager->selectOutputDevice("default");
+      }
+    }
+  }
+  if (hasSettings && !isJack) {
+    const QString savedFmt =
+        SettingsManager::instance().audioPcmFormat().trimmed().toUpper();
+    using engine::backend::OutputPcmFormat;
+    OutputPcmFormat fmt = OutputPcmFormat::F32LE;
+    if (savedFmt == QStringLiteral("S24_32LE") ||
+        savedFmt == QStringLiteral("S24_32")) {
+      fmt = OutputPcmFormat::S24_32LE;
+    } else if (savedFmt == QStringLiteral("S16LE") ||
+               savedFmt == QStringLiteral("S16")) {
+      fmt = OutputPcmFormat::S16LE;
+    } else if (savedFmt == QStringLiteral("S32LE") ||
+               savedFmt == QStringLiteral("S32")) {
+      fmt = OutputPcmFormat::S32LE;
+    }
+    m_audioControlManager->setPreferredPcmFormat(fmt);
+  }
+
+  m_audioOutput->setRawPcmAudioCallback(
+      [this](void *outInterleaved, size_t frames,
+             engine::backend::OutputPcmFormat fmt) {
+        using engine::backend::OutputPcmFormat;
+        const size_t frameBytes =
+            static_cast<size_t>(
+                engine::backend::outputPcmFormatBytesPerSample(fmt)) *
+            2u;
+        if (!m_deckManager || !m_pipeline) {
+          std::memset(outInterleaved, 0, frames * frameBytes);
+          return;
+        }
+
+        engine::format::SampleFormat sampleFmt =
+            engine::format::SampleFormat::Float32;
+        switch (fmt) {
+        case OutputPcmFormat::F32LE:
+          sampleFmt = engine::format::SampleFormat::Float32;
+          break;
+        case OutputPcmFormat::S24_32LE:
+          sampleFmt = engine::format::SampleFormat::Int24_32;
+          break;
+        case OutputPcmFormat::S32LE:
+          sampleFmt = engine::format::SampleFormat::Int32;
+          break;
+        case OutputPcmFormat::S16LE:
+          sampleFmt = engine::format::SampleFormat::Int16;
+          break;
+        }
+
+        const int curRoute =
+            m_outputRoutingMode.load(std::memory_order_relaxed);
+        m_pipeline->setOutputMode(
+            curRoute == 1 ? engine::routing::OutputPathMode::RenderMonitorPath
+                          : engine::routing::OutputPathMode::ListeningPath);
+
+        size_t remaining = frames;
+        size_t offset = 0;
+        while (remaining > 0) {
+          const size_t chunk = std::min(remaining, size_t(4096));
+          m_deckManager->renderActiveBlock(m_audioInL.data(), m_audioInR.data(),
+                                           chunk);
+
+          const bool isMuted = m_masterMute.load(std::memory_order_relaxed);
+          m_gainSmootherL.setTarget(
+              isMuted ? 0.0 : m_masterGainL.load(std::memory_order_relaxed));
+          m_gainSmootherR.setTarget(
+              isMuted ? 0.0 : m_masterGainR.load(std::memory_order_relaxed));
+          const auto *activeD = m_deckManager->activeDeck();
+          const double levelMatchGain =
+              activeD ? activeD->levelMatchLinearGain() : 1.0;
+          const bool directBypass =
+              m_directModeEnabled.load(std::memory_order_acquire);
+          const bool formatUsesDither = (fmt == OutputPcmFormat::S24_32LE ||
+                                         fmt == OutputPcmFormat::S16LE);
+          if (m_audioOutput) {
+            m_audioOutput->setDitherActiveState(
+                formatUsesDither && m_pipeline->liveDitherEnabled() &&
+                !directBypass);
+          }
+
+          uint8_t *chunkOut =
+              static_cast<uint8_t *>(outInterleaved) + (offset * frameBytes);
+          m_pipeline->process(m_audioInL.data(), m_audioInR.data(), chunk,
+                              chunkOut, sampleFmt, true, &m_gainSmootherL,
+                              &m_gainSmootherR, levelMatchGain, directBypass);
+
+          remaining -= chunk;
+          offset += chunk;
+        }
+      });
+
+  bool startOk = m_audioOutput->start();
+  if (!startOk && fallbackToOfflineOnStartFailure) {
+    m_audioOutput->setOfflineSimulationMode(true);
+    if (m_insertTransport) {
+      m_insertTransport->setSimulationMode(true);
+    }
+    startOk = m_audioOutput->start();
+  }
+  if (!startOk) {
+    log::LogService::instance().start();
+    QJsonObject det;
+    det.insert(QStringLiteral("stage"),
+               isJack ? QStringLiteral("jack_stream_start")
+                      : QStringLiteral("pipewire_stream_start"));
+    log::LogService::instance().log(
+        "AudioEngine", "StartStream", "Failed",
+        QString("Failed to start %1 audio output stream.")
+            .arg(normalizedBackend),
+        "System", normalizedBackend,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(), QString(),
+        isJack ? log::ErrorCode::JackStartFailed
+               : log::ErrorCode::PipeWireStartFailed,
+        0.0);
+    emit diagnosticsChanged();
+    return false;
+  }
+
+  updateSourceBitDepthFromActiveDeck();
+  const auto diag = m_audioOutput->diagnostics();
+  if (diag.sampleRate > 0 && m_deckManager && m_pipeline &&
+      std::abs(m_deckManager->graphRate() - static_cast<double>(diag.sampleRate)) > 0.5) {
+    const double actualSr = static_cast<double>(diag.sampleRate);
+    m_deckManager->setGraphRate(actualSr);
+    m_pipeline->setGraphSampleRate(actualSr);
+    m_gainSmootherL.configure(actualSr, 15.0);
+    m_gainSmootherR.configure(actualSr, 15.0);
+    emit graphSampleRateChanged(actualSr);
+  }
+  m_lastReportedXruns = diag.xrunCount;
+  m_lastGraphSampleRate = diag.sampleRate;
+  m_lastGraphBufferFrames = (diag.negotiatedQuantum > 0)
+                                ? diag.negotiatedQuantum
+                                : diag.bufferFrames;
+  m_lastDirectModeStatus = static_cast<int>(diag.directModeStatus);
+
+  emit audioBackendChanged(m_activeAudioBackend);
+  emit diagnosticsChanged();
+  return true;
+}
+
+QStringList EngineController::availableAudioBackends() const {
+  return {QStringLiteral("PipeWire"), QStringLiteral("JACK")};
+}
+
+QString EngineController::audioBackend() const {
+  return m_activeAudioBackend;
+}
+
+bool EngineController::setAudioBackend(const QString &backendName) {
+  const QString trimmed = backendName.trimmed();
+  QString normalized;
+  if (trimmed.compare(QStringLiteral("PipeWire"), Qt::CaseInsensitive) == 0) {
+    normalized = QStringLiteral("PipeWire");
+  } else if (trimmed.compare(QStringLiteral("JACK"), Qt::CaseInsensitive) == 0) {
+    normalized = QStringLiteral("JACK");
+  } else {
+    return false;
+  }
+
+  if (normalized == m_activeAudioBackend && m_audioOutput &&
+      m_audioOutput->isInitialized()) {
+    return true;
+  }
+
+  if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+    SettingsManager::instance().setAudioBackend(normalized);
+    SettingsManager::instance().setAudioTargetDevice(QString());
+  }
+
+  const bool ok = setupAudioBackend(normalized, m_offlineMode,
+                                    /*preserveTargetDevice=*/false);
+  log::LogService::instance().log(
+      QStringLiteral("AudioEngine"), QStringLiteral("SwitchAudioBackend"),
+      ok ? QStringLiteral("Success") : QStringLiteral("Failed"),
+      ok ? QString("Switched active audio backend to %1").arg(normalized)
+         : QString("Failed to switch active audio backend to %1").arg(normalized),
+      QStringLiteral("Backend"), normalized,
+      QStringLiteral("{}"), QString(), QString(),
+      ok ? 0 : log::ErrorCode::JackStartFailed, 0.0);
+  return ok;
 }
 
 void EngineController::applyInitialSettingsIfLoaded() {
@@ -997,6 +1151,7 @@ void EngineController::recordSessionStart(const QString &graphicsBackend,
     const uint32_t effectiveQuantum = (diag.negotiatedQuantum > 0)
                                           ? diag.negotiatedQuantum
                                           : diag.bufferFrames;
+    det.insert(QStringLiteral("audio_backend"), m_activeAudioBackend);
     det.insert(QStringLiteral("pipewire_sample_rate_hz"),
                static_cast<int>(diag.sampleRate));
     det.insert(QStringLiteral("pipewire_quantum"),
@@ -1127,7 +1282,11 @@ void EngineController::checkAudioHealthAndGraph() {
       m_lastXrunLogTime = now;
 
       QJsonObject det;
-      det.insert(QStringLiteral("source"), QStringLiteral("pipewire_report"));
+      const bool isJack = (m_activeAudioBackend == QStringLiteral("JACK"));
+      det.insert(QStringLiteral("source"),
+                 isJack ? QStringLiteral("jack_report")
+                        : QStringLiteral("pipewire_report"));
+      det.insert(QStringLiteral("backend"), m_activeAudioBackend);
       det.insert(QStringLiteral("xrun_delta"), static_cast<qint64>(delta));
       det.insert(QStringLiteral("xrun_total"),
                  static_cast<qint64>(diag.xrunCount));
@@ -1144,8 +1303,9 @@ void EngineController::checkAudioHealthAndGraph() {
       log::LogService::instance().log(
           QStringLiteral("AudioEngine"), QStringLiteral("XRUN"),
           QStringLiteral("Warning"),
-          QString("Detected %1 PipeWire XRUN(s) (total: %2)")
+          QString("Detected %1 %2 XRUN(s) (total: %3)")
               .arg(delta)
+              .arg(m_activeAudioBackend)
               .arg(diag.xrunCount),
           QStringLiteral("Device"), QString::fromStdString(diag.deviceName),
           QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
@@ -1392,8 +1552,10 @@ void EngineController::pollExternalInsertHealth() {
     const auto diag = m_insertTransport->diagnostics();
     const std::string detail =
         diag.errorDetail.empty()
-            ? (isRate ? "PipeWire insert sample rate mismatch"
-                      : "PipeWire insert buffer quantum mismatch")
+            ? (isRate ? (m_activeAudioBackend.toStdString() +
+                         " insert sample rate mismatch")
+                      : (m_activeAudioBackend.toStdString() +
+                         " insert buffer quantum mismatch"))
             : diag.errorDetail;
     bridge.handleTransportMismatch(
         isRate ? engine::insert::InsertState::RateMismatch
@@ -1572,17 +1734,21 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
             ? m_audioControlManager->renegotiateSampleRate(targetRate,
                                                            silenceMs)
             : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
-    m_deckManager->setGraphRate(targetRateD);
+    const auto postDiag = m_audioOutput->diagnostics();
+    const double actualRateD =
+        (postDiag.sampleRate > 0) ? static_cast<double>(postDiag.sampleRate)
+                                  : targetRateD;
+    m_deckManager->setGraphRate(actualRateD);
     if (m_pipeline) {
-      m_pipeline->setGraphSampleRate(targetRateD);
+      m_pipeline->setGraphSampleRate(actualRateD);
     }
-    m_gainSmootherL.configure(targetRateD, 15.0);
-    m_gainSmootherR.configure(targetRateD, 15.0);
+    m_gainSmootherL.configure(actualRateD, 15.0);
+    m_gainSmootherR.configure(actualRateD, 15.0);
     if (m_insertNode) {
       const auto st = m_insertNode->bridge().state();
       if ((st == engine::insert::InsertState::Connected ||
            st == engine::insert::InsertState::Active) &&
-          std::abs(m_insertNode->bridge().config().sampleRate - targetRateD) >
+          std::abs(m_insertNode->bridge().config().sampleRate - actualRateD) >
               0.5) {
         m_insertNode->bridge().handleTransportMismatch(
             engine::insert::InsertState::RateMismatch,
@@ -1591,18 +1757,24 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
         emit externalInsertStatusChanged();
       }
     }
-    emit graphSampleRateChanged(targetRateD);
+    emit graphSampleRateChanged(actualRateD);
     emit diagnosticsChanged();
+    const bool followed = (std::abs(actualRateD - targetRateD) <= 0.5);
     log::LogService::instance().log(
         QStringLiteral("AudioEngine"),
         QStringLiteral("DirectModeSampleRateFollow"),
-        ok ? QStringLiteral("Success") : QStringLiteral("Warning"),
-        QString("Direct Mode rate switch to %1 Hz (silence: %2 ms)")
+        (ok && followed) ? QStringLiteral("Success") : QStringLiteral("Warning"),
+        QString("Direct Mode rate switch request %1 Hz -> active %2 Hz "
+                "(silence: %3 ms)")
             .arg(targetRate)
+            .arg(static_cast<uint32_t>(std::llround(actualRateD)))
             .arg(silenceMs, 0, 'f', 2),
-        QStringLiteral("Backend"), QStringLiteral("PipeWire"),
-        QString("{\"target_rate\":%1,\"silence_ms\":%2,\"direct_mode\":%3}")
+        QStringLiteral("Backend"), m_activeAudioBackend,
+        QString("{\"backend\":\"%1\",\"target_rate\":%2,\"actual_rate\":%3,"
+                "\"silence_ms\":%4,\"direct_mode\":%5}")
+            .arg(m_activeAudioBackend)
             .arg(targetRate)
+            .arg(static_cast<uint32_t>(std::llround(actualRateD)))
             .arg(silenceMs, 0, 'f', 3)
             .arg(directOn ? QStringLiteral("true") : QStringLiteral("false")));
   }
@@ -1629,17 +1801,21 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
       m_audioControlManager
           ? m_audioControlManager->renegotiateSampleRate(targetRate, silenceMs)
           : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
-  m_deckManager->setGraphRate(sampleRate);
+  const auto postDiag = m_audioOutput->diagnostics();
+  const double actualRate =
+      (postDiag.sampleRate > 0) ? static_cast<double>(postDiag.sampleRate)
+                                : sampleRate;
+  m_deckManager->setGraphRate(actualRate);
   if (m_pipeline) {
-    m_pipeline->setGraphSampleRate(sampleRate);
+    m_pipeline->setGraphSampleRate(actualRate);
   }
-  m_gainSmootherL.configure(sampleRate, 15.0);
-  m_gainSmootherR.configure(sampleRate, 15.0);
+  m_gainSmootherL.configure(actualRate, 15.0);
+  m_gainSmootherR.configure(actualRate, 15.0);
   if (m_insertNode) {
     const auto st = m_insertNode->bridge().state();
     if ((st == engine::insert::InsertState::Connected ||
          st == engine::insert::InsertState::Active) &&
-        std::abs(m_insertNode->bridge().config().sampleRate - sampleRate) >
+        std::abs(m_insertNode->bridge().config().sampleRate - actualRate) >
             0.5) {
       m_insertNode->bridge().handleTransportMismatch(
           engine::insert::InsertState::RateMismatch,
@@ -1648,16 +1824,19 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
       emit externalInsertStatusChanged();
     }
   }
-  emit graphSampleRateChanged(sampleRate);
+  emit graphSampleRateChanged(actualRate);
   emit diagnosticsChanged();
+  const bool matched = (std::abs(actualRate - sampleRate) <= 0.5);
   log::LogService::instance().log(
       QStringLiteral("AudioEngine"), QStringLiteral("FixedSampleRateChange"),
-      ok ? QStringLiteral("Success") : QStringLiteral("Warning"),
-      QString("Fixed graph sample rate set to %1 Hz (silence: %2 ms)")
+      (ok && matched) ? QStringLiteral("Success") : QStringLiteral("Warning"),
+      QString("Fixed graph sample rate set to %1 Hz -> active %2 Hz (silence: "
+              "%3 ms)")
           .arg(targetRate)
+          .arg(static_cast<uint32_t>(std::llround(actualRate)))
           .arg(silenceMs, 0, 'f', 2),
-      QStringLiteral("Backend"), QStringLiteral("PipeWire"));
-  return ok;
+      QStringLiteral("Backend"), m_activeAudioBackend);
+  return ok && matched;
 }
 
 QVariantMap EngineController::getAudioCapabilities() const {
@@ -1695,6 +1874,21 @@ QVariantMap EngineController::getAudioCapabilities() const {
   root["formatSelection"] = capStr(capReport.formatSelection);
   root["externalInsert"] = capStr(capReport.externalInsert);
   root["offlineRender"] = capStr(capReport.offlineRender);
+  QVariantMap reasons;
+  reasons["directMode"] = QString::fromStdString(capReport.directModeReason);
+  reasons["sampleRateFollowing"] =
+      QString::fromStdString(capReport.sampleRateFollowingReason);
+  reasons["exclusiveAccess"] =
+      QString::fromStdString(capReport.exclusiveAccessReason);
+  reasons["hardwareBitPerfect"] =
+      QString::fromStdString(capReport.hardwareBitPerfectReason);
+  reasons["deviceSwitching"] =
+      QString::fromStdString(capReport.deviceSwitchingReason);
+  reasons["latencyControl"] =
+      QString::fromStdString(capReport.latencyControlReason);
+  reasons["formatSelection"] =
+      QString::fromStdString(capReport.formatSelectionReason);
+  root["reasons"] = reasons;
   root["negotiatedSampleRate"] = static_cast<int>(diag.sampleRate);
   root["requestedSampleRate"] = static_cast<int>(diag.requestedSampleRate);
   root["negotiatedQuantum"] = static_cast<int>(
@@ -4651,9 +4845,13 @@ QVariantList EngineController::discoverExternalInsertPorts() const {
 
   std::vector<engine::insert::ExternalPortInfo> ports;
   if (m_insertTransport && !m_insertTransport->diagnostics().simulationMode) {
-    ports = engine::insert::PipeWireInsertTransport::discoverHosts(sr, bs);
+    if (m_activeAudioBackend == QStringLiteral("JACK")) {
+      ports = engine::insert::JackInsertTransport::discoverHosts(sr, bs);
+    } else {
+      ports = engine::insert::PipeWireInsertTransport::discoverHosts(sr, bs);
+    }
   }
-  if (ports.empty()) {
+  if (ports.empty() && m_activeAudioBackend != QStringLiteral("JACK")) {
     ports = engine::insert::ExternalInsertBridge::discoverPorts(sr, bs);
   }
 
@@ -4756,8 +4954,11 @@ bool EngineController::configureExternalInsertWithMetadata(
                 "%4/%5, Links: %6, Mode: %7, Latency: %8]")
             .arg(clientName, sendL, sendR, returnL, returnR)
             .arg(trDiag.activeLinksCreated)
-            .arg(trDiag.simulationMode ? QStringLiteral("Simulation")
-                                       : QStringLiteral("LivePipeWire"))
+            .arg(trDiag.simulationMode
+                     ? QStringLiteral("Simulation")
+                     : (m_activeAudioBackend == QStringLiteral("JACK")
+                            ? QStringLiteral("LiveJACK")
+                            : QStringLiteral("LivePipeWire")))
             .arg(latencyReported
                      ? (QString::number(reportedLatencyFrames) + " frames")
                      : QStringLiteral("Not Reported")),
@@ -5758,6 +5959,13 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
 }
 
 bool EngineController::applyAudioDeviceJson(const QJsonObject &obj) {
+  if (obj.contains("backend")) {
+    const QString bk = obj["backend"].toString();
+    if (bk.compare(QStringLiteral("JACK"), Qt::CaseInsensitive) == 0 ||
+        bk.compare(QStringLiteral("PipeWire"), Qt::CaseInsensitive) == 0) {
+      setAudioBackend(bk);
+    }
+  }
   if (obj.contains("target_device")) {
     const QString dev = obj["target_device"].toString();
     selectOutputDevice(dev.isEmpty() ? QStringLiteral("default") : dev);
@@ -5922,7 +6130,7 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
           static_cast<int>(m_insertNode->bridge().disconnectPolicy());
     }
   } else if (category == engine::preset::PresetCategories::AudioDevice) {
-    obj["backend"] = QStringLiteral("PipeWire");
+    obj["backend"] = m_activeAudioBackend;
     obj["target_device"] =
         m_audioOutput ? QString::fromStdString(m_audioOutput->targetDeviceId())
                       : QString();

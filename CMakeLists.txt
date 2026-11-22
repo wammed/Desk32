@@ -102,10 +102,15 @@ qt_add_executable(desk32
     src/core/log/LogService.cpp
     src/engine/backend/AudioControlTypes.hpp
     src/engine/backend/AudioControlManager.hpp
+    src/engine/backend/AudioOutput.hpp
     src/engine/backend/PipeWireAudioOutput.hpp
     src/engine/backend/PipeWireAudioOutput.cpp
     src/engine/backend/PipeWireControlAdapter.hpp
     src/engine/backend/PipeWireControlAdapter.cpp
+    src/engine/backend/JackAudioOutput.hpp
+    src/engine/backend/JackAudioOutput.cpp
+    src/engine/backend/JackControlAdapter.hpp
+    src/engine/backend/JackControlAdapter.cpp
     src/engine/decoder/AudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.hpp
     src/engine/decoder/FFmpegAudioDecoder.cpp
@@ -117,11 +122,14 @@ qt_add_executable(desk32
     src/engine/deck/ReferenceDeck.cpp
     src/engine/deck/DeckManager.hpp
     src/engine/deck/DeckManager.cpp
+    src/engine/insert/BufferedInsertTransport.hpp
     src/engine/insert/DelayCompensationBuffer.hpp
     src/engine/insert/ExternalInsertBridge.hpp
     src/engine/insert/ExternalInsertNode.hpp
     src/engine/insert/PipeWireInsertTransport.hpp
     src/engine/insert/PipeWireInsertTransport.cpp
+    src/engine/insert/JackInsertTransport.hpp
+    src/engine/insert/JackInsertTransport.cpp
     src/engine/preset/PresetManager.hpp
     src/engine/preset/PresetManager.cpp
     src/engine/render/WavFileWriter.hpp
@@ -173,6 +181,7 @@ target_link_libraries(desk32 PRIVATE
     Qt6::Sql
     Vulkan::Headers
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -189,6 +198,7 @@ add_dependencies(desk32 desk32_git_version)
 
 target_include_directories(desk32 SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${SOXR_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}

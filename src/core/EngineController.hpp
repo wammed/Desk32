@@ -24,15 +24,20 @@
 #include "engine/preset/PresetManager.hpp"
 #include "engine/render/RenderEngine.hpp"
 #include "engine/backend/AudioControlManager.hpp"
+#include "engine/backend/AudioOutput.hpp"
 #include "engine/backend/PipeWireAudioOutput.hpp"
 #include "engine/backend/PipeWireControlAdapter.hpp"
+#include "engine/backend/JackAudioOutput.hpp"
+#include "engine/backend/JackControlAdapter.hpp"
+#include "engine/insert/BufferedInsertTransport.hpp"
 #include "engine/insert/PipeWireInsertTransport.hpp"
+#include "engine/insert/JackInsertTransport.hpp"
 #include "core/log/LogService.hpp"
 
 namespace desk32::core {
 
 /// Unified Studio Console Controller bridging QML UI with Engine Subsystems
-/// Coordinates DeckManager, AudioPipeline, PipeWireAudioOutput, LogService, ExternalInsert, and PresetManager.
+/// Coordinates DeckManager, AudioPipeline, AudioOutput backends (PipeWire / JACK), LogService, ExternalInsert, and PresetManager.
 class EngineController : public QObject {
     Q_OBJECT
 
@@ -67,6 +72,7 @@ class EngineController : public QObject {
     Q_PROPERTY(QString bitPerfectModeStateText READ bitPerfectModeStateText NOTIFY diagnosticsChanged)
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString audioBackend READ audioBackend WRITE setAudioBackend NOTIFY audioBackendChanged)
 
     // Phase 2: Dynamic DSP Telemetry & Status Properties
     Q_PROPERTY(double compressorGainReductionDb READ compressorGainReductionDb NOTIFY dspTelemetryChanged)
@@ -180,6 +186,9 @@ public:
     Q_INVOKABLE QVariantMap getBitPerfectVerificationReport() const;
     void checkBitPerfectVerificationTransition();
     Q_INVOKABLE QVariantMap getAudioCapabilities() const;
+    Q_INVOKABLE QStringList availableAudioBackends() const;
+    [[nodiscard]] QString audioBackend() const;
+    Q_INVOKABLE bool setAudioBackend(const QString& backendName);
     Q_INVOKABLE QVariantList enumerateOutputDevices() const;
     Q_INVOKABLE bool selectOutputDevice(const QString& deviceIdOrName);
     [[nodiscard]] QString currentOutputDevice() const;
@@ -415,9 +424,9 @@ public:
     [[nodiscard]] engine::preset::PresetManager& presetManager() noexcept { return m_presetManager; }
     [[nodiscard]] engine::render::RenderEngine& renderEngine() noexcept { return m_renderEngine; }
     [[nodiscard]] engine::deck::DeckManager* deckManager() noexcept { return m_deckManager.get(); }
-    [[nodiscard]] engine::backend::PipeWireAudioOutput* audioOutput() noexcept { return m_audioOutput.get(); }
+    [[nodiscard]] engine::backend::AudioOutput* audioOutput() noexcept { return m_audioOutput.get(); }
     [[nodiscard]] engine::backend::AudioControlManager* audioControlManager() const noexcept { return m_audioControlManager.get(); }
-    [[nodiscard]] std::shared_ptr<engine::insert::PipeWireInsertTransport> insertTransport() const noexcept { return m_insertTransport; }
+    [[nodiscard]] std::shared_ptr<engine::insert::BufferedInsertTransport> insertTransport() const noexcept { return m_insertTransport; }
 
     /// Test helper: Render an audio block through the controller's audio output callback
     void renderOfflineBlock(float* outInterleaved, size_t frames);
@@ -434,6 +443,7 @@ signals:
     void masterGainRChanged(double gain);
     void masterMuteChanged(bool muted);
     void diagnosticsChanged();
+    void audioBackendChanged(const QString& backendName);
     void deckStateChanged(const QString& deckId);
     void dspTelemetryChanged();
     void listeningPresetChanged(const QString& name);
@@ -492,12 +502,15 @@ private:
     void pollHardwareCalibrationProbe();
     void finishHardwareCalibration(bool restoreBypass, bool cancelSession = false);
     void applyInitialSettingsIfLoaded();
+    bool setupAudioBackend(const QString& backendName, bool fallbackToOfflineOnStartFailure, bool preserveTargetDevice);
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
-    std::unique_ptr<engine::backend::PipeWireAudioOutput> m_audioOutput;
+    std::unique_ptr<engine::backend::AudioOutput> m_audioOutput;
     std::unique_ptr<engine::backend::AudioControlManager> m_audioControlManager;
-    std::shared_ptr<engine::insert::PipeWireInsertTransport> m_insertTransport;
+    std::shared_ptr<engine::insert::BufferedInsertTransport> m_insertTransport;
+    QString m_activeAudioBackend{"PipeWire"};
+    bool m_offlineMode{false};
 
     // Control Thread UI Parameter Snapshots & Response Curve Calculators (P0-21)
     // Strictly owned by Control Thread and completely separated from running AudioChain DSP nodes.

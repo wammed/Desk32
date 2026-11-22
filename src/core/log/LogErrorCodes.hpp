@@ -29,6 +29,8 @@ constexpr int32_t AutoAdvanceTrackMismatch = 1036;
 constexpr int32_t PipeWireInitFailed = 2001;
 constexpr int32_t PipeWireStartFailed = 2002;
 constexpr int32_t AudioDeviceSwitchFailed = 2003;
+constexpr int32_t JackInitFailed = 2004;
+constexpr int32_t JackStartFailed = 2005;
 constexpr int32_t AudioXrunDetected = 2010;
 
 // 3000-3999: External Insert / Plugin Host / DSP Queue

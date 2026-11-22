@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -133,7 +134,41 @@ struct BackendCapabilitiesReport {
     CapabilityAvailability formatSelection = CapabilityAvailability::Supported;
     CapabilityAvailability externalInsert = CapabilityAvailability::Supported;
     CapabilityAvailability offlineRender = CapabilityAvailability::Supported;
+
+    // Spec §8.2 human-readable reasons when capabilities are Unsupported / Unavailable / Unknown
+    std::string directModeReason;
+    std::string sampleRateFollowingReason;
+    std::string exclusiveAccessReason;
+    std::string hardwareBitPerfectReason;
+    std::string deviceSwitchingReason;
+    std::string latencyControlReason;
+    std::string formatSelectionReason;
 };
+
+/// Shared heuristic ranking for stereo L/R port names (0 = Left/Mono, 1 = Right, 2 = Other).
+[[nodiscard]] inline int rankStereoChannelPortHint(const std::string& channel, const std::string& portName)
+{
+    auto toLow = [](std::string s) {
+        for (char& c : s) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return s;
+    };
+    const std::string ch = toLow(channel);
+    if (ch == "fl" || ch == "mono") return 0;
+    if (ch == "fr") return 1;
+
+    const std::string low = toLow(portName);
+    if (low.ends_with("_1") || low.ends_with("_l") || low.ends_with("left") ||
+        low.find("fl") != std::string::npos) {
+        return 0;
+    }
+    if (low.ends_with("_2") || low.ends_with("_r") || low.ends_with("right") ||
+        low.find("fr") != std::string::npos) {
+        return 1;
+    }
+    return 2;
+}
 
 /// Spec §8.1 Backend-specific Audio Control Adapter interface.
 /// Separates Audio Control Manager policy from PipeWire / (future) ALSA / JACK mechanisms.

@@ -879,7 +879,7 @@ ApplicationWindow {
                             Label {
                                 property int qVal: (monitorDiagStrip.audioCaps && monitorDiagStrip.audioCaps.negotiatedQuantum > 0)
                                                    ? monitorDiagStrip.audioCaps.negotiatedQuantum : 256
-                                text: "PIPEWIRE: " + EngineController.backendStatusText.toUpperCase()
+                                text: EngineController.audioBackend.toUpperCase() + ": " + EngineController.backendStatusText.toUpperCase()
                                       + " // " + (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz"
                                       + " // " + EngineController.outputPcmFormat
                                       + " // BUFFER: " + qVal
@@ -2445,7 +2445,7 @@ ApplicationWindow {
                                             }
                                             Item { Layout.fillWidth: true }
                                             Button {
-                                                text: qsTr("Scan PipeWire")
+                                                text: qsTr("Scan Graph")
                                                 font.pixelSize: 10
                                                 Layout.preferredHeight: 24
                                                 onClicked: insertControlCenter.scanExternalHosts()
@@ -2460,7 +2460,7 @@ ApplicationWindow {
                                                 Layout.fillWidth: true
                                                 Layout.preferredHeight: 28
                                                 font.pixelSize: 10
-                                                model: [qsTr("Click Scan PipeWire to discover hosts...")]
+                                                model: [qsTr("Click Scan Graph to discover hosts...")]
                                                 onActivated: function(idx) {
                                                     if (idx >= 0 && idx < insertControlCenter.discoveredHosts.length) {
                                                         var h = insertControlCenter.discoveredHosts[idx];

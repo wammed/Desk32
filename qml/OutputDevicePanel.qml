@@ -22,6 +22,7 @@ Rectangle {
     property bool statusIsError: false
     property bool syncingControls: false
 
+    readonly property string activeBackend: EngineController.audioBackend || "PipeWire"
     readonly property string activeTargetId: (audioCaps && audioCaps.targetDeviceId !== undefined)
                                              ? String(audioCaps.targetDeviceId)
                                              : ""
@@ -68,7 +69,9 @@ Rectangle {
 
     function activeDeviceDisplayName() {
         if (isDefaultTargetSelected) {
-            return qsTr("System Default (PipeWire Auto)")
+            return activeBackend === "JACK"
+                   ? qsTr("System Default (JACK Physical Auto)")
+                   : qsTr("System Default (PipeWire Auto)")
         }
         for (var i = 0; i < devicesList.length; ++i) {
             var d = devicesList[i]
@@ -77,6 +80,18 @@ Rectangle {
             }
         }
         return activeTargetId
+    }
+
+    function switchBackend(backendName) {
+        var ok = EngineController.setAudioBackend(backendName)
+        refreshDevices()
+        if (ok) {
+            statusIsError = false
+            statusNotice = qsTr("Switched audio backend to %1.").arg(backendName)
+        } else {
+            statusIsError = true
+            statusNotice = qsTr("Failed to switch audio backend to %1 (check Log Tab / server status).").arg(backendName)
+        }
     }
 
     function selectDevice(idOrName, labelText) {
@@ -121,6 +136,9 @@ Rectangle {
         }
         function onGraphSampleRateChanged() {
             outputDeviceRoot.refreshCapabilitiesOnly()
+        }
+        function onAudioBackendChanged() {
+            outputDeviceRoot.refreshDevices()
         }
     }
 
@@ -221,6 +239,43 @@ Rectangle {
                     Layout.preferredHeight: 20
                     onClicked: outputDeviceRoot.statusNotice = ""
                 }
+            }
+        }
+
+        // Audio Backend Switcher (PipeWire / PipeWire-JACK)
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: backendRow.implicitHeight + 12
+            color: "#0d1014"
+            border.color: "#222934"
+            radius: 4
+
+            RowLayout {
+                id: backendRow
+                anchors.fill: parent
+                anchors.margins: 6
+                spacing: 8
+
+                Label {
+                    text: qsTr("Audio Backend:")
+                    font.bold: true
+                    font.pixelSize: 10
+                    color: "#A0AAB2"
+                }
+
+                Repeater {
+                    model: EngineController.availableAudioBackends()
+                    Button {
+                        text: modelData === "JACK" ? qsTr("JACK (PipeWire)") : modelData
+                        font.pixelSize: 10
+                        font.bold: true
+                        Layout.preferredHeight: 24
+                        highlighted: outputDeviceRoot.activeBackend === modelData
+                        onClicked: outputDeviceRoot.switchBackend(modelData)
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
             }
         }
 
@@ -363,7 +418,9 @@ Rectangle {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Label {
-                                    text: qsTr("System Default (PipeWire Auto)")
+                                    text: outputDeviceRoot.activeBackend === "JACK"
+                                          ? qsTr("System Default (JACK Physical Auto)")
+                                          : qsTr("System Default (PipeWire Auto)")
                                     font.bold: true
                                     font.pixelSize: 11
                                     color: "#E0E6ED"
@@ -391,7 +448,9 @@ Rectangle {
 
                             Label {
                                 Layout.fillWidth: true
-                                text: qsTr("Follow PipeWire / WirePlumber default sink routing")
+                                text: outputDeviceRoot.activeBackend === "JACK"
+                                      ? qsTr("Connect to default physical JACK playback ports")
+                                      : qsTr("Follow PipeWire / WirePlumber default sink routing")
                                 font.pixelSize: 10
                                 color: "#808c99"
                                 elide: Text.ElideRight
@@ -586,7 +645,9 @@ Rectangle {
 
                         Label {
                             Layout.fillWidth: true
-                            text: qsTr("No PipeWire Audio/Sink devices detected.")
+                            text: outputDeviceRoot.activeBackend === "JACK"
+                                  ? qsTr("No JACK playback target ports detected.")
+                                  : qsTr("No PipeWire Audio/Sink devices detected.")
                             font.bold: true
                             font.pixelSize: 11
                             color: "#FFB300"
@@ -595,7 +656,9 @@ Rectangle {
 
                         Label {
                             Layout.fillWidth: true
-                            text: qsTr("Ensure PipeWire / WirePlumber is running and at least one playback sink is available, then click Scan.")
+                            text: outputDeviceRoot.activeBackend === "JACK"
+                                  ? qsTr("Ensure PipeWire-JACK is active and target playback ports exist, then click Scan.")
+                                  : qsTr("Ensure PipeWire / WirePlumber is running and at least one playback sink is available, then click Scan.")
                             font.pixelSize: 10
                             color: "#808c99"
                             wrapMode: Text.WordWrap
@@ -692,13 +755,23 @@ Rectangle {
                     id: liveDitherCheck
                     text: qsTr("Enable Live TPDF Dither (for 16/24-bit integer output)")
                     font.pixelSize: 10
-                    enabled: !EngineController.directModeEnabled
+                    enabled: !EngineController.directModeEnabled && outputDeviceRoot.audioCaps.formatSelection === "Supported"
                     onToggled: {
                         if (!outputDeviceRoot.syncingControls) {
                             EngineController.setLiveDitherEnabled(checked)
                             outputDeviceRoot.refreshCapabilitiesOnly()
                         }
                     }
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    visible: outputDeviceRoot.audioCaps.formatSelection !== "Supported" &&
+                             !!(outputDeviceRoot.audioCaps.reasons && outputDeviceRoot.audioCaps.reasons.formatSelection)
+                    text: (outputDeviceRoot.audioCaps.reasons && outputDeviceRoot.audioCaps.reasons.formatSelection) || ""
+                    font.pixelSize: 9
+                    color: "#78909C"
+                    wrapMode: Text.WordWrap
                 }
             }
         }
@@ -756,6 +829,39 @@ Rectangle {
                         font.pixelSize: 9; font.family: "Monospace"; font.bold: true
                         color: outputDeviceRoot.capColor(outputDeviceRoot.audioCaps.exclusiveAccess)
                     }
+
+                    Label { text: qsTr("PCM Format:"); font.pixelSize: 9; color: "#78909C" }
+                    Label {
+                        text: outputDeviceRoot.audioCaps.formatSelection || "Unknown"
+                        font.pixelSize: 9; font.family: "Monospace"; font.bold: true
+                        color: outputDeviceRoot.capColor(outputDeviceRoot.audioCaps.formatSelection)
+                    }
+                    Label { text: qsTr("Latency Ctrl:"); font.pixelSize: 9; color: "#78909C" }
+                    Label {
+                        text: outputDeviceRoot.audioCaps.latencyControl || "Unknown"
+                        font.pixelSize: 9; font.family: "Monospace"; font.bold: true
+                        color: outputDeviceRoot.capColor(outputDeviceRoot.audioCaps.latencyControl)
+                    }
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    readonly property var r: outputDeviceRoot.audioCaps.reasons || ({})
+                    readonly property string noteText: {
+                        var parts = [];
+                        if (outputDeviceRoot.audioCaps.sampleRateFollowing !== "Supported" && r.sampleRateFollowing)
+                            parts.push("Rate Follow: " + r.sampleRateFollowing);
+                        else if (outputDeviceRoot.audioCaps.directMode !== "Supported" && r.directMode)
+                            parts.push("Direct Mode: " + r.directMode);
+                        if (outputDeviceRoot.audioCaps.latencyControl !== "Supported" && r.latencyControl)
+                            parts.push("Latency: " + r.latencyControl);
+                        return parts.join(" | ");
+                    }
+                    visible: noteText.length > 0
+                    text: noteText
+                    font.pixelSize: 9
+                    color: "#90A4AE"
+                    wrapMode: Text.WordWrap
                 }
             }
         }

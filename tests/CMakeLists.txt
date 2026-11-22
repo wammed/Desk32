@@ -334,7 +334,10 @@ add_executable(test_phase2_dsp
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
     ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -349,6 +352,7 @@ target_link_libraries(test_phase2_dsp PRIVATE
     Qt6::Sql
     Qt6::Qml
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -365,6 +369,7 @@ target_include_directories(test_phase2_dsp PRIVATE
 
 target_include_directories(test_phase2_dsp SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
@@ -389,7 +394,10 @@ add_executable(test_phase3_external_insert
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
     ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -404,6 +412,7 @@ target_link_libraries(test_phase3_external_insert PRIVATE
     Qt6::Sql
     Qt6::Qml
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -420,6 +429,7 @@ target_include_directories(test_phase3_external_insert PRIVATE
 
 target_include_directories(test_phase3_external_insert SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
@@ -444,7 +454,10 @@ add_executable(test_phase4_export_render
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
     ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -459,6 +472,7 @@ target_link_libraries(test_phase4_export_render PRIVATE
     Qt6::Sql
     Qt6::Qml
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -475,6 +489,7 @@ target_include_directories(test_phase4_export_render PRIVATE
 
 target_include_directories(test_phase4_export_render SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
@@ -543,7 +558,10 @@ add_executable(test_workspace_v381
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
     ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -558,6 +576,7 @@ target_link_libraries(test_workspace_v381 PRIVATE
     Qt6::Sql
     Qt6::Qml
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -574,6 +593,7 @@ target_include_directories(test_workspace_v381 PRIVATE
 
 target_include_directories(test_workspace_v381 SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
@@ -600,7 +620,10 @@ add_executable(test_output_device_ui
     ../src/engine/decoder/FFmpegAudioDecoder.cpp
     ../src/engine/backend/PipeWireAudioOutput.cpp
     ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
     ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
     ../src/engine/render/RenderEngine.cpp
     ../src/engine/render/RenderSequenceManager.cpp
     ../src/engine/session/FolderSession.cpp
@@ -621,6 +644,7 @@ target_link_libraries(test_output_device_ui PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
     ${SOXR_LIBRARIES}
     ${AVFORMAT_LIBRARIES}
     ${AVCODEC_LIBRARIES}
@@ -637,6 +661,7 @@ target_include_directories(test_output_device_ui PRIVATE
 
 target_include_directories(test_output_device_ui SYSTEM PRIVATE
     ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
     ${AVFORMAT_INCLUDE_DIRS}
     ${AVCODEC_INCLUDE_DIRS}
     ${SWRESAMPLE_INCLUDE_DIRS}
@@ -648,6 +673,74 @@ target_compile_options(test_output_device_ui PRIVATE ${TAGLIB_CFLAGS_OTHER})
 add_dependencies(test_output_device_ui desk32_git_version)
 add_test(NAME test_output_device_ui COMMAND test_output_device_ui)
 set_tests_properties(test_output_device_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# JACK (PipeWire-JACK Compatibility Layer) Backend & External Insert Transport Tests
+add_executable(test_jack_output
+    test_jack_output.cpp
+    ../src/core/SettingsManager.cpp
+    ../src/core/LanguageManager.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_compile_definitions(test_jack_output PRIVATE
+    DESK32_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(test_jack_output PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_jack_output PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_jack_output SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+)
+target_compile_options(test_jack_output PRIVATE ${TAGLIB_CFLAGS_OTHER})
+
+add_dependencies(test_jack_output desk32_git_version)
+add_test(NAME test_jack_output COMMAND test_jack_output)
+set_tests_properties(test_jack_output PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 
 

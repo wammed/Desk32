@@ -303,6 +303,14 @@
         <translation>DSP トリム (dspTrimsZero):</translation>
     </message>
     <message>
+        <source>Scan Graph</source>
+        <translation>グラフスキャン</translation>
+    </message>
+    <message>
+        <source>Click Scan Graph to discover hosts...</source>
+        <translation>「グラフスキャン」をクリックしてホストを検出...</translation>
+    </message>
+    <message>
         <source>true (ALL 0.0 dB)</source>
         <translation>true (すべて 0.0 dB)</translation>
     </message>
@@ -527,6 +535,42 @@
     <message>
         <source>Exclusive:</source>
         <translation>排他アクセス:</translation>
+    </message>
+    <message>
+        <source>Audio Backend:</source>
+        <translation>オーディオバックエンド:</translation>
+    </message>
+    <message>
+        <source>JACK (PipeWire)</source>
+        <translation>JACK (PipeWire)</translation>
+    </message>
+    <message>
+        <source>System Default (JACK Physical Auto)</source>
+        <translation>システム標準 (JACK 物理ポート自動接続)</translation>
+    </message>
+    <message>
+        <source>Connect to default physical JACK playback ports</source>
+        <translation>JACK のデフォルト物理再生ポートへ接続</translation>
+    </message>
+    <message>
+        <source>No JACK playback target ports detected.</source>
+        <translation>JACK 再生対象ポートが検出されませんでした。</translation>
+    </message>
+    <message>
+        <source>Ensure PipeWire-JACK is active and target playback ports exist, then click Scan.</source>
+        <translation>PipeWire-JACK が有効で再生先ポートが存在することを確認し、「スキャン」をクリックしてください。</translation>
+    </message>
+    <message>
+        <source>Switched audio backend to %1.</source>
+        <translation>オーディオバックエンドを %1 に切り替えました。</translation>
+    </message>
+    <message>
+        <source>Failed to switch audio backend to %1 (check Log Tab / server status).</source>
+        <translation>オーディオバックエンド %1 への切り替えに失敗しました（Log タブおよびサーバー状態を確認してください）。</translation>
+    </message>
+    <message>
+        <source>Latency Ctrl:</source>
+        <translation>レイテンシ制御:</translation>
     </message>
 </context>
 <context>

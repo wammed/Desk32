@@ -104,16 +104,23 @@ BackendCapabilitiesReport PipeWireControlAdapter::queryCapabilities(bool offline
     BackendCapabilitiesReport report;
     report.backendName = backendName();
     report.exclusiveAccess = CapabilityAvailability::Unsupported; // PipeWire is a shared audio graph
+    report.exclusiveAccessReason = "PipeWire operates as a shared desktop audio graph.";
     report.hardwareBitPerfect = CapabilityAvailability::Unknown;  // Hardware DAC path requires Level 3 capture
+    report.hardwareBitPerfectReason = "Hardware DAC physical output requires external Level 3 loopback capture.";
     report.externalInsert = CapabilityAvailability::Supported;
     report.offlineRender = CapabilityAvailability::Supported;
 
     if (!m_output || !streamInitialized) {
         report.directMode = CapabilityAvailability::Unavailable;
+        report.directModeReason = "PipeWire audio output is not initialized.";
         report.sampleRateFollowing = CapabilityAvailability::Unavailable;
+        report.sampleRateFollowingReason = "PipeWire audio output is not initialized.";
         report.deviceSwitching = CapabilityAvailability::Unavailable;
+        report.deviceSwitchingReason = "PipeWire audio output is not initialized.";
         report.latencyControl = CapabilityAvailability::Unavailable;
+        report.latencyControlReason = "PipeWire audio output is not initialized.";
         report.formatSelection = CapabilityAvailability::Unavailable;
+        report.formatSelectionReason = "PipeWire audio output is not initialized.";
         return report;
     }
 
@@ -122,7 +129,9 @@ BackendCapabilitiesReport PipeWireControlAdapter::queryCapabilities(bool offline
 
     if (state == StreamState::Unconnected || state == StreamState::Error) {
         report.directMode = CapabilityAvailability::Unavailable;
+        report.directModeReason = "PipeWire output stream is unconnected or in error state.";
         report.sampleRateFollowing = CapabilityAvailability::Unavailable;
+        report.sampleRateFollowingReason = report.directModeReason;
         report.deviceSwitching = CapabilityAvailability::Supported;
         report.latencyControl = CapabilityAvailability::Supported;
         report.formatSelection = CapabilityAvailability::Supported;
