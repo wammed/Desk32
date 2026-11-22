@@ -123,6 +123,20 @@ ApplicationWindow {
                         font.bold: true
                         color: EngineController.bitPerfectStatus === 2 ? "#00E5FF" : (EngineController.bitPerfectStatus === 1 ? "#758291" : "#55606d")
                     }
+                    MouseArea {
+                        id: bpBadgeHover
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        acceptedButtons: Qt.NoButton
+                    }
+                    ToolTip.visible: bpBadgeHover.containsMouse
+                    ToolTip.text: EngineController.directModeEnabled
+                                  ? qsTr("Direct Mode ON: all DSP, Listening Correction, External Insert, and Master Gain/Mute are bypassed.")
+                                  : (EngineController.bitPerfectStatus === 2
+                                     ? qsTr("Bit-Perfect verified: no DSP, resampling, dither, or gain alteration active.")
+                                     : (EngineController.bitPerfectStatus === 1
+                                        ? qsTr("Not Verified: DSP, resampling, dither, or gain adjustment is active.")
+                                        : qsTr("Bit-Perfect verification unavailable.")))
                 }
                 Rectangle {
                     width: 100
@@ -785,12 +799,19 @@ ApplicationWindow {
                                         Label {
                                             text: qsTr("Trim:%1dB").arg((deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0).toFixed(1))
                                             font.pixelSize: 9; font.family: "Monospace"; color: "#80DEEA"
+                                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                         }
                                         Button { text: "-"; font.pixelSize: 9; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            enabled: !EngineController.directModeEnabled
+                                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) - 0.5) }
                                         Button { text: "0"; font.pixelSize: 8; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            enabled: !EngineController.directModeEnabled
+                                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, 0.0) }
                                         Button { text: "+"; font.pixelSize: 9; padding: 2; Layout.preferredHeight: 18; Layout.preferredWidth: 20
+                                            enabled: !EngineController.directModeEnabled
+                                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                             onClicked: EngineController.setDeckLevelMatchDb(modelData, (deckBox.deckState && deckBox.deckState.levelMatchDb !== undefined ? deckBox.deckState.levelMatchDb : 0.0) + 0.5) }
                                     }
                                 }
@@ -1005,11 +1026,32 @@ ApplicationWindow {
                         anchors.margins: 12
                         spacing: 10
 
-                        Label {
-                            text: qsTr("MASTER CONTROL // OUTPUT BUS (SECTION 10.2.3)")
-                            font.bold: true
-                            font.pixelSize: 12
-                            color: "#00E5FF"
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Label {
+                                text: qsTr("MASTER CONTROL // OUTPUT BUS (SECTION 10.2.3)")
+                                font.bold: true
+                                font.pixelSize: 12
+                                color: "#00E5FF"
+                            }
+                            Item { Layout.fillWidth: true }
+                            Rectangle {
+                                visible: EngineController.directModeEnabled
+                                implicitWidth: masterDirectBypassLbl.implicitWidth + 10
+                                height: 18
+                                radius: 3
+                                color: "#FFB30020"
+                                border.color: "#FFB300"
+                                Label {
+                                    id: masterDirectBypassLbl
+                                    anchors.centerIn: parent
+                                    text: qsTr("BYPASSED (DIRECT MODE)")
+                                    font.pixelSize: 9
+                                    font.bold: true
+                                    color: "#FFB300"
+                                }
+                            }
                         }
 
                         // 3-Path Output Routing Box (Section 5.11 & 10.2.3)
@@ -1024,6 +1066,8 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.margins: 10
                                 spacing: 4
+                                enabled: !EngineController.directModeEnabled
+                                opacity: EngineController.directModeEnabled ? 0.45 : 1.0
 
                                 Label {
                                     text: qsTr("OUTPUT ROUTING (SECTION 9.2 & 5.11)")
@@ -1115,6 +1159,8 @@ ApplicationWindow {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 8
+                                    enabled: !EngineController.directModeEnabled
+                                    opacity: EngineController.directModeEnabled ? 0.45 : 1.0
 
                                     // Global DSP Bypass Button (Temporary bypass without altering individual states)
                                     Button {
@@ -1231,6 +1277,8 @@ ApplicationWindow {
                                         font.bold: true
                                         highlighted: masterSectionRect.fadersLinked
                                         Layout.preferredHeight: 22
+                                        enabled: !EngineController.directModeEnabled
+                                        opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                         onClicked: masterSectionRect.fadersLinked = !masterSectionRect.fadersLinked
                                     }
 
@@ -1240,6 +1288,8 @@ ApplicationWindow {
                                         font.pixelSize: 9
                                         font.bold: true
                                         Layout.preferredHeight: 22
+                                        enabled: !EngineController.directModeEnabled
+                                        opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                         onClicked: {
                                             EngineController.setMasterGainL(1.0);
                                             EngineController.setMasterGainR(1.0);
@@ -1311,6 +1361,8 @@ ApplicationWindow {
                                                 from: 0.0
                                                 to: 2.0
                                                 value: EngineController.masterGainL
+                                                enabled: !EngineController.directModeEnabled
+                                                opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                                 onMoved: {
                                                     EngineController.setMasterGainL(value);
                                                     if (masterSectionRect.fadersLinked) {
@@ -1458,6 +1510,8 @@ ApplicationWindow {
                                                 from: 0.0
                                                 to: 2.0
                                                 value: EngineController.masterGainR
+                                                enabled: !EngineController.directModeEnabled
+                                                opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                                 onMoved: {
                                                     EngineController.setMasterGainR(value);
                                                     if (masterSectionRect.fadersLinked) {
@@ -1600,6 +1654,22 @@ ApplicationWindow {
                             font.pixelSize: 13
                             color: "#00E5FF"
                         }
+                        Rectangle {
+                            visible: EngineController.directModeEnabled
+                            implicitWidth: dspDirectBypassLbl.implicitWidth + 12
+                            height: 20
+                            radius: 3
+                            color: "#FFB30020"
+                            border.color: "#FFB300"
+                            Label {
+                                id: dspDirectBypassLbl
+                                anchors.centerIn: parent
+                                text: qsTr("BYPASSED BY DIRECT MODE (DSP INACTIVE)")
+                                font.pixelSize: 10
+                                font.bold: true
+                                color: "#FFB300"
+                            }
+                        }
                         Item { Layout.fillWidth: true }
                         Button {
                             text: !EngineController.geqBypassed ? qsTr("GEQ [ON]") : qsTr("GEQ [BYPASS]")
@@ -1607,6 +1677,8 @@ ApplicationWindow {
                             font.bold: true
                             highlighted: !EngineController.geqBypassed
                             visible: eqConsoleRect.eqMode === "geq"
+                            enabled: !EngineController.directModeEnabled
+                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                             onClicked: EngineController.setDspNodeBypass("GEQ", !EngineController.geqBypassed)
                         }
                         Button {
@@ -1615,12 +1687,16 @@ ApplicationWindow {
                             font.bold: true
                             highlighted: !EngineController.peqBypassed
                             visible: eqConsoleRect.eqMode === "peq"
+                            enabled: !EngineController.directModeEnabled
+                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                             onClicked: EngineController.setDspNodeBypass("PEQ", !EngineController.peqBypassed)
                         }
                         Button {
                             text: qsTr("Reset All GEQ (0 dB)")
                             font.pixelSize: 11
                             visible: eqConsoleRect.eqMode === "geq"
+                            enabled: !EngineController.directModeEnabled
+                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                             onClicked: {
                                 EngineController.resetAllGeqBands();
                                 eqCanvas.requestPaint();
@@ -1858,6 +1934,8 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             spacing: 4
+                            enabled: !EngineController.directModeEnabled
+                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
 
                             Repeater {
                                 id: geqRepeater
@@ -2016,6 +2094,8 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.margins: 10
                                 spacing: 8
+                                enabled: !EngineController.directModeEnabled
+                                opacity: EngineController.directModeEnabled ? 0.45 : 1.0
 
                                 // Channel and Preset Bar
                                 RowLayout {
@@ -2570,9 +2650,11 @@ ApplicationWindow {
                                                               ? ((EngineController.externalInsertLastError || "").length > 0
                                                                  ? EngineController.externalInsertLastError
                                                                  : qsTr("Not linked to external host"))
-                                                              : (EngineController.externalInsertBypassed
-                                                                 ? qsTr("Dry Bypass Active (Lossless passthrough)")
-                                                                 : qsTr("Active Stream passing through Insert Node"))
+                                                              : (EngineController.directModeEnabled
+                                                                 ? qsTr("Bypassed by Direct Mode (Lossless passthrough)")
+                                                                 : (EngineController.externalInsertBypassed
+                                                                    ? qsTr("Dry Bypass Active (Lossless passthrough)")
+                                                                    : qsTr("Active Stream passing through Insert Node")))
                                                         font.pixelSize: 10
                                                         color: "#A0AAB2"
                                                         elide: Text.ElideRight
@@ -2587,7 +2669,8 @@ ApplicationWindow {
                                             Layout.preferredHeight: 32
                                             font.pixelSize: 11
                                             font.bold: true
-                                            enabled: insertBadgeFull.isLiveOk
+                                            enabled: insertBadgeFull.isLiveOk && !EngineController.directModeEnabled
+                                            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
                                             text: EngineController.externalInsertBypassed ? qsTr("ENGAGE INSERT (DISABLE BYPASS)") : qsTr("FORCE DRY BYPASS (MUTE INSERT)")
                                             highlighted: !EngineController.externalInsertBypassed
                                             onClicked: EngineController.setExternalInsertBypass(!EngineController.externalInsertBypassed)

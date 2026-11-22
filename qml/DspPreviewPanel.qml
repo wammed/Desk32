@@ -161,6 +161,27 @@ Rectangle {
             }
         }
 
+        // Direct Mode Bypass Notice
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: directBannerLabel.implicitHeight + 10
+            visible: EngineController.directModeEnabled
+            color: "#FFB30020"
+            border.color: "#FFB300"
+            border.width: 1
+            radius: 4
+            Label {
+                id: directBannerLabel
+                anchors.fill: parent
+                anchors.margins: 5
+                text: qsTr("BYPASSED BY DIRECT MODE: DSP processing is inactive while Direct Mode is ON.")
+                font.pixelSize: 9
+                font.bold: true
+                color: "#FFB300"
+                wrapMode: Text.WordWrap
+            }
+        }
+
         // Sub-tabs for switching between DSP nodes cleanly
         TabBar {
             id: dspTabBar
@@ -195,6 +216,8 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             currentIndex: dspTabBar.currentIndex
+            enabled: !EngineController.directModeEnabled
+            opacity: EngineController.directModeEnabled ? 0.45 : 1.0
 
             // ================= 1. FILTER (HPF / LPF) =================
             ScrollView {
