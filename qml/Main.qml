@@ -140,7 +140,7 @@ ApplicationWindow {
                                      ? qsTr("Bit-Perfect verified: no DSP, resampling, dither, or gain alteration active.")
                                      : (EngineController.bitPerfectStatus === 1
                                         ? qsTr("Not Verified: DSP, resampling, dither, or gain adjustment is active.")
-                                        : qsTr("Bit-Perfect verification unavailable."))))
+                                        : qsTr("Indeterminate: waiting for a loaded track and initial Level 1 verification."))))
                                   + "  [" + qsTr("Click for L1/L2/L3 details") + "]"
                 }
                 Rectangle {

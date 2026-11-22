@@ -3669,6 +3669,18 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
     QCOMPARE(ctrl.bitPerfectStatus(), 1);
     ctrl.setOutputPcmFormat("F32LE");
 
+    // Empty deck MUST remain Indeterminate even with Direct Mode ON and offline blocks processed
+    ctrl.setOutputRoutingMode(1);
+    ctrl.setDirectModeEnabled(true);
+    ctrl.renderOfflineBlock(dummyOut.data(), 256);
+    QCOMPARE(ctrl.bitPerfectStatus(), 0);
+    QCOMPARE(ctrl.bitPerfectModeState(), 1);
+    ctrl.setDirectModeEnabled(false);
+    ctrl.renderOfflineBlock(dummyOut.data(), 256);
+    QCOMPARE(ctrl.bitPerfectStatus(), 0);
+    QCOMPARE(ctrl.bitPerfectModeState(), 1);
+    ctrl.setOutputRoutingMode(0);
+
     // Transition to Verified during active track playback logs 1 BitPerfectVerified report without duplicates
     {
         const QString bpWav = m_tempDir->path() + "/bp_verify_track.wav";
@@ -3695,6 +3707,11 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
         ctrl.setGlobalDspBypass(false);
         ctrl.setDirectModeEnabled(false);
 
+        // Before initial L1 block verification for this loaded track -> MUST be Indeterminate
+        QCOMPARE(ctrl.bitPerfectStatus(), 0);
+        QCOMPARE(ctrl.bitPerfectModeState(), 1);
+        QCOMPARE(ctrl.getBitPerfectVerificationReport()["level1"].toMap()["status"].toString(), QString("Indeterminate"));
+
         desk32::core::log::LogFilter bpFilter;
         bpFilter.category = "AudioEngine";
         bpFilter.searchText = "BitPerfect";
@@ -3713,6 +3730,12 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
         QVERIFY(afterFirst.front().detailsJson.find("\"level1\"") != std::string::npos);
         QVERIFY(afterFirst.front().detailsJson.find("\"level2\"") != std::string::npos);
         QVERIFY(afterFirst.front().detailsJson.find("\"level3\"") != std::string::npos);
+
+        // Toggling Direct Mode ON invalidates L1 -> remains Indeterminate until a post-toggle L1 block is verified
+        ctrl.setDirectModeEnabled(true);
+        QCOMPARE(ctrl.bitPerfectStatus(), 0);
+        QCOMPARE(ctrl.bitPerfectModeState(), 1);
+        ctrl.setDirectModeEnabled(false);
 
         // Drop to NotVerified (PEQ ON) then back to Verified (PEQ OFF) -> logs one more event
         ctrl.setPeqBypassed(false);

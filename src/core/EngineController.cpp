@@ -1571,6 +1571,9 @@ void EngineController::setOutputPcmFormat(const QString &formatName) {
     fmt = OutputPcmFormat::S32LE;
   }
   m_audioControlManager->setPreferredPcmFormat(fmt);
+  if (m_pipeline) {
+    m_pipeline->invalidateLevel1Measurement();
+  }
   emit diagnosticsChanged();
 }
 
@@ -1584,6 +1587,7 @@ QString EngineController::outputPcmFormat() const {
 void EngineController::setLiveDitherEnabled(bool enabled) {
   if (m_pipeline) {
     m_pipeline->setLiveDitherEnabled(enabled);
+    m_pipeline->invalidateLevel1Measurement();
   }
   if (m_audioOutput) {
     const bool directBypass =
@@ -1616,6 +1620,9 @@ void EngineController::setDirectModeEnabled(bool enabled) {
   const bool prev =
       m_directModeEnabled.exchange(enabled, std::memory_order_acq_rel);
   if (prev != enabled) {
+    if (m_pipeline) {
+      m_pipeline->invalidateLevel1Measurement();
+    }
     emit diagnosticsChanged();
     log::LogService::instance().log(
         QStringLiteral("AudioEngine"), QStringLiteral("DirectModeToggle"),
@@ -1706,15 +1713,23 @@ int EngineController::bitPerfectStatus() const {
     return 1;
   }
 
+  if (!hasOpenTrack) {
+    return 0; // Indeterminate: no track loaded to verify
+  }
+
+  const uint64_t requiredGen = m_pipeline ? m_pipeline->level1Generation() : 0;
   const auto telem = m_pipeline ? m_pipeline->currentTelemetry()
                                 : engine::pipeline::DspTelemetry{};
-  const bool level1Lossless = (telem.processedFrameCount > 0) &&
+  const bool level1Lossless = m_pipeline &&
+                              (telem.processedFrameCount > 0) &&
+                              (telem.level1Generation == requiredGen) &&
+                              (telem.level1DirectBypassActive == directBypass) &&
                               telem.level1SamplesIdentical &&
                               telem.level1OutputPcmLossless;
-  if (dmStatus == 2 && (hasOpenTrack || level1Lossless)) {
+  if (dmStatus == 2 && hasOpenTrack && level1Lossless) {
     return 2;
   }
-  if (!directBypass && level1Lossless) {
+  if (!directBypass && hasOpenTrack && level1Lossless) {
     return 2; // Level 1 software bit-perfect verified even when Direct Mode is OFF (§3.4)
   }
 
@@ -1732,10 +1747,14 @@ int EngineController::bitPerfectModeState() const {
   if (legacy == 1) {
     return 2; // NotVerified
   }
-  if (m_pipeline && m_pipeline->currentTelemetry().processedFrameCount > 0 &&
-      (!m_pipeline->level1SamplesIdentical() ||
-       !m_pipeline->currentTelemetry().level1OutputPcmLossless)) {
-    return 2; // NotVerified
+  if (m_pipeline) {
+    const uint64_t requiredGen = m_pipeline->level1Generation();
+    const auto telem = m_pipeline->currentTelemetry();
+    if (telem.processedFrameCount > 0 &&
+        telem.level1Generation == requiredGen &&
+        (!telem.level1SamplesIdentical || !telem.level1OutputPcmLossless)) {
+      return 2; // NotVerified
+    }
   }
   if (legacy == 2) {
     return m_directModeEnabled.load(std::memory_order_relaxed) ? 4 : 3;
@@ -1765,9 +1784,11 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   report["modeStateText"] = bitPerfectModeStateText();
   report["legacyStatus"] = bitPerfectStatus();
 
+  const uint64_t requiredGen = m_pipeline ? m_pipeline->level1Generation() : 0;
   const auto telem = m_pipeline ? m_pipeline->currentTelemetry() : engine::pipeline::DspTelemetry{};
+  const bool level1Fresh = telem.processedFrameCount > 0 && telem.level1Generation == requiredGen;
   const bool level1Pass =
-      telem.processedFrameCount > 0 && telem.level1SamplesIdentical &&
+      level1Fresh && telem.level1SamplesIdentical &&
       telem.level1OutputPcmLossless;
   QVariantMap level1;
   level1["internalSamplesIdentical"] = telem.level1SamplesIdentical;
@@ -1788,8 +1809,8 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   level1["totalBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1TotalBlocks() : 0);
   level1["status"] = level1Pass
                          ? QStringLiteral("Verified")
-                         : (telem.processedFrameCount == 0 ? QStringLiteral("Indeterminate")
-                                                           : QStringLiteral("NotVerified"));
+                         : (!level1Fresh ? QStringLiteral("Indeterminate")
+                                         : QStringLiteral("NotVerified"));
   report["level1"] = level1;
 
   const auto *dm = m_deckManager.get();
@@ -2414,6 +2435,9 @@ void EngineController::play(const QString &deckId) {
       }
     }
     followActiveDeckSampleRateIfDirectMode();
+    if (m_pipeline) {
+      m_pipeline->invalidateLevel1Measurement();
+    }
     d->play();
     emit deckStateChanged(deckId);
     const auto info = d->trackInfo();
@@ -2587,6 +2611,9 @@ void EngineController::switchDeck(const QString &targetDeckId, int mode) {
   if (res.success) {
     followActiveDeckSampleRateIfDirectMode();
     updateSourceBitDepthFromActiveDeck();
+    if (m_pipeline) {
+      m_pipeline->invalidateLevel1Measurement();
+    }
     emit activeDeckChanged(targetDeckId);
     emit deckStateChanged("A");
     emit deckStateChanged("B");
@@ -2620,6 +2647,9 @@ void EngineController::quickSwitchAB() {
   if (res.success) {
     followActiveDeckSampleRateIfDirectMode();
     updateSourceBitDepthFromActiveDeck();
+    if (m_pipeline) {
+      m_pipeline->invalidateLevel1Measurement();
+    }
     QString act(res.targetDeck);
     emit activeDeckChanged(act);
     emit deckStateChanged("A");
@@ -2973,6 +3003,9 @@ bool EngineController::loadTrack(const QString &deckId,
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
+      if (m_pipeline) {
+        m_pipeline->invalidateLevel1Measurement();
+      }
     }
     emit deckStateChanged(deckId);
     emit diagnosticsChanged();
@@ -3084,6 +3117,9 @@ bool EngineController::startFolderSession(const QString &deckId,
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
+      if (m_pipeline) {
+        m_pipeline->invalidateLevel1Measurement();
+      }
     }
     emit deckStateChanged(deckId);
     emit diagnosticsChanged();
@@ -3147,6 +3183,9 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
+      if (m_pipeline) {
+        m_pipeline->invalidateLevel1Measurement();
+      }
     }
     emit deckStateChanged(deckId);
     emit diagnosticsChanged();

@@ -56,6 +56,7 @@ struct DspTelemetry {
     uint64_t level1OutputHash = 0;
     uint64_t level1VerifiedBlocks = 0;
     uint64_t level1TotalBlocks = 0;
+    uint64_t level1Generation = 0;
 };
 
 class AudioPipeline {
@@ -245,6 +246,14 @@ public:
 
     [[nodiscard]] uint64_t level1TotalBlocks() const noexcept {
         return m_level1TotalBlocks.load(std::memory_order_relaxed);
+    }
+
+    void invalidateLevel1Measurement() noexcept {
+        m_level1Generation.fetch_add(1, std::memory_order_release);
+    }
+
+    [[nodiscard]] uint64_t level1Generation() const noexcept {
+        return m_level1Generation.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] uint64_t readerExhaustionDrops() const noexcept {
@@ -469,6 +478,7 @@ public:
         // 0. Drain pending discrete parameter commands and continuous mailbox updates at block boundary
         drainParameterCommands(masterGuard.chain, listeningGuard.chain);
         drainParameterMailbox(masterGuard.chain, listeningGuard.chain);
+        const uint64_t level1Gen = m_level1Generation.load(std::memory_order_acquire);
 
         // Pre-DSP Metering & Level 1 Input Snapshot (Strictly zero heap allocation)
         double prePeakL = 0.0;
@@ -520,7 +530,7 @@ public:
                 (targetFormat != SampleFormat::Int16) && (postPcmDiff <= 1e-6);
             publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
                              prePeakL, prePeakR, preRmsL, preRmsR,
-                             inputHash, refFrames, true, postPcmLossless, effectiveDither, postPcmDiff);
+                             inputHash, refFrames, true, postPcmLossless, effectiveDither, postPcmDiff, level1Gen);
             return;
         }
 
@@ -602,7 +612,7 @@ public:
         m_hasProcessedAnyBlock.store(true, std::memory_order_relaxed);
         publishTelemetry(masterGuard.chain, frameCount, left, right, tapPeakL, tapPeakR,
                          prePeakL, prePeakR, preRmsL, preRmsR,
-                         inputHash, refFrames, false, postPcmLossless, effectiveDither, postPcmDiff);
+                         inputHash, refFrames, false, postPcmLossless, effectiveDither, postPcmDiff, level1Gen);
     }
 
 private:
@@ -851,7 +861,8 @@ private:
                           bool directBypass = false,
                           bool postPcmLossless = false,
                           bool effectiveDither = false,
-                          double postPcmMaxDiff = 0.0) noexcept {
+                          double postPcmMaxDiff = 0.0,
+                          uint64_t level1Gen = 0) noexcept {
         DspTelemetry& t = m_telemetryBuffers[static_cast<size_t>(m_writerTelemetryIndex)];
         t.graphSampleRate = m_graphSampleRate.load(std::memory_order_relaxed);
         t.processedFrameCount += frames;
@@ -907,6 +918,7 @@ private:
         t.level1DitherActive = effectiveDither;
         t.level1DirectBypassActive = directBypass;
         t.level1PostPcmMaxAbsDiff = postPcmMaxDiff;
+        t.level1Generation = level1Gen;
         t.level1TotalBlocks = m_level1TotalBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
         if (identical && postPcmLossless) {
             t.level1VerifiedBlocks = m_level1VerifiedBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -980,6 +992,7 @@ private:
     alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefR{};
     alignas(64) std::atomic<uint64_t> m_level1VerifiedBlocks{0};
     alignas(64) std::atomic<uint64_t> m_level1TotalBlocks{0};
+    alignas(64) std::atomic<uint64_t> m_level1Generation{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;
