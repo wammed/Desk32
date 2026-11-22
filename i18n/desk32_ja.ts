@@ -326,5 +326,132 @@
         <source>Unverifiable (External hardware capture required): Host software cannot observe DAC physical output after PipeWire/driver stages, so L1/L2 verification alone does not prove end-to-end hardware bit-perfectness.</source>
         <translation>検証不能（外部ハードウェアでのキャプチャが必要）：ホスト側ソフトウェアからは PipeWire・ドライバ以降の DAC 物理出力を観測できないため、L1/L2 のみでエンドツーエンドのビットパーフェクト検証は完了しません。</translation>
     </message>
+    <message>
+        <source>🔊 OUTPUT [ON]</source>
+        <translation>🔊 出力デバイス [ON]</translation>
+    </message>
+    <message>
+        <source>🔊 OUTPUT</source>
+        <translation>🔊 出力デバイス</translation>
+    </message>
+    <message>
+        <source>Output Device: %1 (%2)</source>
+        <translation>出力デバイス: %1 (%2)</translation>
+    </message>
+    <message>
+        <source>Device: Default</source>
+        <translation>デバイス: 標準</translation>
+    </message>
+    <message>
+        <source>Device: %1</source>
+        <translation>デバイス: %1</translation>
+    </message>
+    <message>
+        <source>Select Audio Output Device (%1)</source>
+        <translation>オーディオ出力デバイスを選択 (%1)</translation>
+    </message>
+</context>
+<context>
+    <name>OutputDevicePanel</name>
+    <message>
+        <source>AUDIO OUTPUT DEVICES</source>
+        <translation>オーディオ出力デバイス</translation>
+    </message>
+    <message>
+        <source>Scan</source>
+        <translation>再スキャン</translation>
+    </message>
+    <message>
+        <source>Enumerated %1 output device(s).</source>
+        <translation>%1 件の出力デバイスを検出しました。</translation>
+    </message>
+    <message>
+        <source>ACTIVE OUTPUT SUMMARY</source>
+        <translation>現在の出力設定サマリー</translation>
+    </message>
+    <message>
+        <source>System Default (PipeWire Auto)</source>
+        <translation>システム標準 (PipeWire 自動)</translation>
+    </message>
+    <message>
+        <source>Follow PipeWire / WirePlumber default sink routing</source>
+        <translation>PipeWire / WirePlumber の既定シンクに自動ルーティング</translation>
+    </message>
+    <message>
+        <source>Switched output device to: %1</source>
+        <translation>出力デバイスを切り替えました: %1</translation>
+    </message>
+    <message>
+        <source>Failed to switch output device to: %1 (check Log Tab for details)</source>
+        <translation>出力デバイスの切り替えに失敗しました: %1（詳細はログタブを確認してください）</translation>
+    </message>
+    <message>
+        <source>AVAILABLE OUTPUT SINKS (%1)</source>
+        <translation>利用可能な出力シンク (%1)</translation>
+    </message>
+    <message>
+        <source>Click a device to route audio</source>
+        <translation>デバイスをクリックして出力先を選択</translation>
+    </message>
+    <message>
+        <source>ACTIVE</source>
+        <translation>選択中</translation>
+    </message>
+    <message>
+        <source>DEFAULT</source>
+        <translation>既定</translation>
+    </message>
+    <message>
+        <source>Graph Rate</source>
+        <translation>グラフレート</translation>
+    </message>
+    <message>
+        <source>No PipeWire Audio/Sink devices detected.</source>
+        <translation>PipeWire の Audio/Sink デバイスが検出されませんでした。</translation>
+    </message>
+    <message>
+        <source>Ensure PipeWire / WirePlumber is running and at least one playback sink is available, then click Scan.</source>
+        <translation>PipeWire / WirePlumber が起動しており再生シンクが有効であることを確認してから「再スキャン」を押してください。</translation>
+    </message>
+    <message>
+        <source>STREAM FORMAT &amp; LATENCY</source>
+        <translation>ストリーム形式・レイテンシー設定</translation>
+    </message>
+    <message>
+        <source>PCM Format:</source>
+        <translation>PCM 形式:</translation>
+    </message>
+    <message>
+        <source>Buffer (Quantum):</source>
+        <translation>バッファ (Quantum):</translation>
+    </message>
+    <message>
+        <source>Fixed Sample Rate:</source>
+        <translation>固定サンプルレート:</translation>
+    </message>
+    <message>
+        <source>Enable Live TPDF Dither (for 16/24-bit integer output)</source>
+        <translation>ライブ TPDF ディザを有効化（16/24-bit 整数出力時）</translation>
+    </message>
+    <message>
+        <source>BACKEND CAPABILITIES (SECTION 8.2)</source>
+        <translation>バックエンド機能可用性 (SECTION 8.2)</translation>
+    </message>
+    <message>
+        <source>Device Switch:</source>
+        <translation>デバイス切替:</translation>
+    </message>
+    <message>
+        <source>Direct Mode:</source>
+        <translation>Direct Mode:</translation>
+    </message>
+    <message>
+        <source>Rate Follow:</source>
+        <translation>レート追従:</translation>
+    </message>
+    <message>
+        <source>Exclusive:</source>
+        <translation>排他アクセス:</translation>
+    </message>
 </context>
 </TS>

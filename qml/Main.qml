@@ -215,6 +215,24 @@ ApplicationWindow {
                 onClicked: workspacePanel.visible = !workspacePanel.visible
             }
 
+            // Audio Output Device Selection Panel Toggle (§8.1 / §8.2)
+            Button {
+                text: outputDevicePanel.visible ? qsTr("🔊 OUTPUT [ON]") : qsTr("🔊 OUTPUT")
+                font.bold: true
+                font.pixelSize: 11
+                highlighted: outputDevicePanel.visible
+                onClicked: {
+                    outputDevicePanel.visible = !outputDevicePanel.visible
+                    if (outputDevicePanel.visible) {
+                        outputDevicePanel.refreshDevices()
+                    }
+                }
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("Output Device: %1 (%2)")
+                              .arg(EngineController.currentOutputDevice)
+                              .arg(EngineController.outputPcmFormat)
+            }
+
             // Export / Render Panel Toggle (Phase 4 Step 3)
             Button {
                 text: renderPanel.visible ? qsTr("⏺ RENDER [ON]") : qsTr("⏺ RENDER")
@@ -841,7 +859,16 @@ ApplicationWindow {
 
                         // Diagnostics Top Strip
                         RowLayout {
+                            id: monitorDiagStrip
                             Layout.fillWidth: true
+                            spacing: 8
+                            property var audioCaps: EngineController.getAudioCapabilities()
+                            Connections {
+                                target: EngineController
+                                function onDiagnosticsChanged() {
+                                    monitorDiagStrip.audioCaps = EngineController.getAudioCapabilities()
+                                }
+                            }
                             Label {
                                 text: qsTr("MAIN AUDIO MONITOR // REAL-TIME DIAGNOSTICS")
                                 font.bold: true
@@ -850,7 +877,13 @@ ApplicationWindow {
                             }
                             Item { Layout.fillWidth: true }
                             Label {
-                                text: "PIPEWIRE: " + EngineController.backendStatusText.toUpperCase() + " // " + (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz // BUFFER: 256 // XRUN: " + EngineController.xrunCount
+                                property int qVal: (monitorDiagStrip.audioCaps && monitorDiagStrip.audioCaps.negotiatedQuantum > 0)
+                                                   ? monitorDiagStrip.audioCaps.negotiatedQuantum : 256
+                                text: "PIPEWIRE: " + EngineController.backendStatusText.toUpperCase()
+                                      + " // " + (EngineController.graphSampleRate / 1000.0).toFixed(1) + " kHz"
+                                      + " // " + EngineController.outputPcmFormat
+                                      + " // BUFFER: " + qVal
+                                      + " // XRUN: " + EngineController.xrunCount
                                 font.family: "Monospace"
                                 font.pixelSize: 12
                                 color: EngineController.backendStatusText === "Error" ? "#FF5252" : (EngineController.xrunCount === 0 ? "#00E676" : "#FF5252")
@@ -1039,8 +1072,27 @@ ApplicationWindow {
                                 font.bold: true
                                 font.pixelSize: 12
                                 color: "#00E5FF"
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
                             }
-                            Item { Layout.fillWidth: true }
+                            Button {
+                                text: EngineController.currentOutputDevice === "pipewire_default" || EngineController.currentOutputDevice === "offline_simulation"
+                                      ? qsTr("Device: Default")
+                                      : qsTr("Device: %1").arg(EngineController.currentOutputDevice)
+                                font.pixelSize: 9
+                                font.bold: true
+                                Layout.preferredHeight: 22
+                                Layout.maximumWidth: 165
+                                onClicked: {
+                                    outputDevicePanel.visible = !outputDevicePanel.visible
+                                    if (outputDevicePanel.visible) {
+                                        outputDevicePanel.refreshDevices()
+                                    }
+                                }
+                                ToolTip.visible: hovered
+                                ToolTip.text: qsTr("Select Audio Output Device (%1)").arg(EngineController.currentOutputDevice)
+                            }
                             Rectangle {
                                 visible: EngineController.directModeEnabled
                                 implicitWidth: masterDirectBypassLbl.implicitWidth + 10
@@ -3654,6 +3706,21 @@ ApplicationWindow {
             }
             workspacePanel.visible = false
         }
+    }
+
+    // Audio Output Device Enumeration & Selection Panel (§8.1 / §8.2)
+    OutputDevicePanel {
+        id: outputDevicePanel
+        anchors.right: parent.right
+        anchors.rightMargin: 16
+        anchors.top: parent.top
+        anchors.topMargin: 56
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 16
+        width: 480
+        z: 1002
+        visible: false
+        onCloseRequested: outputDevicePanel.visible = false
     }
 
     Connections {

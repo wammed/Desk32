@@ -141,6 +141,7 @@ qt_add_qml_module(desk32
     QML_FILES
         qml/Main.qml
         qml/DspPreviewPanel.qml
+        qml/OutputDevicePanel.qml
         qml/RenderPanel.qml
         qml/WorkspacePanel.qml
     RESOURCES
@@ -156,6 +157,7 @@ qt_add_translations(desk32
         src/main.cpp
         qml/Main.qml
         qml/DspPreviewPanel.qml
+        qml/OutputDevicePanel.qml
         qml/RenderPanel.qml
         qml/WorkspacePanel.qml
 )

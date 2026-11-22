@@ -582,6 +582,68 @@ add_dependencies(test_workspace_v381 desk32_git_version)
 add_test(NAME test_workspace_v381 COMMAND test_workspace_v381)
 set_tests_properties(test_workspace_v381 PROPERTIES TIMEOUT 300)
 
+# Output Device Enumeration & Selection UI Verification
+add_executable(test_output_device_ui
+    test_output_device_ui.cpp
+    ../src/core/LanguageManager.cpp
+    ../src/core/EngineController.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_compile_definitions(test_output_device_ui PRIVATE
+    DESK32_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(test_output_device_ui PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    ${PIPEWIRE_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_output_device_ui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_output_device_ui SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+)
+target_compile_options(test_output_device_ui PRIVATE ${TAGLIB_CFLAGS_OTHER})
+
+add_dependencies(test_output_device_ui desk32_git_version)
+add_test(NAME test_output_device_ui COMMAND test_output_device_ui)
+set_tests_properties(test_output_device_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 
 
 

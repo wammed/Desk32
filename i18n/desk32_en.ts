@@ -270,5 +270,132 @@
         <source>NO TRACK AUDITIONING</source>
         <translation>NO TRACK AUDITIONING</translation>
     </message>
+    <message>
+        <source>🔊 OUTPUT [ON]</source>
+        <translation>🔊 OUTPUT [ON]</translation>
+    </message>
+    <message>
+        <source>🔊 OUTPUT</source>
+        <translation>🔊 OUTPUT</translation>
+    </message>
+    <message>
+        <source>Output Device: %1 (%2)</source>
+        <translation>Output Device: %1 (%2)</translation>
+    </message>
+    <message>
+        <source>Device: Default</source>
+        <translation>Device: Default</translation>
+    </message>
+    <message>
+        <source>Device: %1</source>
+        <translation>Device: %1</translation>
+    </message>
+    <message>
+        <source>Select Audio Output Device (%1)</source>
+        <translation>Select Audio Output Device (%1)</translation>
+    </message>
+</context>
+<context>
+    <name>OutputDevicePanel</name>
+    <message>
+        <source>AUDIO OUTPUT DEVICES</source>
+        <translation>AUDIO OUTPUT DEVICES</translation>
+    </message>
+    <message>
+        <source>Scan</source>
+        <translation>Scan</translation>
+    </message>
+    <message>
+        <source>Enumerated %1 output device(s).</source>
+        <translation>Enumerated %1 output device(s).</translation>
+    </message>
+    <message>
+        <source>ACTIVE OUTPUT SUMMARY</source>
+        <translation>ACTIVE OUTPUT SUMMARY</translation>
+    </message>
+    <message>
+        <source>System Default (PipeWire Auto)</source>
+        <translation>System Default (PipeWire Auto)</translation>
+    </message>
+    <message>
+        <source>Follow PipeWire / WirePlumber default sink routing</source>
+        <translation>Follow PipeWire / WirePlumber default sink routing</translation>
+    </message>
+    <message>
+        <source>Switched output device to: %1</source>
+        <translation>Switched output device to: %1</translation>
+    </message>
+    <message>
+        <source>Failed to switch output device to: %1 (check Log Tab for details)</source>
+        <translation>Failed to switch output device to: %1 (check Log Tab for details)</translation>
+    </message>
+    <message>
+        <source>AVAILABLE OUTPUT SINKS (%1)</source>
+        <translation>AVAILABLE OUTPUT SINKS (%1)</translation>
+    </message>
+    <message>
+        <source>Click a device to route audio</source>
+        <translation>Click a device to route audio</translation>
+    </message>
+    <message>
+        <source>ACTIVE</source>
+        <translation>ACTIVE</translation>
+    </message>
+    <message>
+        <source>DEFAULT</source>
+        <translation>DEFAULT</translation>
+    </message>
+    <message>
+        <source>Graph Rate</source>
+        <translation>Graph Rate</translation>
+    </message>
+    <message>
+        <source>No PipeWire Audio/Sink devices detected.</source>
+        <translation>No PipeWire Audio/Sink devices detected.</translation>
+    </message>
+    <message>
+        <source>Ensure PipeWire / WirePlumber is running and at least one playback sink is available, then click Scan.</source>
+        <translation>Ensure PipeWire / WirePlumber is running and at least one playback sink is available, then click Scan.</translation>
+    </message>
+    <message>
+        <source>STREAM FORMAT &amp; LATENCY</source>
+        <translation>STREAM FORMAT &amp; LATENCY</translation>
+    </message>
+    <message>
+        <source>PCM Format:</source>
+        <translation>PCM Format:</translation>
+    </message>
+    <message>
+        <source>Buffer (Quantum):</source>
+        <translation>Buffer (Quantum):</translation>
+    </message>
+    <message>
+        <source>Fixed Sample Rate:</source>
+        <translation>Fixed Sample Rate:</translation>
+    </message>
+    <message>
+        <source>Enable Live TPDF Dither (for 16/24-bit integer output)</source>
+        <translation>Enable Live TPDF Dither (for 16/24-bit integer output)</translation>
+    </message>
+    <message>
+        <source>BACKEND CAPABILITIES (SECTION 8.2)</source>
+        <translation>BACKEND CAPABILITIES (SECTION 8.2)</translation>
+    </message>
+    <message>
+        <source>Device Switch:</source>
+        <translation>Device Switch:</translation>
+    </message>
+    <message>
+        <source>Direct Mode:</source>
+        <translation>Direct Mode:</translation>
+    </message>
+    <message>
+        <source>Rate Follow:</source>
+        <translation>Rate Follow:</translation>
+    </message>
+    <message>
+        <source>Exclusive:</source>
+        <translation>Exclusive:</translation>
+    </message>
 </context>
 </TS>

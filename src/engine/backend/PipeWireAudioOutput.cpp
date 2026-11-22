@@ -115,6 +115,12 @@ void onEnumRegistryGlobal(void* data, uint32_t id, uint32_t /*permissions*/,
     dev.description = nodeDesc ? nodeDesc : (nodeNick ? nodeNick : dev.name);
     dev.mediaClass = mediaClass;
     dev.channels = 2;
+    if (const char* chStr = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNELS)) {
+        const uint32_t parsedCh = static_cast<uint32_t>(std::strtoul(chStr, nullptr, 10));
+        if (parsedCh > 0) {
+            dev.channels = parsedCh;
+        }
+    }
     dev.nativeFormat = OutputPcmFormat::F32LE;
 
     if (const char* rateStr = spa_dict_lookup(props, PW_KEY_NODE_RATE)) {
@@ -413,7 +419,9 @@ std::vector<AudioOutputDeviceInfo> PipeWireAudioOutput::enumerateOutputDevices()
     if (m_offlineSimulation) {
         if (!simCopy.empty()) {
             for (auto& d : simCopy) {
-                d.isDefault = activeTarget.empty() ? (d.isDefault) : (d.name == activeTarget);
+                d.isDefault = activeTarget.empty()
+                                  ? d.isDefault
+                                  : (d.name == activeTarget || std::to_string(d.nodeId) == activeTarget);
             }
             return simCopy;
         }
@@ -712,8 +720,6 @@ void PipeWireAudioOutput::onStreamStateChanged(void* data, int /*oldState*/, int
                 if (const struct pw_properties* sprops = pw_stream_get_properties(self->m_stream)) {
                     const char* target = pw_properties_get(sprops, PW_KEY_TARGET_OBJECT);
                     if (!target) target = pw_properties_get(sprops, "node.target");
-                    if (!target) target = pw_properties_get(sprops, PW_KEY_NODE_DESCRIPTION);
-                    if (!target) target = pw_properties_get(sprops, PW_KEY_NODE_NAME);
                     if (target && target[0] != '\0') {
                         std::lock_guard<std::mutex> lock(self->m_deviceMutex);
                         self->m_deviceName = target;
