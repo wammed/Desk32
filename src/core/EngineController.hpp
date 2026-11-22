@@ -178,6 +178,7 @@ public:
     [[nodiscard]] int bitPerfectModeState() const;
     [[nodiscard]] QString bitPerfectModeStateText() const;
     Q_INVOKABLE QVariantMap getBitPerfectVerificationReport() const;
+    void checkBitPerfectVerificationTransition();
     Q_INVOKABLE QVariantMap getAudioCapabilities() const;
     Q_INVOKABLE QVariantList enumerateOutputDevices() const;
     Q_INVOKABLE bool selectOutputDevice(const QString& deviceIdOrName);
@@ -561,6 +562,7 @@ private:
     uint32_t m_lastGraphSampleRate{0};
     uint32_t m_lastGraphBufferFrames{0};
     int m_lastDirectModeStatus{-1};
+    int m_lastLoggedBitPerfectModeState{-1};
     int m_healthCheckTick{0};
     std::array<uint64_t, 4> m_lastDeckUnderruns{0, 0, 0, 0};
     size_t m_lastDroppedLogCount{0};

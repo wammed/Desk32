@@ -3641,6 +3641,14 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
     QCOMPARE(bpIndependent["level1"].toMap()["ditherActive"].toBool(), false);
     QVERIFY(bpIndependent["level1"].toMap()["outputPcmLossless"].toBool());
     QVERIFY(bpIndependent["level1"].toMap()["verifiedBlocks"].toULongLong() >= 1);
+    QVERIFY(bpIndependent["level1"].toMap()["totalBlocks"].toULongLong() >=
+            bpIndependent["level1"].toMap()["verifiedBlocks"].toULongLong());
+    QCOMPARE(bpIndependent["level1"].toMap()["hashMatched"].toBool(), true);
+    QCOMPARE(bpIndependent["level1"].toMap()["inputHashHex"].toString(),
+             bpIndependent["level1"].toMap()["outputHashHex"].toString());
+    QVERIFY(!bpIndependent["level2"].toMap()["backendStatus"].toString().isEmpty());
+    QCOMPARE(bpIndependent["level3"].toMap()["unverifiable"].toBool(), true);
+    QCOMPARE(bpIndependent["level3"].toMap()["externalHardwareCaptureRequired"].toBool(), true);
 
     // Live dither toggle on integer quantization format S24_32LE (§3.4 / §4.3)
     ctrl.setOutputPcmFormat("S24_32LE");
@@ -3660,6 +3668,65 @@ void TestPhase2Dsp::testPhase4AuditDspReverbContractsOverflowAndSmoothing()
     QCOMPARE(bpS24Dither["level1"].toMap()["ditherActive"].toBool(), true);
     QCOMPARE(ctrl.bitPerfectStatus(), 1);
     ctrl.setOutputPcmFormat("F32LE");
+
+    // Transition to Verified during active track playback logs 1 BitPerfectVerified report without duplicates
+    {
+        const QString bpWav = m_tempDir->path() + "/bp_verify_track.wav";
+        QFile wf(bpWav);
+        QVERIFY(wf.open(QIODevice::WriteOnly));
+        const uint32_t sr = 48000, nFrames = 4800, dataSz = nFrames * 2 * 2, riffSz = 36 + dataSz, br = sr * 4;
+        const uint16_t pcmFmt = 1, ch = 2, bits = 16, ba = 4;
+        const uint32_t fmtSz = 16;
+        QByteArray hdr;
+        hdr.append("RIFF", 4); hdr.append(reinterpret_cast<const char*>(&riffSz), 4);
+        hdr.append("WAVE", 4); hdr.append("fmt ", 4);
+        hdr.append(reinterpret_cast<const char*>(&fmtSz), 4); hdr.append(reinterpret_cast<const char*>(&pcmFmt), 2);
+        hdr.append(reinterpret_cast<const char*>(&ch), 2); hdr.append(reinterpret_cast<const char*>(&sr), 4);
+        hdr.append(reinterpret_cast<const char*>(&br), 4); hdr.append(reinterpret_cast<const char*>(&ba), 2);
+        hdr.append(reinterpret_cast<const char*>(&bits), 2); hdr.append("data", 4);
+        hdr.append(reinterpret_cast<const char*>(&dataSz), 4);
+        wf.write(hdr);
+        wf.write(QByteArray(static_cast<int>(dataSz), '\0'));
+        wf.close();
+
+        QVERIFY(ctrl.loadTrack("A", bpWav));
+        ctrl.setOutputRoutingMode(1); // Render Monitor Path (bypasses Listening Correction)
+        ctrl.setPeqBypassed(true);
+        ctrl.setGlobalDspBypass(false);
+        ctrl.setDirectModeEnabled(false);
+
+        desk32::core::log::LogFilter bpFilter;
+        bpFilter.category = "AudioEngine";
+        bpFilter.searchText = "BitPerfect";
+        desk32::core::log::LogService::instance().flush();
+        const size_t beforeCount = desk32::core::log::LogService::instance().queryLogs(bpFilter).size();
+
+        ctrl.renderOfflineBlock(dummyOut.data(), 256);
+        QCOMPARE(ctrl.bitPerfectStatus(), 2);
+        QCOMPARE(ctrl.bitPerfectModeState(), 3);
+        ctrl.checkBitPerfectVerificationTransition();
+        ctrl.checkBitPerfectVerificationTransition(); // must not duplicate in same Verified state
+        desk32::core::log::LogService::instance().flush();
+        const auto afterFirst = desk32::core::log::LogService::instance().queryLogs(bpFilter);
+        QCOMPARE(afterFirst.size(), beforeCount + 1);
+        QCOMPARE(QString::fromStdString(afterFirst.front().operation), QStringLiteral("BitPerfectVerified"));
+        QVERIFY(afterFirst.front().detailsJson.find("\"level1\"") != std::string::npos);
+        QVERIFY(afterFirst.front().detailsJson.find("\"level2\"") != std::string::npos);
+        QVERIFY(afterFirst.front().detailsJson.find("\"level3\"") != std::string::npos);
+
+        // Drop to NotVerified (PEQ ON) then back to Verified (PEQ OFF) -> logs one more event
+        ctrl.setPeqBypassed(false);
+        ctrl.checkBitPerfectVerificationTransition();
+        ctrl.setPeqBypassed(true);
+        ctrl.renderOfflineBlock(dummyOut.data(), 256);
+        ctrl.checkBitPerfectVerificationTransition();
+        desk32::core::log::LogService::instance().flush();
+        const auto afterSecond = desk32::core::log::LogService::instance().queryLogs(bpFilter);
+        QCOMPARE(afterSecond.size(), beforeCount + 2);
+
+        ctrl.setOutputRoutingMode(0);
+        ctrl.stop("A");
+    }
 
     // >16-band Listening Correction preset emits presetImportWarning & sets report
     QSignalSpy warnSpy(&ctrl, &EngineController::presetImportWarning);

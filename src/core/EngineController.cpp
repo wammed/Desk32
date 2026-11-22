@@ -78,6 +78,7 @@ bool EngineController::initialize(bool offlineMode) {
   m_globalDspBypass.store(false, std::memory_order_relaxed);
   m_globalBypassDesynced.store(false, std::memory_order_relaxed);
   m_directModeEnabled.store(false, std::memory_order_relaxed);
+  m_lastLoggedBitPerfectModeState = -1;
   m_fixedGraphSampleRate.store(48000.0, std::memory_order_relaxed);
   m_externalInsertPosition.store(4, std::memory_order_relaxed);
   for (uint8_t k = 0; k < 7; ++k) {
@@ -719,6 +720,7 @@ bool EngineController::initialize(bool offlineMode) {
   connect(dspTimer, &QTimer::timeout, this, [this]() {
     emit dspTelemetryChanged();
     emit diagnosticsChanged();
+    checkBitPerfectVerificationTransition();
     pollExternalInsertHealth();
     if (++m_healthCheckTick >= 30) { // ~1 second interval
       m_healthCheckTick = 0;
@@ -1776,7 +1778,14 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   level1["maxAbsDiff"] = telem.level1MaxAbsDiff;
   level1["inputHash"] = static_cast<qulonglong>(telem.level1InputHash);
   level1["outputHash"] = static_cast<qulonglong>(telem.level1OutputHash);
+  level1["inputHashHex"] = QStringLiteral("0x%1").arg(
+      static_cast<qulonglong>(telem.level1InputHash), 16, 16, QLatin1Char('0'));
+  level1["outputHashHex"] = QStringLiteral("0x%1").arg(
+      static_cast<qulonglong>(telem.level1OutputHash), 16, 16, QLatin1Char('0'));
+  level1["hashMatched"] = (telem.processedFrameCount > 0) &&
+                          (telem.level1InputHash == telem.level1OutputHash);
   level1["verifiedBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1VerifiedBlocks() : 0);
+  level1["totalBlocks"] = static_cast<qulonglong>(m_pipeline ? m_pipeline->level1TotalBlocks() : 0);
   level1["status"] = level1Pass
                          ? QStringLiteral("Verified")
                          : (telem.processedFrameCount == 0 ? QStringLiteral("Indeterminate")
@@ -1793,8 +1802,11 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   const bool backendOk = m_audioOutput && diag.directModeStatus == engine::backend::DirectModeStatus::Active;
 
   QVariantMap level2;
+  level2["backendStatus"] = backendStatusText();
   level2["backendParamsVerified"] = backendOk;
   level2["graphRateMatchesTrack"] = noResample;
+  level2["trackSampleRate"] = trackRate;
+  level2["graphSampleRate"] = gRate;
   level2["outputFormatLossless"] = diag.outputFormatLossless;
   level2["outputBitDepth"] = static_cast<int>(diag.outputBitDepth);
   level2["ditherActive"] = diag.ditherActive;
@@ -1815,11 +1827,60 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
 
   QVariantMap level3;
   level3["status"] = QStringLiteral("NotVerified");
+  level3["unverifiable"] = true;
   level3["externalHardwareCaptureRequired"] = true;
+  level3["statusText"] = QStringLiteral("Unverifiable (External hardware capture required)");
   level3["message"] = QStringLiteral("Level 3 verification requires external hardware loopback capture comparison.");
   report["level3"] = level3;
 
   return report;
+}
+
+void EngineController::checkBitPerfectVerificationTransition() {
+  const int modeState = bitPerfectModeState();
+  const bool isVerifiedNow = (modeState == 3 || modeState == 4);
+  if (!isVerifiedNow) {
+    m_lastLoggedBitPerfectModeState = modeState;
+    return;
+  }
+
+  const auto *dm = m_deckManager.get();
+  const auto *active = dm ? dm->activeDeck() : nullptr;
+  const bool hasOpenTrack = active && active->isOpen();
+  const auto telem = m_pipeline ? m_pipeline->currentTelemetry()
+                                : engine::pipeline::DspTelemetry{};
+  if (!hasOpenTrack || telem.processedFrameCount == 0) {
+    return;
+  }
+
+  if (m_lastLoggedBitPerfectModeState == modeState) {
+    return;
+  }
+  m_lastLoggedBitPerfectModeState = modeState;
+
+  const QVariantMap report = getBitPerfectVerificationReport();
+  const QString modeText = report.value(QStringLiteral("modeStateText")).toString();
+  const QVariantMap l1 = report.value(QStringLiteral("level1")).toMap();
+  const QVariantMap l2 = report.value(QStringLiteral("level2")).toMap();
+  const QString json = QString::fromUtf8(
+      QJsonDocument::fromVariant(report).toJson(QJsonDocument::Compact));
+
+  log::LogService::instance().log(
+      QStringLiteral("AudioEngine"),
+      QStringLiteral("BitPerfectVerified"),
+      QStringLiteral("Success"),
+      QString("Bit-Perfect verification entered %1 (L1=%2, %3/%4 blocks, maxDiff=%5; L2=%6, %7 %8 Hz; L3=Unverifiable)")
+          .arg(modeText)
+          .arg(l1.value(QStringLiteral("status")).toString())
+          .arg(l1.value(QStringLiteral("verifiedBlocks")).toULongLong())
+          .arg(l1.value(QStringLiteral("totalBlocks")).toULongLong())
+          .arg(l1.value(QStringLiteral("maxAbsDiff")).toDouble(), 0, 'g', 4)
+          .arg(l2.value(QStringLiteral("status")).toString())
+          .arg(l2.value(QStringLiteral("negotiatedFormat")).toString())
+          .arg(l2.value(QStringLiteral("actualRate")).toInt()),
+      QStringLiteral("AudioEngine"),
+      QStringLiteral("BitPerfect"),
+      json);
 }
 
 int EngineController::backendStatus() const {

@@ -127,16 +127,21 @@ ApplicationWindow {
                         id: bpBadgeHover
                         anchors.fill: parent
                         hoverEnabled: true
-                        acceptedButtons: Qt.NoButton
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            bitPerfectDetailPopup.refreshReport()
+                            bitPerfectDetailPopup.open()
+                        }
                     }
                     ToolTip.visible: bpBadgeHover.containsMouse
-                    ToolTip.text: EngineController.directModeEnabled
+                    ToolTip.text: (EngineController.directModeEnabled
                                   ? qsTr("Direct Mode ON: all DSP, Listening Correction, External Insert, and Master Gain/Mute are bypassed.")
                                   : (EngineController.bitPerfectStatus === 2
                                      ? qsTr("Bit-Perfect verified: no DSP, resampling, dither, or gain alteration active.")
                                      : (EngineController.bitPerfectStatus === 1
                                         ? qsTr("Not Verified: DSP, resampling, dither, or gain adjustment is active.")
-                                        : qsTr("Bit-Perfect verification unavailable.")))
+                                        : qsTr("Bit-Perfect verification unavailable."))))
+                                  + "  [" + qsTr("Click for L1/L2/L3 details") + "]"
                 }
                 Rectangle {
                     width: 100
@@ -3677,6 +3682,301 @@ ApplicationWindow {
                 font.pixelSize: 11
                 color: "#FFB300"
                 text: ""
+            }
+        }
+    }
+
+    // L1 / L2 / L3 Bit-Perfect Verification Detail Popup
+    Popup {
+        id: bitPerfectDetailPopup
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: 560
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        padding: 16
+
+        property var report: EngineController.getBitPerfectVerificationReport()
+
+        function refreshReport() {
+            report = EngineController.getBitPerfectVerificationReport()
+        }
+
+        function statusBadgeColor(st) {
+            if (st === "Verified" || st === "Direct") return "#00E676"
+            if (st === "NotVerified") return "#FF5252"
+            return "#FFB300"
+        }
+
+        Connections {
+            target: EngineController
+            function onDiagnosticsChanged() {
+                if (bitPerfectDetailPopup.visible) {
+                    bitPerfectDetailPopup.refreshReport()
+                }
+            }
+        }
+
+        background: Rectangle {
+            color: "#12151a"
+            border.color: "#2b323d"
+            border.width: 1
+            radius: 6
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            // Header
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Rectangle {
+                    width: 8
+                    height: 8
+                    radius: 4
+                    color: bitPerfectDetailPopup.statusBadgeColor(bitPerfectDetailPopup.report.modeStateText)
+                }
+
+                Label {
+                    text: qsTr("BIT-PERFECT VERIFICATION REPORT (L1 / L2 / L3)")
+                    font.bold: true
+                    font.pixelSize: 12
+                    font.family: "Monospace"
+                    color: "#00E5FF"
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Rectangle {
+                    implicitWidth: modeStateLbl.implicitWidth + 12
+                    height: 20
+                    radius: 3
+                    color: "#1b2028"
+                    border.color: bitPerfectDetailPopup.statusBadgeColor(bitPerfectDetailPopup.report.modeStateText)
+                    Label {
+                        id: modeStateLbl
+                        anchors.centerIn: parent
+                        text: bitPerfectDetailPopup.report.modeStateText || "Indeterminate"
+                        font.pixelSize: 10
+                        font.bold: true
+                        font.family: "Monospace"
+                        color: bitPerfectDetailPopup.statusBadgeColor(bitPerfectDetailPopup.report.modeStateText)
+                    }
+                }
+
+                Button {
+                    text: qsTr("Copy JSON")
+                    font.pixelSize: 10
+                    Layout.preferredHeight: 22
+                    onClicked: EngineController.copyToClipboard(JSON.stringify(bitPerfectDetailPopup.report, null, 2))
+                }
+
+                Button {
+                    text: "✕"
+                    font.pixelSize: 11
+                    font.bold: true
+                    Layout.preferredWidth: 26
+                    Layout.preferredHeight: 22
+                    onClicked: bitPerfectDetailPopup.close()
+                }
+            }
+
+            // L1: Software Pipeline Verification
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: l1Col.implicitHeight + 16
+                color: "#0d1014"
+                border.color: "#222934"
+                radius: 4
+
+                ColumnLayout {
+                    id: l1Col
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 4
+
+                    property var l1: bitPerfectDetailPopup.report.level1 || ({})
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: qsTr("L1 // SOFTWARE PIPELINE VERIFICATION")
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#00E5FF"
+                        }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            text: l1Col.l1.status || "Indeterminate"
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: bitPerfectDetailPopup.statusBadgeColor(l1Col.l1.status)
+                        }
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 12
+                        rowSpacing: 3
+
+                        Label { text: qsTr("maxAbsDiff (Float64):"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            property double d: l1Col.l1.maxAbsDiff !== undefined ? l1Col.l1.maxAbsDiff : 0.0
+                            text: (d === 0.0 ? "0.0" : d.toExponential(4)) + "  (post-PCM: " + ((l1Col.l1.postPcmMaxAbsDiff !== undefined && l1Col.l1.postPcmMaxAbsDiff !== 0.0) ? l1Col.l1.postPcmMaxAbsDiff.toExponential(4) : "0.0") + ")"
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: d === 0.0 ? "#00E676" : "#FFB300"
+                        }
+
+                        Label { text: qsTr("Verified / Total Blocks:"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            text: (l1Col.l1.verifiedBlocks !== undefined ? l1Col.l1.verifiedBlocks : 0) + " / " + (l1Col.l1.totalBlocks !== undefined ? l1Col.l1.totalBlocks : 0)
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#E0E6ED"
+                        }
+
+                        Label { text: qsTr("Hash Match (Input vs Output):"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            text: (l1Col.l1.hashMatched ? qsTr("MATCHED") : qsTr("MISMATCH")) + "  (" + (l1Col.l1.inputHashHex || "0x0") + " / " + (l1Col.l1.outputHashHex || "0x0") + ")"
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: l1Col.l1.hashMatched ? "#00E676" : "#FF5252"
+                            elide: Text.ElideMiddle
+                            Layout.fillWidth: true
+                        }
+                    }
+                }
+            }
+
+            // L2: Backend / PipeWire Verification
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: l2Col.implicitHeight + 16
+                color: "#0d1014"
+                border.color: "#222934"
+                radius: 4
+
+                ColumnLayout {
+                    id: l2Col
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 4
+
+                    property var l2: bitPerfectDetailPopup.report.level2 || ({})
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: qsTr("L2 // BACKEND & TRANSPORT VERIFICATION")
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#00E5FF"
+                        }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            text: l2Col.l2.status || "Indeterminate"
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: bitPerfectDetailPopup.statusBadgeColor(l2Col.l2.status)
+                        }
+                    }
+
+                    GridLayout {
+                        Layout.fillWidth: true
+                        columns: 2
+                        columnSpacing: 12
+                        rowSpacing: 3
+
+                        Label { text: qsTr("Backend State:"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            text: (l2Col.l2.backendStatus || EngineController.backendStatusText) + " (" + (l2Col.l2.backendParamsVerified ? qsTr("Direct Params OK") : qsTr("Non-Direct / Unverified")) + ")"
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: l2Col.l2.backendParamsVerified ? "#00E676" : "#FFB300"
+                        }
+
+                        Label { text: qsTr("Sample Rate Match:"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            property int trkRate: Math.round(l2Col.l2.trackSampleRate || 0)
+                            property int reqRate: l2Col.l2.requestedRate || 0
+                            property int actRate: l2Col.l2.actualRate || 0
+                            text: (l2Col.l2.graphRateMatchesTrack ? qsTr("MATCHED") : qsTr("MISMATCH / RESAMPLED")) + "  (Track: " + (trkRate > 0 ? trkRate + " Hz" : "N/A") + ", Req: " + reqRate + " Hz, Actual: " + actRate + " Hz)"
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: l2Col.l2.graphRateMatchesTrack ? "#00E676" : "#FFB300"
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+
+                        Label { text: qsTr("negotiatedFormat:"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            text: (l2Col.l2.negotiatedFormat || "F32LE") + " (" + (l2Col.l2.outputBitDepth || 32) + "-bit)"
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#E0E6ED"
+                        }
+
+                        Label { text: qsTr("Lossless Output Format:"); font.pixelSize: 10; color: "#8d99a6" }
+                        Label {
+                            text: (l2Col.l2.outputFormatLossless ? qsTr("LOSSLESS (YES)") : qsTr("LOSSY / TRUNCATED (NO)")) + "  |  Dither: " + (l2Col.l2.ditherActive ? qsTr("Active") : qsTr("Off"))
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: (l2Col.l2.outputFormatLossless && !l2Col.l2.ditherActive) ? "#00E676" : "#FFB300"
+                        }
+                    }
+                }
+            }
+
+            // L3: External Hardware / DAC Output (Explicitly Unverifiable)
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: l3Col.implicitHeight + 16
+                color: "#1b160c"
+                border.color: "#FFB300"
+                radius: 4
+
+                ColumnLayout {
+                    id: l3Col
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Label {
+                            text: qsTr("L3 // HARDWARE / DAC OUTPUT VERIFICATION")
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#FFB300"
+                        }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            text: qsTr("UNVERIFIABLE (EXT CAPTURE REQ)")
+                            font.bold: true
+                            font.pixelSize: 10
+                            font.family: "Monospace"
+                            color: "#FFB300"
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        text: qsTr("Unverifiable (External hardware capture required): Host software cannot observe DAC physical output after PipeWire/driver stages, so L1/L2 verification alone does not prove end-to-end hardware bit-perfectness.")
+                        font.pixelSize: 10
+                        color: "#FFE082"
+                        wrapMode: Text.WordWrap
+                    }
+                }
             }
         }
     }

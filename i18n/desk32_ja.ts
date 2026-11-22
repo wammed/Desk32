@@ -270,5 +270,61 @@
         <source>NO TRACK AUDITIONING</source>
         <translation>試聴トラック未選択</translation>
     </message>
+    <message>
+        <source>Click for L1/L2/L3 details</source>
+        <translation>クリックで L1/L2/L3 詳細を表示</translation>
+    </message>
+    <message>
+        <source>BIT-PERFECT VERIFICATION REPORT (L1 / L2 / L3)</source>
+        <translation>ビットパーフェクト検証レポート (L1 / L2 / L3)</translation>
+    </message>
+    <message>
+        <source>L1 // SOFTWARE PIPELINE VERIFICATION</source>
+        <translation>L1 // ソフトウェアパイプライン検証</translation>
+    </message>
+    <message>
+        <source>Verified / Total Blocks:</source>
+        <translation>検証済 / 総ブロック数:</translation>
+    </message>
+    <message>
+        <source>Hash Match (Input vs Output):</source>
+        <translation>ハッシュ一致 (入力 vs 出力):</translation>
+    </message>
+    <message>
+        <source>MATCHED</source>
+        <translation>一致</translation>
+    </message>
+    <message>
+        <source>MISMATCH</source>
+        <translation>不一致</translation>
+    </message>
+    <message>
+        <source>L2 // BACKEND &amp; TRANSPORT VERIFICATION</source>
+        <translation>L2 // バックエンド &amp; トランスポート検証</translation>
+    </message>
+    <message>
+        <source>Backend State:</source>
+        <translation>バックエンド状態:</translation>
+    </message>
+    <message>
+        <source>Sample Rate Match:</source>
+        <translation>レート一致:</translation>
+    </message>
+    <message>
+        <source>Lossless Output Format:</source>
+        <translation>ロスレス出力形式:</translation>
+    </message>
+    <message>
+        <source>L3 // HARDWARE / DAC OUTPUT VERIFICATION</source>
+        <translation>L3 // ハードウェア / DAC 出力検証</translation>
+    </message>
+    <message>
+        <source>UNVERIFIABLE (EXT CAPTURE REQ)</source>
+        <translation>検証不能（外部キャプチャ必要）</translation>
+    </message>
+    <message>
+        <source>Unverifiable (External hardware capture required): Host software cannot observe DAC physical output after PipeWire/driver stages, so L1/L2 verification alone does not prove end-to-end hardware bit-perfectness.</source>
+        <translation>検証不能（外部ハードウェアでのキャプチャが必要）：ホスト側ソフトウェアからは PipeWire・ドライバ以降の DAC 物理出力を観測できないため、L1/L2 のみでエンドツーエンドのビットパーフェクト検証は完了しません。</translation>
+    </message>
 </context>
 </TS>

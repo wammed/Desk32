@@ -55,6 +55,7 @@ struct DspTelemetry {
     uint64_t level1InputHash = 0;
     uint64_t level1OutputHash = 0;
     uint64_t level1VerifiedBlocks = 0;
+    uint64_t level1TotalBlocks = 0;
 };
 
 class AudioPipeline {
@@ -240,6 +241,10 @@ public:
 
     [[nodiscard]] uint64_t level1VerifiedBlocks() const noexcept {
         return m_level1VerifiedBlocks.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] uint64_t level1TotalBlocks() const noexcept {
+        return m_level1TotalBlocks.load(std::memory_order_relaxed);
     }
 
     [[nodiscard]] uint64_t readerExhaustionDrops() const noexcept {
@@ -902,6 +907,7 @@ private:
         t.level1DitherActive = effectiveDither;
         t.level1DirectBypassActive = directBypass;
         t.level1PostPcmMaxAbsDiff = postPcmMaxDiff;
+        t.level1TotalBlocks = m_level1TotalBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
         if (identical && postPcmLossless) {
             t.level1VerifiedBlocks = m_level1VerifiedBlocks.fetch_add(1, std::memory_order_relaxed) + 1;
         } else {
@@ -973,6 +979,7 @@ private:
     alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefL{};
     alignas(64) std::array<double, MAX_LEVEL1_FRAMES> m_level1RefR{};
     alignas(64) std::atomic<uint64_t> m_level1VerifiedBlocks{0};
+    alignas(64) std::atomic<uint64_t> m_level1TotalBlocks{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;
