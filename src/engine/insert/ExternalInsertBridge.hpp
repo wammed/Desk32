@@ -790,6 +790,7 @@ public:
 
         const uint64_t baseFrame = m_totalFramesProcessed.load(std::memory_order_relaxed);
         const bool probeActive = m_probeActive.load(std::memory_order_acquire);
+        const bool holdMute = m_calibrationHoldMute.load(std::memory_order_acquire);
         const bool measuring = m_measuringLatency.load(std::memory_order_acquire);
         const uint64_t targetFrame = m_impulseSendFrame.load(std::memory_order_relaxed);
         const bool hasMock = (m_activeMock && m_activeMock->func);
@@ -863,6 +864,18 @@ public:
                 }
                 m_probeActive.store(false, std::memory_order_release);
             }
+        } else if (holdMute && (hasMock || hasLiveTransport)) {
+            // Keep flushing silence through external host during inter-probe intervals / pre-settle
+            // so no program audio bursts leak into Carla or corrupt subsequent impulse probes.
+            std::fill_n(inOutLeft, frames, 0.0);
+            std::fill_n(inOutRight, frames, 0.0);
+            if (hasMock) {
+                m_activeMock->func(inOutLeft, inOutRight, frames);
+            } else {
+                (void)tr->exchangeBlock(inOutLeft, inOutRight, frames);
+            }
+            std::fill_n(inOutLeft, frames, 0.0);
+            std::fill_n(inOutRight, frames, 0.0);
         } else {
             if (measuring && (hasMock || hasLiveTransport)) {
                 // Inject impulse before external loopback processor/transport so loopback sees it
@@ -934,6 +947,14 @@ public:
         m_probeActive.store(false, std::memory_order_release);
         m_probeResultReady.store(false, std::memory_order_release);
         m_probeTimedOut.store(false, std::memory_order_release);
+    }
+
+    void setCalibrationHoldMute(bool hold) noexcept {
+        m_calibrationHoldMute.store(hold, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool isCalibrationHoldMute() const noexcept {
+        return m_calibrationHoldMute.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] bool isHardwareProbeActive() const noexcept {
@@ -1043,6 +1064,7 @@ private:
     std::atomic<uint64_t> m_impulseSendFrame{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};
     std::atomic<bool> m_probeActive{false};
+    std::atomic<bool> m_calibrationHoldMute{false};
     std::atomic<bool> m_probeResultReady{false};
     std::atomic<bool> m_probeTimedOut{false};
     std::atomic<uint64_t> m_probeSendFrame{0};

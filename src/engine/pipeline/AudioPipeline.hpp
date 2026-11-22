@@ -144,6 +144,10 @@ public:
     [[nodiscard]] bool renderMonitorMuted() const noexcept { return m_renderMonitorMuted.load(std::memory_order_relaxed); }
     void setRenderMonitorMuted(bool muted) noexcept { m_renderMonitorMuted.store(muted, std::memory_order_relaxed); }
 
+    /// Internal temporary monitor mute used during hardware latency calibration (smooth 10ms ramp, preserves user mute state).
+    [[nodiscard]] bool calibrationMonitorMute() const noexcept { return m_calibrationMonitorMute.load(std::memory_order_acquire); }
+    void setCalibrationMonitorMute(bool muted) noexcept { m_calibrationMonitorMute.store(muted, std::memory_order_release); }
+
     [[nodiscard]] bool liveDitherEnabled() const noexcept { return m_liveDitherEnabled.load(std::memory_order_relaxed); }
     void setLiveDitherEnabled(bool enabled) noexcept { m_liveDitherEnabled.store(enabled, std::memory_order_relaxed); }
 
@@ -528,10 +532,11 @@ public:
 
         // 3. Logical Render Tap Branching (Section 5.11, Spec §5.2 downstream Master Gain & Level Match)
         const OutputPathMode currentMode = m_outputMode.load(std::memory_order_relaxed);
-        const double listenVol = m_listeningMuted.load(std::memory_order_relaxed)
+        const bool calMute = m_calibrationMonitorMute.load(std::memory_order_acquire);
+        const double listenVol = (m_listeningMuted.load(std::memory_order_relaxed) || calMute)
                                      ? 0.0
                                      : m_listeningVolume.load(std::memory_order_relaxed);
-        const double renderMonVol = m_renderMonitorMuted.load(std::memory_order_relaxed)
+        const double renderMonVol = (m_renderMonitorMuted.load(std::memory_order_relaxed) || calMute)
                                         ? 0.0
                                         : m_renderMonitorVolume.load(std::memory_order_relaxed);
         if (!m_smoothersInitialized.load(std::memory_order_relaxed)) {
@@ -939,6 +944,7 @@ private:
     std::atomic<double> m_renderMonitorVolume{1.0};
     std::atomic<bool> m_listeningMuted{false};
     std::atomic<bool> m_renderMonitorMuted{false};
+    std::atomic<bool> m_calibrationMonitorMute{false};
     std::atomic<bool> m_liveDitherEnabled{true};
 
     dsp::ParameterCommandQueue m_paramQueue;

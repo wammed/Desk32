@@ -1187,6 +1187,8 @@ void TestPhase3ExternalInsert::testLiveTransportEnforcementCalibrationAndReconne
 
     ctrl.calibrateInsertLatency();
     QCOMPARE(ctrl.externalInsertMeasuredLatency(), 48);
+    QVERIFY(!ctrl.pipeline()->calibrationMonitorMute());
+    QVERIFY(!ctrl.insertNode()->bridge().isCalibrationHoldMute());
     const QVariantMap rep = ctrl.getLatencyAlignmentReport();
     QCOMPARE(rep["hasMeasurement"].toBool(), true);
     QCOMPARE(rep["recommendedFrames"].toLongLong(), qint64(48));
@@ -1194,6 +1196,41 @@ void TestPhase3ExternalInsert::testLiveTransportEnforcementCalibrationAndReconne
     QVERIFY(rep["peakSnrDb"].toDouble() > 18.0);
     QVERIFY(ctrl.confirmRecommendedInsertLatency(false));
     QCOMPARE(ctrl.insertDelayCompensation(), 48);
+
+    // Verify smooth calibration monitor mute in AudioPipeline preserves user mute state
+    {
+        auto pipe = ctrl.pipeline();
+        QVERIFY(!pipe->listeningMuted());
+        QVERIFY(!pipe->renderMonitorMuted());
+        std::vector<double> pl(512, 0.5), pr(512, -0.5);
+        std::vector<float> pcmOut(512 * 2, 0.0f);
+        // Prime smoother at 1.0
+        pipe->process(pl.data(), pr.data(), 512, pcmOut.data(),
+                      desk32::engine::format::SampleFormat::Float32, false);
+        QVERIFY(std::abs(pcmOut[1022]) > 0.1f);
+
+        // Engage calibration monitor mute -> ramps smoothly to 0.0 (~100ms for 10ms exponential tau)
+        pipe->setCalibrationMonitorMute(true);
+        for (int b = 0; b < 10; ++b) {
+            std::fill(pl.begin(), pl.end(), 0.5);
+            std::fill(pr.begin(), pr.end(), -0.5);
+            pipe->process(pl.data(), pr.data(), 512, pcmOut.data(),
+                          desk32::engine::format::SampleFormat::Float32, false);
+        }
+        QVERIFY(std::abs(pcmOut[1022]) < 1e-4f);
+        QVERIFY(!pipe->listeningMuted());
+        QVERIFY(!pipe->renderMonitorMuted());
+
+        // Release calibration monitor mute -> smoothly restores
+        pipe->setCalibrationMonitorMute(false);
+        for (int b = 0; b < 10; ++b) {
+            std::fill(pl.begin(), pl.end(), 0.5);
+            std::fill(pr.begin(), pr.end(), -0.5);
+            pipe->process(pl.data(), pr.data(), 512, pcmOut.data(),
+                          desk32::engine::format::SampleFormat::Float32, false);
+        }
+        QVERIFY(std::abs(pcmOut[1022]) > 0.49f);
+    }
 
     // Disconnect -> pipeline node bypassed -> reconnect restores connection & pipeline unbypass
     ctrl.disconnectExternalInsert();

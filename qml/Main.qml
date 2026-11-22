@@ -2768,7 +2768,7 @@ ApplicationWindow {
 
                                         Button {
                                             text: EngineController.externalInsertCalibrating
-                                                  ? qsTr("MEASURING LIVE ROUND-TRIP IMPULSE...")
+                                                  ? qsTr("MEASURING (MONITOR MUTED)...")
                                                   : qsTr("CALIBRATE IMPULSE LATENCY NOW")
                                             font.bold: true
                                             font.pixelSize: 11

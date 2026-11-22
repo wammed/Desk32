@@ -241,6 +241,7 @@ bool EngineController::initialize(bool offlineMode) {
 
   // Phase 3: External Insert Node (Default to OFF / Bypassed) + PipeWire Transport
   m_calActive = false;
+  m_calSettleTicks = 0;
   m_calCompletedProbes = 0;
   if (m_calProbeTimer) {
     m_calProbeTimer->stop();
@@ -1153,10 +1154,7 @@ void EngineController::pollExternalInsertHealth() {
 
   if (rtDisconnected || (activeOrConnected && m_insertTransport->consumeGraphDisconnectEvent())) {
     if (m_calActive) {
-      m_calActive = false;
-      if (m_calProbeTimer) m_calProbeTimer->stop();
-      bridge.cancelHardwareProbe();
-      bridge.cancelLatencyCalibrationSession();
+      finishHardwareCalibration(false, true);
     }
     bridge.handleDisconnect();
     syncExternalInsertBypassToPipeline(true);
@@ -1175,10 +1173,7 @@ void EngineController::pollExternalInsertHealth() {
               (m_insertTransport->hasRateMismatch() ||
                m_insertTransport->hasBufferMismatch()))) {
     if (m_calActive) {
-      m_calActive = false;
-      if (m_calProbeTimer) m_calProbeTimer->stop();
-      bridge.cancelHardwareProbe();
-      bridge.cancelLatencyCalibrationSession();
+      finishHardwareCalibration(false, true);
     }
     const bool isRate = rtMismatch ? rtMismatchIsRate : m_insertTransport->hasRateMismatch();
     const auto diag = m_insertTransport->diagnostics();
@@ -4130,10 +4125,7 @@ bool EngineController::configureExternalInsertWithMetadata(
     return false;
 
   if (m_calActive) {
-    m_calActive = false;
-    if (m_calProbeTimer) m_calProbeTimer->stop();
-    m_insertNode->bridge().cancelHardwareProbe();
-    m_insertNode->bridge().cancelLatencyCalibrationSession();
+    finishHardwareCalibration(false, true);
   }
 
   double sRate = (sampleRate > 0.0)
@@ -4316,6 +4308,9 @@ void EngineController::calibrateInsertLatency() {
     syncExternalInsertBypassToPipeline(false);
   }
 
+  if (m_pipeline) {
+    m_pipeline->setCalibrationMonitorMute(true);
+  }
   bridge.beginLatencyCalibrationSession();
   m_calTargetProbes = 3;
   m_calCompletedProbes = 0;
@@ -4324,6 +4319,7 @@ void EngineController::calibrateInsertLatency() {
   // In headless/offline simulation mode, PipeWireAudioOutput's real-time thread is not running,
   // so drive the isolated probe synchronously through ExternalInsertBridge::process() -> PipeWireInsertTransport.
   if (m_audioOutput && m_audioOutput->isOfflineSimulationMode()) {
+    bridge.setCalibrationHoldMute(true);
     const size_t blockFrames = std::max<size_t>(64, bridge.config().bufferSize > 0 ? bridge.config().bufferSize : 256);
     std::vector<double> bufL(blockFrames, 0.0);
     std::vector<double> bufR(blockFrames, 0.0);
@@ -4344,10 +4340,7 @@ void EngineController::calibrateInsertLatency() {
         recordInsertLatencyCalibrationSample(frames, snrDb);
       }
     }
-    m_calActive = false;
-    if (m_calRestoreBypass) {
-      syncExternalInsertBypassToPipeline(true);
-    }
+    finishHardwareCalibration(m_calRestoreBypass, false);
     const auto cand = bridge.latencyCalibrationCandidate();
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
@@ -4359,8 +4352,11 @@ void EngineController::calibrateInsertLatency() {
     return;
   }
 
-  // Live PipeWire graph mode: start non-blocking hardware impulse probes on the active audio thread
-  bridge.startHardwareProbe(8192, 48000);
+  // Live PipeWire graph mode:
+  // Step 1 (ticks 5..2 = 100ms): smoothly fade monitor output down via AudioPipeline ParameterSmoother
+  // without abruptly chopping ExternalInsertBridge audio.
+  // Step 2 (tick 1 = 25ms): engage holdMute to flush silence through external host before Probe 0.
+  m_calSettleTicks = 5;
   if (!m_calProbeTimer) {
     m_calProbeTimer = new QTimer(this);
     m_calProbeTimer->setInterval(25);
@@ -4371,20 +4367,52 @@ void EngineController::calibrateInsertLatency() {
   log::LogService::instance().log(
       QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
       QStringLiteral("Info"),
-      QStringLiteral("Started 3-sample live PipeWire hardware round-trip latency calibration."),
+      QStringLiteral("Started 3-sample live PipeWire hardware round-trip latency calibration (monitor output muted)."),
       QStringLiteral("InsertBridge"),
       QString::fromStdString(bridge.config().clientName));
   emit externalInsertStatusChanged();
 }
 
+void EngineController::finishHardwareCalibration(bool restoreBypass, bool cancelSession) {
+  if (m_calProbeTimer) {
+    m_calProbeTimer->stop();
+  }
+  m_calActive = false;
+  m_calSettleTicks = 0;
+  if (m_insertNode) {
+    auto &bridge = m_insertNode->bridge();
+    bridge.cancelHardwareProbe();
+    bridge.setCalibrationHoldMute(false);
+    if (cancelSession) {
+      bridge.cancelLatencyCalibrationSession();
+    }
+    if (restoreBypass) {
+      syncExternalInsertBypassToPipeline(true);
+    }
+  }
+  if (m_pipeline) {
+    m_pipeline->setCalibrationMonitorMute(false);
+  }
+}
+
 void EngineController::pollHardwareCalibrationProbe() {
   if (!m_calActive || !m_insertNode) {
-    if (m_calProbeTimer) m_calProbeTimer->stop();
-    m_calActive = false;
+    finishHardwareCalibration(false, false);
     return;
   }
 
   auto &bridge = m_insertNode->bridge();
+  if (m_calSettleTicks > 0) {
+    --m_calSettleTicks;
+    if (m_calSettleTicks == 1) {
+      // Monitor smoother has finished fading down (~100ms); now mute insert send path to flush host ringbuffer
+      bridge.setCalibrationHoldMute(true);
+    } else if (m_calSettleTicks == 0) {
+      bridge.startHardwareProbe(8192, 48000);
+    }
+    return;
+  }
+
   int64_t frames = -1;
   double snrDb = 0.0;
   bool timedOut = false;
@@ -4393,11 +4421,7 @@ void EngineController::pollHardwareCalibrationProbe() {
   }
 
   if (timedOut || frames < 0) {
-    if (m_calProbeTimer) m_calProbeTimer->stop();
-    m_calActive = false;
-    if (m_calRestoreBypass) {
-      syncExternalInsertBypassToPipeline(true);
-    }
+    finishHardwareCalibration(m_calRestoreBypass, false);
     log::LogService::instance().log(
         QStringLiteral("ExternalInsert"), QStringLiteral("CalibrateLatency"),
         QStringLiteral("Failed"),
@@ -4418,11 +4442,7 @@ void EngineController::pollHardwareCalibrationProbe() {
     return;
   }
 
-  if (m_calProbeTimer) m_calProbeTimer->stop();
-  m_calActive = false;
-  if (m_calRestoreBypass) {
-    syncExternalInsertBypassToPipeline(true);
-  }
+  finishHardwareCalibration(m_calRestoreBypass, false);
   const auto cand = bridge.latencyCalibrationCandidate();
   QJsonObject det;
   det.insert(QStringLiteral("recommended_frames"), static_cast<qint64>(cand.recommendedFrames));
@@ -4543,14 +4563,13 @@ void EngineController::cancelInsertLatencyCalibration() {
   if (!m_insertNode)
     return;
   if (m_calActive) {
-    m_calActive = false;
-    if (m_calProbeTimer) m_calProbeTimer->stop();
-    m_insertNode->bridge().cancelHardwareProbe();
-    if (m_calRestoreBypass) {
-      syncExternalInsertBypassToPipeline(true);
+    finishHardwareCalibration(m_calRestoreBypass, true);
+  } else {
+    m_insertNode->bridge().cancelLatencyCalibrationSession();
+    if (m_pipeline) {
+      m_pipeline->setCalibrationMonitorMute(false);
     }
   }
-  m_insertNode->bridge().cancelLatencyCalibrationSession();
   emit externalInsertStatusChanged();
 }
 
@@ -4636,10 +4655,7 @@ void EngineController::disconnectExternalInsert() {
   if (!m_insertNode)
     return;
   if (m_calActive) {
-    m_calActive = false;
-    if (m_calProbeTimer) m_calProbeTimer->stop();
-    m_insertNode->bridge().cancelHardwareProbe();
-    m_insertNode->bridge().cancelLatencyCalibrationSession();
+    finishHardwareCalibration(false, true);
   }
   m_insertNode->bridge().handleDisconnect();
   syncExternalInsertBypassToPipeline(true);

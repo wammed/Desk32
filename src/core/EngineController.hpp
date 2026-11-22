@@ -470,6 +470,7 @@ private:
     void pollExternalInsertHealth();
     void syncExternalInsertBypassToPipeline(bool bypass);
     void pollHardwareCalibrationProbe();
+    void finishHardwareCalibration(bool restoreBypass, bool cancelSession = false);
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
     std::shared_ptr<engine::pipeline::AudioPipeline> m_pipeline;
@@ -569,6 +570,7 @@ private:
     uint32_t m_calTargetProbes{3};
     uint32_t m_calCompletedProbes{0};
     bool m_calActive{false};
+    int m_calSettleTicks{0};
     bool m_calRestoreBypass{false};
 };
 
