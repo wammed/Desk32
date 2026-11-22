@@ -101,6 +101,8 @@ BackendCapabilitiesReport JackControlAdapter::queryCapabilities(bool offlineSimu
     report.exclusiveAccessReason = "PipeWire-JACK operates on a shared PipeWire graph; exclusive device locking is not exposed.";
     report.formatSelection = CapabilityAvailability::Unsupported;
     report.formatSelectionReason = "JACK protocol strictly carries 32-bit float (F32LE) normalized samples.";
+    report.sampleRateFollowing = CapabilityAvailability::Unsupported;
+    report.sampleRateFollowingReason = "JACK API provides no client interface to change the server graph sample rate.";
     report.hardwareBitPerfect = CapabilityAvailability::Unknown;
     report.hardwareBitPerfectReason = "Hardware DAC physical output requires external Level 3 loopback capture.";
     report.externalInsert = CapabilityAvailability::Supported;
@@ -109,8 +111,6 @@ BackendCapabilitiesReport JackControlAdapter::queryCapabilities(bool offlineSimu
     if (!m_output || !streamInitialized) {
         report.directMode = CapabilityAvailability::Unavailable;
         report.directModeReason = "JACK audio output is not initialized.";
-        report.sampleRateFollowing = CapabilityAvailability::Unavailable;
-        report.sampleRateFollowingReason = "JACK audio output is not initialized.";
         report.deviceSwitching = CapabilityAvailability::Unavailable;
         report.deviceSwitchingReason = "JACK audio output is not initialized.";
         report.latencyControl = CapabilityAvailability::Unavailable;
@@ -128,8 +128,6 @@ BackendCapabilitiesReport JackControlAdapter::queryCapabilities(bool offlineSimu
                                        : err;
         report.directMode = CapabilityAvailability::Unavailable;
         report.directModeReason = reason;
-        report.sampleRateFollowing = CapabilityAvailability::Unavailable;
-        report.sampleRateFollowingReason = reason;
         report.deviceSwitching = CapabilityAvailability::Unavailable;
         report.deviceSwitchingReason = reason;
         report.latencyControl = CapabilityAvailability::Unavailable;
@@ -150,10 +148,8 @@ BackendCapabilitiesReport JackControlAdapter::queryCapabilities(bool offlineSimu
         report.directMode = (diag.directModeStatus == DirectModeStatus::Active)
                                 ? CapabilityAvailability::Supported
                                 : CapabilityAvailability::Unknown;
-        report.sampleRateFollowing = report.directMode;
         if (report.directMode != CapabilityAvailability::Supported) {
             report.directModeReason = "Offline JACK simulation mode.";
-            report.sampleRateFollowingReason = "Offline JACK simulation mode.";
         }
         return report;
     }
@@ -161,25 +157,19 @@ BackendCapabilitiesReport JackControlAdapter::queryCapabilities(bool offlineSimu
     switch (diag.directModeStatus) {
     case DirectModeStatus::Active:
         report.directMode = CapabilityAvailability::Supported;
-        report.sampleRateFollowing = CapabilityAvailability::Supported;
         report.directModeReason = "Measured JACK graph sample rate matches requested rate (" +
                                   std::to_string(diag.sampleRate) + " Hz).";
-        report.sampleRateFollowingReason = report.directModeReason;
         break;
     case DirectModeStatus::Disabled:
         report.directMode = CapabilityAvailability::Unavailable;
-        report.sampleRateFollowing = CapabilityAvailability::Unavailable;
         report.directModeReason = "PipeWire-JACK server remained at " + std::to_string(diag.sampleRate) +
                                   " Hz while track/requested rate is " +
                                   std::to_string(diag.requestedSampleRate) + " Hz.";
-        report.sampleRateFollowingReason = report.directModeReason;
         break;
     case DirectModeStatus::Unknown:
     default:
         report.directMode = CapabilityAvailability::Unknown;
-        report.sampleRateFollowing = CapabilityAvailability::Unknown;
         report.directModeReason = "JACK server sample rate alignment not yet measured.";
-        report.sampleRateFollowingReason = report.directModeReason;
         break;
     }
 

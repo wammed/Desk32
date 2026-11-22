@@ -82,11 +82,12 @@ void TestJackOutput::testJackAudioOutputAndCapabilities()
     QCOMPARE(preInit.backendName, std::string("JACK"));
     QCOMPARE(preInit.exclusiveAccess, CapabilityAvailability::Unsupported);
     QCOMPARE(preInit.formatSelection, CapabilityAvailability::Unsupported);
+    QCOMPARE(preInit.sampleRateFollowing, CapabilityAvailability::Unsupported);
     QCOMPARE(preInit.hardwareBitPerfect, CapabilityAvailability::Unknown);
     QCOMPARE(preInit.directMode, CapabilityAvailability::Unavailable);
-    QCOMPARE(preInit.sampleRateFollowing, CapabilityAvailability::Unavailable);
     QCOMPARE(preInit.deviceSwitching, CapabilityAvailability::Unavailable);
     QVERIFY(!preInit.formatSelectionReason.empty());
+    QVERIFY(!preInit.sampleRateFollowingReason.empty());
     QVERIFY(!preInit.directModeReason.empty());
 
     // Offline simulation verification
@@ -139,7 +140,8 @@ void TestJackOutput::testJackAudioOutputAndCapabilities()
     QCOMPARE(output.diagnostics().sampleRate, uint32_t(96000));
     const auto activeCaps = mgr.queryCapabilities(true, true);
     QCOMPARE(activeCaps.directMode, CapabilityAvailability::Supported);
-    QCOMPARE(activeCaps.sampleRateFollowing, CapabilityAvailability::Supported);
+    QCOMPARE(activeCaps.sampleRateFollowing, CapabilityAvailability::Unsupported);
+    QVERIFY(!activeCaps.sampleRateFollowingReason.empty());
     QCOMPARE(activeCaps.formatSelection, CapabilityAvailability::Unsupported);
 
     // Render callback via AudioPipeline
