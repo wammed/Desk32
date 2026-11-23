@@ -14,9 +14,12 @@
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QQmlApplicationEngine>
+#include <QQuickItem>
+#include <QQuickItemGrabResult>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
+#include <QTimer>
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
 #include <vector>
@@ -129,8 +132,9 @@ QString detectGpuName(QQuickWindow *win,
     if (uevent.open(QIODevice::ReadOnly | QIODevice::Text)) {
       QString driver;
       QString pciId;
-      while (!uevent.atEnd()) {
-        const QString line = QString::fromUtf8(uevent.readLine()).trimmed();
+      const QList<QByteArray> lines = uevent.readAll().split('\n');
+      for (const QByteArray &rawLine : lines) {
+        const QString line = QString::fromUtf8(rawLine).trimmed();
         if (line.startsWith(QStringLiteral("DRIVER=")))
           driver = line.mid(7);
         else if (line.startsWith(QStringLiteral("PCI_ID=")))
@@ -181,8 +185,20 @@ int main(int argc, char *argv[]) {
   // Initialize bilingual language manager (honors SettingsManager preference)
   LanguageManager::instance().init(&app, &engine);
 
-  // Initialize Engine Controller & Subsystems
-  desk32::core::EngineController::instance().initialize();
+  const QStringList appArgs = QCoreApplication::arguments();
+  const bool prototypeMode = appArgs.contains(QStringLiteral("--ui-prototype"));
+  QString screenshotPath;
+  const qsizetype ssIdx = appArgs.indexOf(QStringLiteral("--screenshot"));
+  if (ssIdx >= 0 && ssIdx + 1 < appArgs.size()) {
+    screenshotPath = appArgs.at(ssIdx + 1);
+  }
+  const bool offlineMode =
+      appArgs.contains(QStringLiteral("--offline")) || !screenshotPath.isEmpty();
+
+  // Initialize Engine Controller & Subsystems (skip audio init during headless prototype screenshot)
+  if (!(prototypeMode && !screenshotPath.isEmpty())) {
+    desk32::core::EngineController::instance().initialize(offlineMode);
+  }
 
   if (fellBackToOpenGL) {
     QJsonObject det;
@@ -214,7 +230,9 @@ int main(int argc, char *argv[]) {
       "Desk32.Core", 1, 0, "WorkspaceManager",
       &desk32::engine::workspace::WorkspaceManager::instance());
 
-  const QUrl url(QStringLiteral("qrc:/Desk32/qml/Main.qml"));
+  const QUrl url(prototypeMode
+                     ? QStringLiteral("qrc:/Desk32/qml/PrototypeGallery.qml")
+                     : QStringLiteral("qrc:/Desk32/qml/Main.qml"));
   QObject::connect(
       &engine, &QQmlApplicationEngine::objectCreated, &app,
       [url](QObject *obj, const QUrl &objUrl) {
@@ -228,6 +246,37 @@ int main(int argc, char *argv[]) {
   if (!engine.rootObjects().isEmpty()) {
     if (auto *win =
             qobject_cast<QQuickWindow *>(engine.rootObjects().first())) {
+      if (!screenshotPath.isEmpty()) {
+        std::fprintf(stderr, "[desk32] scheduling screenshot capture...\n");
+        std::fflush(stderr);
+        QTimer::singleShot(300, &app, [win, screenshotPath]() {
+          std::fprintf(stderr, "[desk32] timer fired, calling grabToImage\n");
+          std::fflush(stderr);
+          if (auto *item = win->contentItem()) {
+            auto res = item->grabToImage(QSize(2560, 1440));
+            if (res) {
+              QObject::connect(
+                  res.data(), &QQuickItemGrabResult::ready,
+                  [res, screenshotPath]() {
+                    const QImage img = res->image();
+                    const bool saved = !img.isNull() && img.save(screenshotPath);
+                    std::fprintf(stderr,
+                                 "[desk32] grabToImage ready (%dx%d, ok=%d)\n",
+                                 img.width(), img.height(), saved ? 1 : 0);
+                    std::fflush(stderr);
+                    QCoreApplication::exit(saved ? 0 : 3);
+                  });
+              return;
+            }
+          }
+          QImage img = win->grabWindow();
+          const bool saved = !img.isNull() && img.save(screenshotPath);
+          std::fprintf(stderr, "[desk32] grabWindow fallback (%dx%d, ok=%d)\n",
+                       img.width(), img.height(), saved ? 1 : 0);
+          std::fflush(stderr);
+          QCoreApplication::exit(saved ? 0 : 3);
+        });
+      }
       QObject::connect(
           win, &QQuickWindow::sceneGraphInitialized, &app,
           [win]() {
@@ -278,5 +327,9 @@ int main(int argc, char *argv[]) {
     desk32::core::log::LogService::instance().stop();
   });
 
+  if (!screenshotPath.isEmpty()) {
+    std::fprintf(stderr, "[desk32] entering app.exec()\n");
+    std::fflush(stderr);
+  }
   return app.exec();
 }

@@ -1,0 +1,473 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import Desk32.Core
+
+BrushedMetalPanel {
+    id: cardRoot
+
+    property string deckId: "A"
+    property var deckState: EngineController.getDeckState(deckId)
+
+    signal loadFileRequested(string deckId)
+    signal startFolderRequested(string deckId)
+
+    readonly property bool isActive: EngineController.activeDeckId === deckId
+    readonly property bool hasTrack: !!(deckState && deckState.path && deckState.path.length > 0)
+    readonly property bool isPlaying: !!(deckState && deckState.state === 1)
+    readonly property bool isPaused: !!(deckState && deckState.state === 2)
+    readonly property bool isLocked: !!(deckState && deckState.isLocked)
+    readonly property bool isErrorStopped: !!(deckState && deckState.hasError)
+    readonly property bool folderActive: !!(deckState && deckState.folderActive)
+    readonly property bool canCopyToWorkspace: WorkspaceManager.hasOpenWorkspace
+                                               && hasTrack
+                                               && !!(deckState && deckState.canCopyToWorkspace !== false)
+                                               && !isPathInOpenWs()
+
+    function isPathInOpenWs() {
+        if (!WorkspaceManager.hasOpenWorkspace || !hasTrack) return false
+        var wsRoot = WorkspaceManager.openWorkspacePath
+        if (!wsRoot || wsRoot.length === 0) return false
+        return deckState.path.indexOf(wsRoot + "/") === 0
+    }
+
+    function refreshState() {
+        deckState = EngineController.getDeckState(deckId)
+    }
+
+    function formatMsTime(frames, sampleRate) {
+        var sr = (sampleRate && sampleRate > 0) ? sampleRate : 48000.0
+        var totalSec = Math.max(0.0, frames / sr)
+        var mins = Math.floor(totalSec / 60)
+        var secs = Math.floor(totalSec % 60)
+        var ms = Math.floor((totalSec - Math.floor(totalSec)) * 1000)
+        return (mins < 10 ? "0" : "") + mins + ":"
+             + (secs < 10 ? "0" : "") + secs + "."
+             + (ms < 100 ? (ms < 10 ? "00" : "0") : "") + ms
+    }
+
+    function statusLabelText() {
+        if (isErrorStopped) return qsTr("ERR")
+        if (isPlaying) return qsTr("PLAY")
+        if (isPaused) return qsTr("PAUSE")
+        if (hasTrack) return isActive ? qsTr("ROUTED") : qsTr("STBY")
+        return qsTr("EMPTY")
+    }
+
+    function statusColor() {
+        if (isErrorStopped) return "#FF5252"
+        if (isPlaying) return "#00E676"
+        if (isPaused) return "#F5B841"
+        if (isActive) return "#00E5FF"
+        return "#6D7B8A"
+    }
+
+    Layout.fillWidth: true
+    Layout.fillHeight: true
+    baseTint: isActive ? "#172029" : "#12161c"
+    borderColor: isErrorStopped ? "#FF5252" : (isActive ? "#2CD6F2" : "#2c3440")
+    accentColor: isActive ? "#402CD6F2" : "transparent"
+    cornerRadius: 6
+    brushedOpacity: 0.30
+
+    Connections {
+        target: EngineController
+        function onDeckStateChanged(id) {
+            if (id === cardRoot.deckId || id === "" || id === "ALL") {
+                cardRoot.refreshState()
+            }
+        }
+        function onActiveDeckChanged() {
+            cardRoot.refreshState()
+        }
+    }
+
+    Timer {
+        interval: 60
+        running: cardRoot.isPlaying
+        repeat: true
+        onTriggered: cardRoot.refreshState()
+    }
+
+    // Background click switches active deck
+    MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        z: 0
+        onClicked: {
+            if (EngineController.activeDeckId !== cardRoot.deckId) {
+                EngineController.switchDeck(cardRoot.deckId, EngineController.switchingMode)
+            }
+        }
+    }
+
+    // Compact 2-Column Hardware Deck Card matching Reference Mockups (NO artwork, NO 0-10 knob, NO Level Match)
+    RowLayout {
+        anchors.fill: parent
+        anchors.margins: 9
+        spacing: 9
+        z: 1
+
+        // -----------------------------------------------------------------
+        // Left Column: DECK Header + State + Folder Steppers / Transport Keys
+        // -----------------------------------------------------------------
+        ColumnLayout {
+            Layout.preferredWidth: 136
+            Layout.fillHeight: true
+            spacing: 5
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Label {
+                    text: "DECK " + cardRoot.deckId
+                    font.pixelSize: 15
+                    font.bold: true
+                    color: cardRoot.isActive ? "#38DEFA" : "#AEB9C5"
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Rectangle {
+                    implicitWidth: stLbl.implicitWidth + 8
+                    height: 16
+                    radius: 2
+                    color: "#0b0f14"
+                    border.color: cardRoot.statusColor()
+                    Label {
+                        id: stLbl
+                        anchors.centerIn: parent
+                        text: cardRoot.statusLabelText()
+                        font.family: "Monospace"
+                        font.pixelSize: 8
+                        font.bold: true
+                        color: cardRoot.statusColor()
+                    }
+                }
+            }
+
+            // Lock + Folder Next/Prev + Folder Step strip
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 3
+
+                ConsoleButton {
+                    text: "◀"
+                    fontSize: 9
+                    leftPadding: 3; rightPadding: 3
+                    implicitWidth: 26; implicitHeight: 22
+                    enabled: cardRoot.folderActive
+                    toolTipText: qsTr("Folder Session Previous Track")
+                    onClicked: EngineController.retreatFolderPrevious(cardRoot.deckId)
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 22
+                    radius: 3
+                    color: "#090c10"
+                    border.color: "#2b323e"
+                    Label {
+                        anchors.centerIn: parent
+                        text: cardRoot.folderActive
+                              ? "%1/%2".arg((cardRoot.deckState ? (cardRoot.deckState.folderCurrentIndex || 0) : 0) + 1)
+                                           .arg(cardRoot.deckState ? (cardRoot.deckState.folderTotalTracks || 0) : 0)
+                              : "="
+                        font.family: "Monospace"
+                        font.pixelSize: 9
+                        font.bold: cardRoot.folderActive
+                        color: cardRoot.folderActive ? "#00E5FF" : "#677584"
+                    }
+                }
+
+                ConsoleButton {
+                    text: "▶"
+                    fontSize: 9
+                    leftPadding: 3; rightPadding: 3
+                    implicitWidth: 26; implicitHeight: 22
+                    enabled: cardRoot.folderActive
+                    toolTipText: qsTr("Folder Session Next Track")
+                    onClicked: EngineController.advanceFolderNext(cardRoot.deckId)
+                }
+
+                ConsoleButton {
+                    text: cardRoot.isLocked ? "🔒" : "🔓"
+                    fontSize: 9
+                    leftPadding: 2; rightPadding: 2
+                    implicitWidth: 24; implicitHeight: 22
+                    highlighted: cardRoot.isLocked
+                    accentColor: "#F5B841"
+                    toolTipText: cardRoot.isLocked ? qsTr("Deck Locked") : qsTr("Lock Deck Context")
+                    onClicked: EngineController.setDeckLocked(cardRoot.deckId, !cardRoot.isLocked)
+                }
+            }
+
+            Item { Layout.fillHeight: true }
+
+            // Iconic Hardware Green / Amber / Burnt-Orange Transport Buttons
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                ConsoleButton {
+                    Layout.fillWidth: true
+                    implicitHeight: 34
+                    text: "▶"
+                    fontSize: 13
+                    anodizedFill: true
+                    anodizedTop: cardRoot.hasTrack ? (cardRoot.isPlaying ? "#28B85C" : "#1D6C3A") : "#163523"
+                    anodizedBottom: cardRoot.hasTrack ? (cardRoot.isPlaying ? "#146B31" : "#0F3D20") : "#0D2015"
+                    anodizedText: cardRoot.hasTrack ? "#EFFFF4" : "#3E7A56"
+                    highlighted: cardRoot.isPlaying
+                    accentColor: "#00E676"
+                    enabled: cardRoot.hasTrack
+                    toolTipText: qsTr("Play Deck %1").arg(cardRoot.deckId)
+                    onClicked: {
+                        if (EngineController.activeDeckId !== cardRoot.deckId) {
+                            EngineController.switchDeck(cardRoot.deckId, EngineController.switchingMode)
+                        }
+                        EngineController.play(cardRoot.deckId)
+                    }
+                }
+
+                ConsoleButton {
+                    Layout.fillWidth: true
+                    implicitHeight: 34
+                    text: "⏸"
+                    fontSize: 12
+                    anodizedFill: true
+                    anodizedTop: cardRoot.hasTrack ? (cardRoot.isPaused ? "#D89A2A" : "#6C501C") : "#362B16"
+                    anodizedBottom: cardRoot.hasTrack ? (cardRoot.isPaused ? "#7E5612" : "#38290C") : "#1F180B"
+                    anodizedText: cardRoot.hasTrack ? "#FFF8E6" : "#7D6940"
+                    highlighted: cardRoot.isPaused
+                    accentColor: "#F5B841"
+                    enabled: cardRoot.hasTrack
+                    toolTipText: qsTr("Pause Deck %1").arg(cardRoot.deckId)
+                    onClicked: EngineController.pause(cardRoot.deckId)
+                }
+
+                ConsoleButton {
+                    Layout.fillWidth: true
+                    implicitHeight: 34
+                    text: "⏹"
+                    fontSize: 12
+                    anodizedFill: true
+                    anodizedTop: cardRoot.hasTrack ? "#B4551E" : "#402414"
+                    anodizedBottom: cardRoot.hasTrack ? "#662C0C" : "#24140B"
+                    anodizedText: cardRoot.hasTrack ? "#FFF2EB" : "#805338"
+                    enabled: cardRoot.hasTrack
+                    toolTipText: qsTr("Stop Deck %1").arg(cardRoot.deckId)
+                    onClicked: EngineController.stop(cardRoot.deckId)
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // Right Column: Recessed OLED Track Screen + Compact Action / Nudge Strip
+        // -----------------------------------------------------------------
+        ColumnLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: 5
+
+            // Recessed Dark OLED Window (no artwork)
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: 4
+                color: "#06090d"
+                border.color: cardRoot.isActive && cardRoot.hasTrack ? "#1F6E80" : "#272e39"
+                border.width: 1
+
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 7
+                    spacing: 3
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        Label {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            text: cardRoot.hasTrack
+                                  ? ((cardRoot.deckState.title && cardRoot.deckState.title.length > 0)
+                                     ? cardRoot.deckState.title
+                                     : cardRoot.deckState.path.split('/').pop())
+                                  : qsTr("No track loaded")
+                            font.pixelSize: 11
+                            font.bold: cardRoot.hasTrack
+                            color: cardRoot.hasTrack ? "#E9F3FA" : "#566270"
+                            elide: Text.ElideMiddle
+                        }
+
+                        Label {
+                            visible: cardRoot.hasTrack
+                            text: {
+                                var c = (cardRoot.deckState && cardRoot.deckState.codec) ? cardRoot.deckState.codec : "PCM"
+                                var sr = ((cardRoot.deckState && cardRoot.deckState.sampleRate) ? (cardRoot.deckState.sampleRate / 1000.0).toFixed(1).replace(/\.0$/, "") : "48") + "k"
+                                return c + " " + sr
+                            }
+                            font.family: "Monospace"
+                            font.pixelSize: 9
+                            color: "#52CFEA"
+                        }
+                    }
+
+                    // High-precision seek bar + ms timecode
+                    Slider {
+                        id: deckSeekSlider
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 16
+                        enabled: cardRoot.hasTrack && (cardRoot.deckState && cardRoot.deckState.totalFrames > 0)
+                        from: 0.0
+                        to: (cardRoot.deckState && cardRoot.deckState.totalFrames > 0) ? cardRoot.deckState.totalFrames : 1.0
+                        value: pressed ? value : (cardRoot.deckState ? (cardRoot.deckState.positionFrames || 0) : 0)
+
+                        onMoved: EngineController.seek(cardRoot.deckId, Math.round(value))
+
+                        background: Rectangle {
+                            x: deckSeekSlider.leftPadding
+                            y: deckSeekSlider.topPadding + deckSeekSlider.availableHeight / 2 - height / 2
+                            width: deckSeekSlider.availableWidth
+                            height: 4
+                            radius: 2
+                            color: "#141b24"
+                            Rectangle {
+                                width: deckSeekSlider.visualPosition * parent.width
+                                height: parent.height
+                                radius: 2
+                                color: cardRoot.hasTrack ? "#00E5FF" : "#2d3642"
+                            }
+                        }
+
+                        handle: Rectangle {
+                            x: deckSeekSlider.leftPadding + deckSeekSlider.visualPosition * (deckSeekSlider.availableWidth - width)
+                            y: deckSeekSlider.topPadding + deckSeekSlider.availableHeight / 2 - height / 2
+                            width: 10
+                            height: 10
+                            radius: 5
+                            color: deckSeekSlider.enabled ? "#E9F4FA" : "#404954"
+                            border.color: "#00E5FF"
+                            border.width: deckSeekSlider.enabled ? 1 : 0
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Label {
+                            text: cardRoot.hasTrack
+                                  ? cardRoot.formatMsTime(cardRoot.deckState.positionFrames || 0, cardRoot.deckState.sampleRate)
+                                    + " / " + cardRoot.formatMsTime(cardRoot.deckState.totalFrames || 0, cardRoot.deckState.sampleRate)
+                                  : "00:00.000 / 00:00.000"
+                            font.family: "Monospace"
+                            font.pixelSize: 9
+                            color: cardRoot.isActive ? "#3CD8F5" : "#8090A0"
+                        }
+                        Item { Layout.fillWidth: true }
+                        Label {
+                            visible: cardRoot.isErrorStopped
+                            text: qsTr("ERROR")
+                            font.family: "Monospace"
+                            font.pixelSize: 8
+                            font.bold: true
+                            color: "#FF5252"
+                        }
+                    }
+                }
+            }
+
+            // Bottom Action Row inside Right Column: Load | Folder | [->WS] | Nudge -10/+10
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 3
+
+                ConsoleButton {
+                    text: qsTr("Load")
+                    fontSize: 9
+                    leftPadding: 5; rightPadding: 5
+                    implicitWidth: 42; implicitHeight: 22
+                    enabled: !cardRoot.isLocked
+                    toolTipText: qsTr("Load audio file into Deck %1").arg(cardRoot.deckId)
+                    onClicked: cardRoot.loadFileRequested(cardRoot.deckId)
+                }
+
+                ConsoleButton {
+                    text: qsTr("Folder")
+                    fontSize: 9
+                    leftPadding: 5; rightPadding: 5
+                    implicitWidth: 46; implicitHeight: 22
+                    enabled: !cardRoot.isLocked
+                    toolTipText: qsTr("Start Folder Session from first track")
+                    onClicked: cardRoot.startFolderRequested(cardRoot.deckId)
+                }
+
+                ConsoleButton {
+                    visible: cardRoot.canCopyToWorkspace
+                    text: "→WS"
+                    fontSize: 8
+                    leftPadding: 4; rightPadding: 4
+                    implicitWidth: 36; implicitHeight: 22
+                    accentColor: "#00E676"
+                    toolTipText: qsTr("Copy track into open Workspace")
+                    onClicked: EngineController.copyDeckTrackToWorkspace(cardRoot.deckId)
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Rectangle {
+                    implicitWidth: nudgeLbl.implicitWidth + 8
+                    height: 22
+                    radius: 3
+                    color: "#090c10"
+                    border.color: "#29303b"
+                    Label {
+                        id: nudgeLbl
+                        anchors.centerIn: parent
+                        property int offFrames: cardRoot.deckState ? (cardRoot.deckState.offsetFrames || 0) : 0
+                        property double sr: (cardRoot.deckState && cardRoot.deckState.sampleRate > 0) ? cardRoot.deckState.sampleRate : 48000.0
+                        text: ((offFrames * 1000.0) / sr).toFixed(1) + "ms"
+                        font.family: "Monospace"
+                        font.pixelSize: 8
+                        color: offFrames !== 0 ? "#F5B841" : "#7E8D9B"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onDoubleClicked: EngineController.setDeckOffsetFrames(cardRoot.deckId, 0)
+                    }
+                }
+
+                ConsoleButton {
+                    text: "-10"
+                    fontSize: 8
+                    leftPadding: 4; rightPadding: 4
+                    implicitWidth: 32; implicitHeight: 22
+                    toolTipText: qsTr("Compare Nudge -10 ms (double-click ms box to reset)")
+                    onClicked: {
+                        var sr = (cardRoot.deckState && cardRoot.deckState.sampleRate > 0) ? cardRoot.deckState.sampleRate : 48000.0
+                        var cur = cardRoot.deckState ? (cardRoot.deckState.offsetFrames || 0) : 0
+                        EngineController.setDeckOffsetFrames(cardRoot.deckId, cur - Math.round(sr * 0.01))
+                    }
+                }
+
+                ConsoleButton {
+                    text: "+10"
+                    fontSize: 8
+                    leftPadding: 4; rightPadding: 4
+                    implicitWidth: 32; implicitHeight: 22
+                    toolTipText: qsTr("Compare Nudge +10 ms (double-click ms box to reset)")
+                    onClicked: {
+                        var sr = (cardRoot.deckState && cardRoot.deckState.sampleRate > 0) ? cardRoot.deckState.sampleRate : 48000.0
+                        var cur = cardRoot.deckState ? (cardRoot.deckState.offsetFrames || 0) : 0
+                        EngineController.setDeckOffsetFrames(cardRoot.deckId, cur + Math.round(sr * 0.01))
+                    }
+                }
+            }
+        }
+    }
+}

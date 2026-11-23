@@ -154,8 +154,27 @@ qt_add_qml_module(desk32
         qml/OutputDevicePanel.qml
         qml/RenderPanel.qml
         qml/WorkspacePanel.qml
+        qml/PrototypeGallery.qml
+        qml/components/BrushedMetalPanel.qml
+        qml/components/ConsoleButton.qml
+        qml/components/ConsoleFader.qml
+        qml/components/ConsoleKnob.qml
+        qml/components/ConsoleLedMeter.qml
+        qml/components/DeckSlotCard.qml
+        qml/components/ScrollableModalPopup.qml
+        qml/components/TopConsoleBar.qml
+        qml/views/ConsoleView.qml
+        qml/views/WorkspaceView.qml
+        qml/views/LogView.qml
+        qml/views/SettingsView.qml
     RESOURCES
         images/Desk32-Icon.svg
+        resources/ui/brushed_metal_tile.png
+        resources/ui/fader_cap_console.png
+        resources/ui/knob_metal_base.png
+        resources/ui/knob_metal_cap.png
+        resources/ui/knob_pointer.png
+        resources/ui/screw_hex_dark.png
 )
 
 # Translations (Full Bilingual Support)
@@ -170,6 +189,18 @@ qt_add_translations(desk32
         qml/OutputDevicePanel.qml
         qml/RenderPanel.qml
         qml/WorkspacePanel.qml
+        qml/components/BrushedMetalPanel.qml
+        qml/components/ConsoleButton.qml
+        qml/components/ConsoleFader.qml
+        qml/components/ConsoleKnob.qml
+        qml/components/ConsoleLedMeter.qml
+        qml/components/DeckSlotCard.qml
+        qml/components/ScrollableModalPopup.qml
+        qml/components/TopConsoleBar.qml
+        qml/views/ConsoleView.qml
+        qml/views/WorkspaceView.qml
+        qml/views/LogView.qml
+        qml/views/SettingsView.qml
 )
 
 target_link_libraries(desk32 PRIVATE
