@@ -47,6 +47,7 @@ private slots:
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
+    std::unique_ptr<QQmlEngine> m_qmlEngine;
 };
 
 void TestOutputDeviceUi::initTestCase()
@@ -95,10 +96,15 @@ void TestOutputDeviceUi::initTestCase()
                                  &LogService::instance());
     qmlRegisterSingletonInstance("Desk32.Core", 1, 0, "WorkspaceManager",
                                  &WorkspaceManager::instance());
+
+    // Share one QQmlEngine across test slots (mirrors main.cpp and avoids repeated
+    // QQmlThread creation/teardown across slots within a single test process).
+    m_qmlEngine = std::make_unique<QQmlEngine>();
 }
 
 void TestOutputDeviceUi::cleanupTestCase()
 {
+    m_qmlEngine.reset();
     if (auto* out = EngineController::instance().audioOutput()) {
         out->shutdown();
     }
@@ -112,10 +118,10 @@ void TestOutputDeviceUi::cleanupTestCase()
 
 void TestOutputDeviceUi::testOutputDeviceEnumerationAndSelectionPanel()
 {
-    QQmlEngine engine;
+    QVERIFY(m_qmlEngine != nullptr);
     const QUrl panelUrl = QUrl::fromLocalFile(
         QStringLiteral(DESK32_SOURCE_DIR "/qml/OutputDevicePanel.qml"));
-    QQmlComponent component(&engine, panelUrl);
+    QQmlComponent component(m_qmlEngine.get(), panelUrl);
     if (component.isError()) {
         qWarning() << component.errors();
     }
@@ -211,10 +217,10 @@ void TestOutputDeviceUi::testWorkspaceImportFailureUiDisplay()
     QVERIFY(::symlink(stereoWav.toUtf8().constData(), symWav.toUtf8().constData()) == 0);
     QVERIFY(::link(stereoWav.toUtf8().constData(), hardWav.toUtf8().constData()) == 0);
 
-    QQmlEngine engine;
+    QVERIFY(m_qmlEngine != nullptr);
     const QUrl wsPanelUrl = QUrl::fromLocalFile(
         QStringLiteral(DESK32_SOURCE_DIR "/qml/WorkspacePanel.qml"));
-    QQmlComponent component(&engine, wsPanelUrl);
+    QQmlComponent component(m_qmlEngine.get(), wsPanelUrl);
     if (component.isError()) {
         qWarning() << component.errors();
     }
@@ -361,10 +367,10 @@ void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
 
 void TestOutputDeviceUi::testMainQmlCompilesWithOutputDevicePanel()
 {
-    QQmlEngine engine;
+    QVERIFY(m_qmlEngine != nullptr);
     const QUrl mainUrl = QUrl::fromLocalFile(
         QStringLiteral(DESK32_SOURCE_DIR "/qml/Main.qml"));
-    QQmlComponent component(&engine, mainUrl);
+    QQmlComponent component(m_qmlEngine.get(), mainUrl);
     if (component.isError()) {
         qWarning() << component.errors();
     }

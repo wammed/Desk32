@@ -32,3 +32,31 @@ race:QObject::event
 race:QFunctorSlotObject
 race:QMetaCallEvent
 race:QMetaObject::invokeMethodImpl
+
+# 7. Target: Qt6 QObject::moveToThread internal thread-affinity handoff (QQmlThread / QDBusConnection)
+#    Reason: Precompiled distribution libQt6Core uses uninstrumented QBasicMutex (futex) to synchronize
+#            QObject::moveToThread with QThread::exec() (reinitBindingStorageAfterThreadMove / QBindingStatus cleanup).
+#            Desk32 does not call QObject::moveToThread anywhere in its codebase.
+#    Scope : Strictly scoped to QObject::moveToThread symbol.
+race:QObject::moveToThread
+
+# 8. Target: Qt6 D-Bus connection manager spawned by QGuiApplication Linux platform integration
+#    Reason: Precompiled libQt6DBus / libQt6Core lacks TSan instrumentation and joins QDBusConnection via
+#            pthread_clockjoin_np (not intercepted by libtsan), causing missed happens-before at teardown.
+#            Desk32 does not link or use Qt6::DBus.
+#    Scope : Strictly scoped to libQt6DBus shared library.
+race:libQt6DBus
+
+# 9. Target: System libdbus-1 lazy initialization invoked internally by Qt6 QDBusConnection
+#    Reason: Third-party libdbus-1 lacks TSan instrumentation (dbus_threads_init / _dbus_get_local_machine_uuid_encoded).
+#            Desk32 does not link or call libdbus-1 directly.
+#    Scope : Strictly scoped to libdbus-1 shared library.
+race:libdbus-1
+
+# 10. Target: GLib GMainContext wakeup/teardown used internally by Qt6 QEventDispatcherGlib on QThread
+#     Reason: Precompiled libglib-2.0 implements GMutex via inline futexes invisible to TSan, causing false-positive
+#             fd race reports between eventfd creation, g_main_context_wakeup (write), and g_main_context_unref (close)
+#             on QDBusConnection / QQmlThread startup & teardown. Desk32 does not link or call GLib directly.
+#     Scope : Strictly scoped to g_main_context_wakeup and g_main_context_unref symbols.
+race:g_main_context_wakeup
+race:g_main_context_unref
