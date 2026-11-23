@@ -194,6 +194,7 @@ Item {
                 // Workspace Status Badge
                 Rectangle {
                     implicitWidth: wsBadgeCol.implicitWidth + 22
+                    Layout.preferredHeight: 40
                     height: 40
                     radius: 4
                     color: WorkspaceManager.hasOpenWorkspace ? "#091E16" : "#22180C"
@@ -222,6 +223,7 @@ Item {
                 Rectangle {
                     visible: WorkspaceManager.hasOpenWorkspace
                     implicitWidth: storeStatCol.implicitWidth + 18
+                    Layout.preferredHeight: 40
                     height: 40
                     radius: 4
                     color: "#090C11"
@@ -297,6 +299,7 @@ Item {
         Rectangle {
             visible: wsRoot.statusNotice.length > 0
             Layout.fillWidth: true
+            Layout.preferredHeight: 28
             height: 28
             radius: 4
             color: wsRoot.statusSeverity === "error" ? "#2E1216"
@@ -334,8 +337,10 @@ Item {
             // -----------------------------------------------------------------
             BrushedMetalPanel {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.preferredWidth: 1040
                 Layout.fillHeight: true
+                clip: true
                 baseTint: "#13171d"
                 borderColor: "#2f3743"
                 showScrews: true
@@ -455,10 +460,12 @@ Item {
                                 clip: true
                                 spacing: 4
                                 model: wsRoot.filteredFilesList
+                                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                                 delegate: Rectangle {
-                                    width: ListView.view.width
+                                    width: ListView.view.width - 10
                                     height: 54
                                     radius: 4
+                                    clip: true
                                     readonly property bool isSel: wsRoot.selectedFileRel === modelData.relativePath
                                     color: isSel ? "#132634" : (modelData.externallyModified ? "#241216" : "#0E131A")
                                     border.color: isSel ? "#00E5FF" : (modelData.externallyModified ? "#B83B44" : "#222B37")
@@ -470,16 +477,20 @@ Item {
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             spacing: 2
                                             RowLayout {
+                                                Layout.fillWidth: true
                                                 spacing: 6
                                                 Label {
+                                                    Layout.maximumWidth: 520
+                                                    Layout.minimumWidth: 0
                                                     text: modelData.fileName || modelData.relativePath
                                                     font.pixelSize: 12; font.bold: true; color: "#E6EEF6"
                                                     elide: Text.ElideRight
                                                 }
                                                 Rectangle {
-                                                    implicitWidth: provLbl.implicitWidth + 8; height: 16; radius: 2
+                                                    implicitWidth: provLbl.implicitWidth + 8; Layout.preferredHeight: 16; height: 16; radius: 2
                                                     color: modelData.logOnlyProvenance ? "#2A200C" : "#0A2218"
                                                     border.color: modelData.logOnlyProvenance ? "#A67C23" : "#1F7A52"
                                                     Label {
@@ -491,7 +502,7 @@ Item {
                                                 }
                                                 Rectangle {
                                                     visible: !!modelData.externallyModified
-                                                    implicitWidth: extModLbl.implicitWidth + 8; height: 16; radius: 2
+                                                    implicitWidth: extModLbl.implicitWidth + 8; Layout.preferredHeight: 16; height: 16; radius: 2
                                                     color: "#361217"; border.color: "#FF5252"
                                                     Label {
                                                         id: extModLbl; anchors.centerIn: parent
@@ -499,9 +510,11 @@ Item {
                                                         font.family: "Monospace"; font.pixelSize: 8; font.bold: true; color: "#FF8A8A"
                                                     }
                                                 }
+                                                Item { Layout.fillWidth: true }
                                             }
                                             Label {
                                                 Layout.fillWidth: true
+                                                Layout.minimumWidth: 0
                                                 text: {
                                                     var md = modelData.metadata || ({})
                                                     var sr = md.sampleRate ? ((md.sampleRate / 1000.0).toFixed(1) + " kHz") : "-"
@@ -550,8 +563,10 @@ Item {
             // -----------------------------------------------------------------
             BrushedMetalPanel {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.preferredWidth: 1460
                 Layout.fillHeight: true
+                clip: true
                 baseTint: "#13171d"
                 borderColor: "#2f3743"
                 showScrews: true
@@ -840,8 +855,9 @@ Item {
                                     clip: true
                                     spacing: 5
                                     model: wsRoot.savesList
+                                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                                     delegate: Rectangle {
-                                        width: ListView.view.width
+                                        width: ListView.view.width - 10
                                         height: 58
                                         radius: 4
                                         color: "#0E131A"
@@ -851,15 +867,15 @@ Item {
                                             anchors.margins: 8
                                             spacing: 6
                                             ColumnLayout {
-                                                Layout.fillWidth: true; spacing: 2
+                                                Layout.fillWidth: true; Layout.minimumWidth: 0; spacing: 2
                                                 Label {
-                                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                                                     text: (modelData.name || qsTr("Untitled Save")) + (modelData.isAutoSave ? qsTr("  [AUTO-SAVE]") : "")
                                                     font.pixelSize: 12; font.bold: true
                                                     color: modelData.isAutoSave ? "#F5B841" : "#E4ECF4"
                                                 }
                                                 Label {
-                                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                                    Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                                                     text: modelData.saveId + "   •   " + modelData.fileCount + " files   •   Δ " + wsRoot.formatBytes(modelData.incrementalBytes) + "   •   " + modelData.createdUtc
                                                     font.family: "Monospace"; font.pixelSize: 9; color: "#8C9EAE"
                                                 }
@@ -965,8 +981,10 @@ Item {
                                     }
                                     ScrollView {
                                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+                                        contentWidth: availableWidth
                                         TextArea {
                                             readOnly: true
+                                            wrapMode: TextEdit.Wrap
                                             text: wsRoot.diffSummaryText.length > 0 ? wsRoot.diffSummaryText : qsTr("Click DIFF A and DIFF B on two checkpoints above, then click COMPARE SAVES.")
                                             font.family: "Monospace"; font.pixelSize: 10
                                             color: wsRoot.diffSummaryText.length > 0 ? "#8FE8F5" : "#5D6E7F"
@@ -1059,7 +1077,7 @@ Item {
         id: openWorkspaceFolderDlg
         title: qsTr("Select or Register Desk32 Project Workspace Folder")
         onAccepted: {
-            var p = selectedFolder.toString().replace(/^file:\/\//, "")
+            var p = decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
                 if (WorkspaceManager.registerAndSelectWorkspaceAtStartup(p)) {
                     wsRoot.setNotice(qsTr("Opened workspace: %1").arg(p), "success")
@@ -1076,7 +1094,7 @@ Item {
         title: qsTr("Import Audio File to Open Workspace (SHA-256 Verified)")
         nameFilters: ["Audio Files (*.flac *.wav *.mp3 *.ogg *.opus *.m4a *.aac)", "All Files (*)"]
         onAccepted: {
-            var p = selectedFile.toString().replace(/^file:\/\//, "")
+            var p = decodeURIComponent(selectedFile.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
                 var sub = (wsRoot.activeFolderFilter !== "" && wsRoot.activeFolderFilter !== "/") ? wsRoot.activeFolderFilter : ""
                 var res = WorkspaceManager.importFileFromUi(p, sub)
@@ -1090,7 +1108,7 @@ Item {
         id: importAudioFolderDlg
         title: qsTr("Import Audio Folder into Open Workspace")
         onAccepted: {
-            var p = selectedFolder.toString().replace(/^file:\/\//, "")
+            var p = decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
                 var sub = (wsRoot.activeFolderFilter !== "" && wsRoot.activeFolderFilter !== "/") ? wsRoot.activeFolderFilter : ""
                 var results = WorkspaceManager.importFolderFromUi(p, sub) || []

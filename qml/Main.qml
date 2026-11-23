@@ -161,7 +161,7 @@ ApplicationWindow {
             if (localPath.indexOf("file://") === 0) {
                 localPath = decodeURIComponent(localPath.substring(7))
             }
-            EngineController.startFolderSession(mainWindow.pendingDeckIdForFolder, localPath)
+            EngineController.startFolderSession(mainWindow.pendingDeckIdForFolder, localPath, [])
         }
     }
 
@@ -177,6 +177,12 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.preferredHeight: 520
             visible: true
+            onCloseRequested: renderPopup.close()
+            onOpenLogRequested: {
+                renderPopup.close()
+                mainWindow.activeViewId = "log"
+                logView.refresh()
+            }
         }
     }
 
@@ -209,7 +215,7 @@ ApplicationWindow {
             wrapMode: Text.WordWrap
         }
 
-        Rectangle { Layout.fillWidth: true; height: 1; color: "#222933" }
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#222933" }
 
         Label {
             Layout.fillWidth: true
@@ -241,9 +247,9 @@ ApplicationWindow {
 
     Connections {
         target: EngineController
-        function onDeckWorkspaceImportFinished(deckId, ok, detail) {
+        function onDeckWorkspaceImportFinished(deckId, ok, statusText, message) {
             if (!ok) {
-                importErrorPopup.msg = qsTr("Deck %1 workspace import failed:\n%2").arg(deckId).arg(detail)
+                importErrorPopup.msg = qsTr("Deck %1 workspace import failed:\n%2").arg(deckId).arg(message && message.length > 0 ? message : statusText)
                 importErrorPopup.open()
             }
         }

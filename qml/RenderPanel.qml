@@ -55,7 +55,7 @@ Rectangle {
         title: qsTr("Select Folder for Album Render")
         onAccepted: {
             var p = selectedFolder.toString()
-            if (p.startsWith("file://")) p = p.substring(7)
+            if (p.startsWith("file://")) p = decodeURIComponent(p.substring(7))
             renderRoot.albumFolder = p
         }
     }
@@ -67,7 +67,7 @@ Rectangle {
 
         RowLayout {
             Layout.fillWidth: true
-            Rectangle { width: 8; height: 8; radius: 4; color: "#00E5FF" }
+            Rectangle { Layout.preferredWidth: 8; Layout.preferredHeight: 8; width: 8; height: 8; radius: 4; color: "#00E5FF" }
             Label {
                 text: qsTr("EXPORT / RENDER")
                 font.bold: true
@@ -146,11 +146,12 @@ Rectangle {
                             font.pixelSize: 10
                         }
 
-                        Rectangle { Layout.fillWidth: true; height: 1; color: "#222730" }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#222730" }
 
                         // Active Workspace Output Target Indicator (Spec v3.8.1 §19 D-2)
                         Rectangle {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: 28
                             height: 28
                             radius: 3
                             color: WorkspaceManager.hasOpenWorkspace ? "#0d1f18" : "#2b1616"
@@ -250,6 +251,7 @@ Rectangle {
 
                         RowLayout {
                             Rectangle {
+                                Layout.preferredWidth: 90; Layout.preferredHeight: 20
                                 width: 90; height: 20; radius: 3
                                 color: "#181c22"
                                 border.color: EngineController.renderWorkerState === 0 ? "#2a313b" : "#00E5FF"
@@ -345,6 +347,7 @@ Rectangle {
 
                         Rectangle {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: 26
                             height: 26
                             radius: 3
                             color: "#181c22"

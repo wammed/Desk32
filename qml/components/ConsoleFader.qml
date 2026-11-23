@@ -18,6 +18,7 @@ Item {
     property bool showHeaderLed: true
     property bool showReadout: true
     property bool consoleTaper: false
+    readonly property bool isDragging: dragArea.dragging
 
     signal valueEdited(double newValue)
     signal enabledToggled(bool newEnabled)
@@ -290,6 +291,7 @@ Item {
                 }
 
                 onReleased: dragging = false
+                onCanceled: dragging = false
 
                 onDoubleClicked: {
                     faderRoot.value = faderRoot.defaultValue

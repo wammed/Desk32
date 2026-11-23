@@ -109,6 +109,7 @@ BrushedMetalPanel {
 
             Rectangle {
                 implicitWidth: wsBadgeLbl.implicitWidth + 14
+                Layout.preferredHeight: 36
                 height: 36
                 radius: 4
                 color: WorkspaceManager.hasOpenWorkspace ? "#0d2419" : "#12161c"
@@ -126,6 +127,7 @@ BrushedMetalPanel {
 
             Rectangle {
                 implicitWidth: Math.max(158, backendLbl.implicitWidth + 24)
+                Layout.preferredHeight: 38
                 height: 38
                 radius: 4
                 color: "#080b0f"

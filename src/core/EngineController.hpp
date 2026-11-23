@@ -312,7 +312,7 @@ public:
     }
 
     // QML-invokable Folder Session Operations
-    Q_INVOKABLE bool startFolderSession(const QString& deckId, const QString& folderPath, const QStringList& fileNames);
+    Q_INVOKABLE bool startFolderSession(const QString& deckId, const QString& folderPath, const QStringList& fileNames = {});
     Q_INVOKABLE bool startFolderSessionFromDeck(const QString& deckId);
     Q_INVOKABLE bool advanceFolderNext(const QString& deckId);
     Q_INVOKABLE bool retreatFolderPrevious(const QString& deckId);

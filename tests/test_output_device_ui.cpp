@@ -43,6 +43,7 @@ private slots:
     void testOutputDeviceEnumerationAndSelectionPanel();
     void testWorkspaceImportFailureUiDisplay();
     void testSettingsManagerPersistenceAndIntegration();
+    void testDeckStateContractFolderSessionAndSeek();
     void testMainQmlCompilesWithOutputDevicePanel();
 
 private:
@@ -363,6 +364,43 @@ void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
     ctrl.setListeningPreset(QStringLiteral("Monitor Flat"));
     ctrl.setExternalInsertPosition(4);
     ctrl.setExternalInsertDisconnectPolicy(0);
+}
+
+void TestOutputDeviceUi::testDeckStateContractFolderSessionAndSeek()
+{
+    const QString folderDir = m_tempDir->path() + "/folder_session_test";
+    QVERIFY(QDir().mkpath(folderDir));
+
+    for (int i = 1; i <= 2; ++i) {
+        QProcess ff;
+        ff.start("ffmpeg", {"-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.6",
+                            "-ar", "48000", "-ac", "2",
+                            QString("%1/0%2_track.wav").arg(folderDir).arg(i)});
+        QVERIFY(ff.waitForFinished(10000) && ff.exitCode() == 0);
+    }
+
+    auto& ctrl = EngineController::instance();
+    // Calls 2-arg form (using default empty QStringList fileNames) as fixed for QML
+    QVERIFY(ctrl.startFolderSession(QStringLiteral("A"), folderDir));
+
+    QVariantMap st = ctrl.getDeckState(QStringLiteral("A"));
+    QVERIFY(st.contains(QStringLiteral("playhead")));
+    QVERIFY(st.contains(QStringLiteral("positionFrames")));
+    QVERIFY(st.contains(QStringLiteral("playing")));
+    QVERIFY(st.contains(QStringLiteral("fileName")));
+    QVERIFY(st.contains(QStringLiteral("hasError")));
+    QCOMPARE(st.value(QStringLiteral("folderActive")).toBool(), true);
+    QCOMPARE(st.value(QStringLiteral("folderTotalTracks")).toInt(), 2);
+    QCOMPARE(st.value(QStringLiteral("playing")).toBool(), false);
+    QCOMPARE(st.value(QStringLiteral("hasError")).toBool(), false);
+    QCOMPARE(st.value(QStringLiteral("fileName")).toString(), QStringLiteral("01_track.wav"));
+    QCOMPARE(st.value(QStringLiteral("playhead")).toLongLong(),
+             st.value(QStringLiteral("positionFrames")).toLongLong());
+
+    ctrl.seek(QStringLiteral("A"), 12000);
+    QVariantMap stAfter = ctrl.getDeckState(QStringLiteral("A"));
+    QCOMPARE(stAfter.value(QStringLiteral("playhead")).toLongLong(), 12000);
+    QCOMPARE(stAfter.value(QStringLiteral("positionFrames")).toLongLong(), 12000);
 }
 
 void TestOutputDeviceUi::testMainQmlCompilesWithOutputDevicePanel()

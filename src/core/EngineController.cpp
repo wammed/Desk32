@@ -4906,11 +4906,17 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
 
   map["id"] = QString(d->id());
   map["state"] = static_cast<int>(d->state());
-  map["playhead"] = QVariant::fromValue(d->playhead());
+  map["playing"] = (d->state() == engine::deck::TransportState::Playing);
+  const auto playheadFrames = QVariant::fromValue(d->playhead());
+  map["playhead"] = playheadFrames;
+  map["positionFrames"] = playheadFrames;
   map["offsetFrames"] = QVariant::fromValue(d->offsetFrames());
   map["levelMatchDb"] = d->levelMatchGainDb();
   map["isLocked"] = d->isLocked();
-  map["path"] = QString::fromStdString(d->trackInfo().path);
+  map["hasError"] = d->worker().hasDecodeError();
+  const QString trackQPath = QString::fromStdString(d->trackInfo().path);
+  map["path"] = trackQPath;
+  map["fileName"] = trackQPath.isEmpty() ? QString() : QFileInfo(trackQPath).fileName();
   map["sampleRate"] = d->trackInfo().sampleRate;
   map["channels"] = d->trackInfo().channels;
   map["totalFrames"] = QVariant::fromValue(d->trackInfo().totalFrames);
@@ -4947,7 +4953,6 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
 
   const auto &wsMgr = engine::workspace::WorkspaceManager::instance();
   const bool wsOpen = wsMgr.hasOpenWorkspace();
-  const QString trackQPath = QString::fromStdString(d->trackInfo().path);
   const bool insideOpenWs = wsOpen && !trackQPath.isEmpty() &&
                             wsMgr.isPathInsideOpenWorkspace(trackQPath, false);
   map["isInsideOpenWorkspace"] = insideOpenWs;

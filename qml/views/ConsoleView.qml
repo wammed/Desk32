@@ -71,11 +71,11 @@ Item {
     }
 
     function bitPerfectStateColor(state) {
-        if (state === 1) return "#00E676"
-        if (state === 2) return "#00E5FF"
-        if (state === 3) return "#F5B841"
-        if (state === 4) return "#FF5252"
-        return "#8A98A8"
+        if (state === 4) return "#00E5FF"
+        if (state === 3) return "#00E676"
+        if (state === 2) return "#F5B841"
+        if (state === 1) return "#8A98A8"
+        return "#FF5252"
     }
 
     function geqBandLabel(idx) {
@@ -244,23 +244,40 @@ Item {
                 ? EngineController.getListeningBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand)
                 : EngineController.getPeqBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand)
         if (b && b.frequency !== undefined) {
-            peqFreqKnob.value = b.frequency
-            peqGainKnob.value = b.gainDb
-            peqQKnob.value = b.q
+            if (!peqFreqKnob.isDragging) peqFreqKnob.value = b.frequency
+            if (!peqGainKnob.isDragging) peqGainKnob.value = b.gainDb
+            if (!peqQKnob.isDragging) peqQKnob.value = b.q
             peqBandTypeIndex = b.type !== undefined ? b.type : 0
             peqBandEnabledState = !!b.enabled
         }
-        peqInTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", false)
-        peqOutTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", true)
+        if (!peqInTrimKnob.isDragging)
+            peqInTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", false)
+        if (!peqOutTrimKnob.isDragging)
+            peqOutTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", true)
         peqGridTick++
         peqMiniCanvas.requestPaint()
+    }
+
+    function refreshGeqFaders() {
+        for (var i = 0; i < 16; ++i) {
+            var lf = geqLeftRepeater.itemAt(i)
+            if (lf) {
+                if (!lf.isDragging) lf.value = EngineController.getGeqBandGain(i)
+                lf.bandEnabled = EngineController.isGeqBandEnabled(i)
+            }
+            var rf = geqRightRepeater.itemAt(i)
+            if (rf) {
+                if (!rf.isDragging) rf.value = EngineController.getGeqBandGain(i + 16)
+                rf.bandEnabled = EngineController.isGeqBandEnabled(i + 16)
+            }
+        }
     }
 
     function refreshDspRack() {
         var fp = EngineController.getFilterParams()
         if (fp) {
-            dspHpfKnob.value = fp.hpfFrequency !== undefined ? fp.hpfFrequency : 20.0
-            dspLpfKnob.value = fp.lpfFrequency !== undefined ? fp.lpfFrequency : 20000.0
+            if (!dspHpfKnob.isDragging) dspHpfKnob.value = fp.hpfFrequency !== undefined ? fp.hpfFrequency : 20.0
+            if (!dspLpfKnob.isDragging) dspLpfKnob.value = fp.lpfFrequency !== undefined ? fp.lpfFrequency : 20000.0
             dspHpfEnabled = !!fp.hpfEnabled
             dspLpfEnabled = !!fp.lpfEnabled
             dspHpfSlope = fp.hpfSlope !== undefined ? fp.hpfSlope : 0
@@ -269,42 +286,42 @@ Item {
         }
         var cp = EngineController.getCompressorParams()
         if (cp) {
-            dspCompThreshKnob.value = cp.thresholdDb !== undefined ? cp.thresholdDb : -12.0
-            dspCompRatioKnob.value = cp.ratio !== undefined ? cp.ratio : 2.0
-            dspCompAttackKnob.value = cp.attackMs !== undefined ? cp.attackMs : 10.0
-            dspCompReleaseKnob.value = cp.releaseMs !== undefined ? cp.releaseMs : 120.0
-            dspCompMakeupKnob.value = cp.makeupGainDb !== undefined ? cp.makeupGainDb : 0.0
-            dspCompKneeKnob.value = cp.kneeDb !== undefined ? cp.kneeDb : 2.0
+            if (!dspCompThreshKnob.isDragging) dspCompThreshKnob.value = cp.thresholdDb !== undefined ? cp.thresholdDb : -12.0
+            if (!dspCompRatioKnob.isDragging) dspCompRatioKnob.value = cp.ratio !== undefined ? cp.ratio : 2.0
+            if (!dspCompAttackKnob.isDragging) dspCompAttackKnob.value = cp.attackMs !== undefined ? cp.attackMs : 10.0
+            if (!dspCompReleaseKnob.isDragging) dspCompReleaseKnob.value = cp.releaseMs !== undefined ? cp.releaseMs : 120.0
+            if (!dspCompMakeupKnob.isDragging) dspCompMakeupKnob.value = cp.makeupGainDb !== undefined ? cp.makeupGainDb : 0.0
+            if (!dspCompKneeKnob.isDragging) dspCompKneeKnob.value = cp.kneeDb !== undefined ? cp.kneeDb : 2.0
             dspCompGainReductionDb = cp.gainReductionDb !== undefined ? cp.gainReductionDb : 0.0
             dspCompBypassed = !!cp.bypassed
         }
         var rp = EngineController.getReverbParams()
         if (rp) {
-            dspRevRoomKnob.value = rp.roomSize !== undefined ? rp.roomSize : 0.35
-            dspRevDampKnob.value = rp.damping !== undefined ? rp.damping : 0.5
-            dspRevWetKnob.value = rp.wetLevel !== undefined ? rp.wetLevel : 0.15
-            dspRevPreKnob.value = rp.predelayMs !== undefined ? rp.predelayMs : 12.0
+            if (!dspRevRoomKnob.isDragging) dspRevRoomKnob.value = rp.roomSize !== undefined ? rp.roomSize : 0.35
+            if (!dspRevDampKnob.isDragging) dspRevDampKnob.value = rp.damping !== undefined ? rp.damping : 0.5
+            if (!dspRevWetKnob.isDragging) dspRevWetKnob.value = rp.wetLevel !== undefined ? rp.wetLevel : 0.15
+            if (!dspRevPreKnob.isDragging) dspRevPreKnob.value = rp.predelayMs !== undefined ? rp.predelayMs : 12.0
             dspRevTailPreserving = rp.tailPreserving !== undefined ? !!rp.tailPreserving : true
             dspRevBypassed = !!rp.bypassed
         }
         var lp = EngineController.getLimiterParams()
         if (lp) {
-            dspLimCeilKnob.value = lp.ceilingDb !== undefined ? lp.ceilingDb : -0.3
-            dspLimRelKnob.value = lp.releaseMs !== undefined ? lp.releaseMs : 50.0
-            dspLimLookKnob.value = lp.lookaheadMs !== undefined ? lp.lookaheadMs : 1.5
+            if (!dspLimCeilKnob.isDragging) dspLimCeilKnob.value = lp.ceilingDb !== undefined ? lp.ceilingDb : -0.3
+            if (!dspLimRelKnob.isDragging) dspLimRelKnob.value = lp.releaseMs !== undefined ? lp.releaseMs : 50.0
+            if (!dspLimLookKnob.isDragging) dspLimLookKnob.value = lp.lookaheadMs !== undefined ? lp.lookaheadMs : 1.5
             dspLimGainReductionDb = lp.gainReductionDb !== undefined ? lp.gainReductionDb : 0.0
             dspLimBypassed = !!lp.bypassed
         }
-        hpfInTrimKnob.value = EngineController.getDspTrim("hpf", false)
-        hpfOutTrimKnob.value = EngineController.getDspTrim("hpf", true)
-        lpfInTrimKnob.value = EngineController.getDspTrim("lpf", false)
-        lpfOutTrimKnob.value = EngineController.getDspTrim("lpf", true)
-        compInTrimKnob.value = EngineController.getDspTrim("compressor", false)
-        compOutTrimKnob.value = EngineController.getDspTrim("compressor", true)
-        revInTrimKnob.value = EngineController.getDspTrim("reverb", false)
-        revOutTrimKnob.value = EngineController.getDspTrim("reverb", true)
-        limInTrimKnob.value = EngineController.getDspTrim("limiter", false)
-        limOutTrimKnob.value = EngineController.getDspTrim("limiter", true)
+        if (!hpfInTrimKnob.isDragging) hpfInTrimKnob.value = EngineController.getDspTrim("hpf", false)
+        if (!hpfOutTrimKnob.isDragging) hpfOutTrimKnob.value = EngineController.getDspTrim("hpf", true)
+        if (!lpfInTrimKnob.isDragging) lpfInTrimKnob.value = EngineController.getDspTrim("lpf", false)
+        if (!lpfOutTrimKnob.isDragging) lpfOutTrimKnob.value = EngineController.getDspTrim("lpf", true)
+        if (!compInTrimKnob.isDragging) compInTrimKnob.value = EngineController.getDspTrim("compressor", false)
+        if (!compOutTrimKnob.isDragging) compOutTrimKnob.value = EngineController.getDspTrim("compressor", true)
+        if (!revInTrimKnob.isDragging) revInTrimKnob.value = EngineController.getDspTrim("reverb", false)
+        if (!revOutTrimKnob.isDragging) revOutTrimKnob.value = EngineController.getDspTrim("reverb", true)
+        if (!limInTrimKnob.isDragging) limInTrimKnob.value = EngineController.getDspTrim("limiter", false)
+        if (!limOutTrimKnob.isDragging) limOutTrimKnob.value = EngineController.getDspTrim("limiter", true)
         filterMiniCanvas.requestPaint()
         reverbMiniCanvas.requestPaint()
     }
@@ -340,6 +357,21 @@ Item {
     }
 
     Timer {
+        id: playheadTimer
+        interval: 50
+        repeat: true
+        readonly property var actSt: {
+            var _t = consoleRoot.activeDeckPollTick
+            return EngineController.getDeckState(EngineController.activeDeckId)
+        }
+        running: consoleRoot.visible && !!(actSt && actSt.state === 1)
+        onTriggered: {
+            consoleRoot.activeDeckPollTick++
+            if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
+        }
+    }
+
+    Timer {
         id: spectrumTimer
         interval: 33
         repeat: true
@@ -347,18 +379,22 @@ Item {
             var _t = consoleRoot.activeDeckPollTick
             return EngineController.getDeckState(EngineController.activeDeckId)
         }
-        running: consoleRoot.visible && consoleRoot.showSpectrum && !EngineController.masterMute && ((actSt && actSt.playing) || consoleRoot.spectrumHasSignal)
+        running: consoleRoot.visible && consoleRoot.showSpectrum && !EngineController.masterMute && ((actSt && actSt.state === 1) || consoleRoot.spectrumHasSignal)
         onTriggered: consoleRoot.pollSpectrum()
     }
 
     Connections {
         target: EngineController
-        function onGeqParametersChanged() { consoleRoot.refreshEqCurve() }
+        function onGeqParametersChanged() {
+            consoleRoot.refreshGeqFaders()
+            consoleRoot.refreshEqCurve()
+        }
         function onPeqParametersChanged() {
             consoleRoot.refreshPeqInspector()
             consoleRoot.refreshEqCurve()
         }
         function onListeningPresetChanged() {
+            consoleRoot.refreshGeqFaders()
             consoleRoot.refreshPeqInspector()
             consoleRoot.refreshEqCurve()
         }
@@ -366,10 +402,15 @@ Item {
         function onCompressorParametersChanged() { consoleRoot.refreshDspRack() }
         function onReverbParametersChanged() { consoleRoot.refreshDspRack() }
         function onLimiterParametersChanged() { consoleRoot.refreshDspRack() }
-        function onDspTelemetryChanged() { consoleRoot.refreshDspRack() }
+        function onDspTelemetryChanged() {
+            consoleRoot.dspCompGainReductionDb = EngineController.compressorGainReductionDb
+            consoleRoot.dspLimGainReductionDb = EngineController.limiterGainReductionDb
+        }
         function onDspTrimsChanged() {
-            geqInTrimFader.value = EngineController.getDspTrim("geq", false)
-            geqOutTrimFader.value = EngineController.getDspTrim("geq", true)
+            if (!geqInTrimFader.isDragging)
+                geqInTrimFader.value = EngineController.getDspTrim("geq", false)
+            if (!geqOutTrimFader.isDragging)
+                geqOutTrimFader.value = EngineController.getDspTrim("geq", true)
             consoleRoot.refreshPeqInspector()
             consoleRoot.refreshDspRack()
         }
@@ -436,7 +477,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Rectangle { Layout.fillWidth: true; height: 1; color: "#323a46" }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
                         Label {
                             text: qsTr("REFERENCE DECK")
                             font.family: "Monospace"
@@ -445,7 +486,7 @@ Item {
                             font.letterSpacing: 1.4
                             color: "#BDC9D6"
                         }
-                        Rectangle { Layout.fillWidth: true; height: 1; color: "#323a46" }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
                     }
 
                     // Switching Mode Bar: Large A<->B Quick Switch + NORMAL | COMPARE
@@ -465,7 +506,7 @@ Item {
                             onClicked: EngineController.quickSwitchAB()
                         }
 
-                        Rectangle { width: 1; height: 28; color: "#2D3642" }
+                        Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 28; width: 1; height: 28; color: "#2D3642" }
 
                         ConsoleButton {
                             Layout.fillWidth: true
@@ -545,6 +586,7 @@ Item {
                                 // Primary Monitor View Segmented Bar
                                 Rectangle {
                                     implicitWidth: modeSegRow.implicitWidth + 4
+                                    Layout.preferredHeight: 28
                                     height: 28
                                     radius: 4
                                     color: "#0b0e13"
@@ -578,6 +620,7 @@ Item {
                                 // Channel Scope Strip (L+R | L | R | AUTO)
                                 Rectangle {
                                     implicitWidth: chSegRow.implicitWidth + 4
+                                    Layout.preferredHeight: 28
                                     height: 28
                                     radius: 4
                                     color: "#0b0e13"
@@ -632,7 +675,11 @@ Item {
                                 Label {
                                     text: parent.actSt && parent.actSt.path && parent.actSt.path.length > 0
                                           ? ("DECK " + EngineController.activeDeckId + ": "
-                                             + (parent.actSt.title && parent.actSt.title.length > 0 ? parent.actSt.title : parent.actSt.fileName))
+                                             + (parent.actSt.title && parent.actSt.title.length > 0
+                                                ? parent.actSt.title
+                                                : (parent.actSt.fileName && parent.actSt.fileName.length > 0
+                                                   ? parent.actSt.fileName
+                                                   : parent.actSt.path.split('/').pop())))
                                           : qsTr("MAIN MONITOR — READY (NO TRACK LOADED)")
                                     font.family: "Monospace"
                                     font.pixelSize: 10
@@ -666,9 +713,14 @@ Item {
                                     var _t = consoleRoot.activeDeckPollTick
                                     return EngineController.getDeckState(EngineController.activeDeckId)
                                 }
-                                readonly property real playRatio: (actSt && actSt.totalFrames > 0)
-                                                                  ? Math.max(0.0, Math.min(1.0, actSt.positionFrames / actSt.totalFrames))
-                                                                  : 0.0
+                                property bool isScrubbing: false
+                                property real scrubRatio: 0.0
+                                readonly property real playRatio: isScrubbing
+                                                                  ? scrubRatio
+                                                                  : ((actSt && actSt.totalFrames > 0)
+                                                                     ? Math.max(0.0, Math.min(1.0, (actSt.playhead || 0) / actSt.totalFrames))
+                                                                     : 0.0)
+                                onPlayRatioChanged: waveCanvas.requestPaint()
 
                                 // Dynamic Time Markings from Track Duration
                                 RowLayout {
@@ -798,14 +850,37 @@ Item {
                                     anchors.fill: parent
                                     acceptedButtons: Qt.LeftButton
                                     cursorShape: (waveTimelineBox.actSt && waveTimelineBox.actSt.totalFrames > 0) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    function seekAt(mx) {
+                                    function ratioAt(mx) {
+                                        return Math.max(0.0, Math.min(1.0, (mx - 6.0) / Math.max(1.0, parent.width - 12.0)))
+                                    }
+                                    onPressed: function(mouse) {
                                         var st = waveTimelineBox.actSt
                                         if (!st || !st.totalFrames || st.totalFrames <= 0) return
-                                        var r = Math.max(0.0, Math.min(1.0, (mx - 6.0) / Math.max(1.0, parent.width - 12.0)))
-                                        EngineController.seek(EngineController.activeDeckId, Math.round(r * st.totalFrames))
+                                        waveTimelineBox.isScrubbing = true
+                                        waveTimelineBox.scrubRatio = ratioAt(mouse.x)
+                                        waveCanvas.requestPaint()
                                     }
-                                    onPressed: function(mouse) { seekAt(mouse.x) }
-                                    onPositionChanged: function(mouse) { if (pressed) seekAt(mouse.x) }
+                                    onPositionChanged: function(mouse) {
+                                        if (pressed && waveTimelineBox.isScrubbing) {
+                                            waveTimelineBox.scrubRatio = ratioAt(mouse.x)
+                                            waveCanvas.requestPaint()
+                                        }
+                                    }
+                                    onReleased: function(mouse) {
+                                        if (!waveTimelineBox.isScrubbing) return
+                                        var st = waveTimelineBox.actSt
+                                        var r = ratioAt(mouse.x)
+                                        waveTimelineBox.isScrubbing = false
+                                        if (st && st.totalFrames > 0) {
+                                            EngineController.seek(EngineController.activeDeckId, Math.round(r * st.totalFrames))
+                                            consoleRoot.activeDeckPollTick++
+                                        }
+                                        waveCanvas.requestPaint()
+                                    }
+                                    onCanceled: {
+                                        waveTimelineBox.isScrubbing = false
+                                        waveCanvas.requestPaint()
+                                    }
                                 }
                             }
 
@@ -1228,7 +1303,7 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Rectangle { Layout.fillWidth: true; height: 1; color: "#323a46" }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
                         Label {
                             text: qsTr("ROUTING")
                             font.family: "Monospace"
@@ -1237,7 +1312,7 @@ Item {
                             font.letterSpacing: 1.4
                             color: "#BDC9D6"
                         }
-                        Rectangle { Layout.fillWidth: true; height: 1; color: "#323a46" }
+                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
                     }
 
                     // Tall Balanced 3-Button Routing Section (Q-05 Monitor Output vs Export Path + Dark Preset Selector)
@@ -1263,31 +1338,17 @@ Item {
                                 font.pixelSize: 9
                                 color: "#8A99A8"
                             }
-                            ComboBox {
+                            ConsoleComboBox {
                                 id: routingPresetCombo
                                 implicitWidth: 168
                                 implicitHeight: 24
+                                font.pixelSize: 10
+                                font.bold: true
                                 model: EngineController.availableListeningPresets()
                                 currentIndex: Math.max(0, model.indexOf(EngineController.listeningPresetName))
                                 enabled: EngineController.outputRoutingMode === 0 && !consoleRoot.isDirect
                                 onActivated: function(idx) {
                                     EngineController.setListeningPreset(model[idx])
-                                }
-                                contentItem: Label {
-                                    leftPadding: 8
-                                    rightPadding: 20
-                                    text: routingPresetCombo.displayText
-                                    font.pixelSize: 10
-                                    font.bold: true
-                                    color: routingPresetCombo.enabled ? "#DCE6F0" : "#5D6976"
-                                    verticalAlignment: Text.AlignVCenter
-                                    elide: Text.ElideRight
-                                }
-                                background: Rectangle {
-                                    radius: 3
-                                    color: "#0B0E13"
-                                    border.color: routingPresetCombo.enabled ? "#384250" : "#242A34"
-                                    border.width: 1
                                 }
                             }
                         }
@@ -1327,7 +1388,7 @@ Item {
                                 font.bold: true
                                 color: "#E8BA6B"
                             }
-                            Rectangle { Layout.fillWidth: true; height: 1; color: "#2d3541" }
+                            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#2d3541" }
                         }
 
                         ConsoleButton {
@@ -1525,7 +1586,8 @@ Item {
                                         Connections {
                                             target: EngineController
                                             function onMasterGainLChanged() {
-                                                masterFaderL.value = consoleRoot.gainToDb(EngineController.masterGainL)
+                                                if (!masterFaderL.isDragging)
+                                                    masterFaderL.value = consoleRoot.gainToDb(EngineController.masterGainL)
                                             }
                                         }
                                     }
@@ -1585,7 +1647,8 @@ Item {
                                         Connections {
                                             target: EngineController
                                             function onMasterGainRChanged() {
-                                                masterFaderR.value = consoleRoot.gainToDb(EngineController.masterGainR)
+                                                if (!masterFaderR.isDragging)
+                                                    masterFaderR.value = consoleRoot.gainToDb(EngineController.masterGainR)
                                             }
                                         }
                                     }
@@ -2055,6 +2118,7 @@ Item {
                                                 Layout.fillWidth: true
                                                 spacing: 5
                                                 Rectangle {
+                                                    Layout.preferredWidth: 7; Layout.preferredHeight: 7
                                                     width: 7; height: 7; radius: 3.5
                                                     color: isOn ? "#00E676" : "#2F3743"
                                                     border.color: isOn ? "#99ffffff" : "#161A20"
@@ -2502,6 +2566,7 @@ Item {
                                                 Layout.fillWidth: true
                                                 spacing: 5
                                                 Rectangle {
+                                                    Layout.preferredWidth: 7; Layout.preferredHeight: 7
                                                     width: 7; height: 7; radius: 3.5
                                                     color: isOn ? "#00E676" : "#2F3743"
                                                     border.color: isOn ? "#99ffffff" : "#161A20"
@@ -2741,7 +2806,7 @@ Item {
                                             onValueEdited: function(v) { value = v; EngineController.setFilterParams(v, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
                                         }
 
-                                        Rectangle { width: 1; Layout.fillHeight: true; color: "#2D526E" }
+                                        Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#2D526E" }
 
                                         ConsoleKnob {
                                             id: hpfInTrimKnob
@@ -2763,7 +2828,7 @@ Item {
                                         }
                                     }
 
-                                    Rectangle { Layout.fillWidth: true; height: 1; color: "#26465E" }
+                                    Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#26465E" }
 
                                     // LPF Strip
                                     RowLayout {
@@ -2809,7 +2874,7 @@ Item {
                                             onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, v, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
                                         }
 
-                                        Rectangle { width: 1; Layout.fillHeight: true; color: "#2D526E" }
+                                        Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#2D526E" }
 
                                         ConsoleKnob {
                                             id: lpfInTrimKnob
@@ -2898,6 +2963,7 @@ Item {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 22
                                             horizontal: true
+                                            linearScale: true
                                             segmentCount: 24
                                             peakValue: Math.min(1.0, Math.abs(consoleRoot.dspCompGainReductionDb) / 18.0)
                                             rmsValue: peakValue * 0.75
@@ -2990,7 +3056,7 @@ Item {
                                         }
                                     }
 
-                                    Rectangle { width: 1; Layout.fillHeight: true; color: "#363E4A" }
+                                    Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#363E4A" }
                                     ColumnLayout {
                                         Layout.preferredWidth: 102
                                         Layout.fillHeight: true
@@ -3046,6 +3112,7 @@ Item {
                                     }
                                     Rectangle {
                                         implicitWidth: spLbl.implicitWidth + 10
+                                        Layout.preferredHeight: 18
                                         height: 18
                                         radius: 2
                                         color: "#1B1508"
@@ -3098,6 +3165,7 @@ Item {
                                             Layout.fillWidth: true
                                             Layout.preferredHeight: 22
                                             horizontal: true
+                                            linearScale: true
                                             segmentCount: 24
                                             peakValue: Math.min(1.0, Math.abs(consoleRoot.dspLimGainReductionDb) / 12.0)
                                             rmsValue: peakValue * 0.8
@@ -3160,7 +3228,7 @@ Item {
                                         }
                                     }
 
-                                    Rectangle { width: 1; Layout.fillHeight: true; color: "#594718" }
+                                    Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#594718" }
                                     ColumnLayout {
                                         Layout.preferredWidth: 102
                                         Layout.fillHeight: true
@@ -3350,7 +3418,7 @@ Item {
                                         Item { Layout.fillWidth: true }
                                     }
 
-                                    Rectangle { width: 1; Layout.fillHeight: true; color: "#244D5A" }
+                                    Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#244D5A" }
                                     ColumnLayout {
                                         Layout.preferredWidth: 102
                                         Layout.fillHeight: true
@@ -3405,7 +3473,7 @@ Item {
                                     spacing: 6
                                     Label { text: qsTr("GRAPH:"); font.family: "Monospace"; font.pixelSize: 11; color: "#9AA9B8" }
                                     Rectangle {
-                                        Layout.fillWidth: true; height: 26; radius: 3; color: "#0B0E12"; border.color: "#2E3744"
+                                        Layout.fillWidth: true; Layout.preferredHeight: 26; height: 26; radius: 3; color: "#0B0E12"; border.color: "#2E3744"
                                         Label {
                                             anchors.verticalCenter: parent.verticalCenter
                                             anchors.left: parent.left; anchors.leftMargin: 8
@@ -3425,10 +3493,11 @@ Item {
                                     Layout.fillWidth: true
                                     spacing: 6
                                     Label { text: qsTr("TARGET CLIENT:"); font.family: "Monospace"; font.pixelSize: 10; color: "#9AA9B8" }
-                                    ComboBox {
+                                    ConsoleComboBox {
                                         id: extClientCombo
                                         Layout.fillWidth: true
                                         implicitHeight: 26
+                                        font.pixelSize: 11
                                         textRole: "clientName"
                                         model: consoleRoot.portDiscoveryList.length > 0
                                                ? consoleRoot.portDiscoveryList
@@ -3439,21 +3508,6 @@ Item {
                                         onActivated: function(index) {
                                             consoleRoot.selectedTargetClientIdx = index
                                             patchBayCanvas.requestPaint()
-                                        }
-                                        contentItem: Label {
-                                            leftPadding: 8
-                                            rightPadding: 20
-                                            text: extClientCombo.displayText
-                                            font.pixelSize: 11
-                                            color: consoleRoot.portDiscoveryList.length > 0 ? "#DCE6F0" : "#7E8E9E"
-                                            verticalAlignment: Text.AlignVCenter
-                                            elide: Text.ElideRight
-                                        }
-                                        background: Rectangle {
-                                            radius: 3
-                                            color: "#0B0E13"
-                                            border.color: "#384250"
-                                            border.width: 1
                                         }
                                     }
                                 }
@@ -3887,7 +3941,7 @@ Item {
                                         fontSize: 10
                                         accentColor: "#00E676"
                                         enabled: !consoleRoot.isDirect && EngineController.externalInsertMeasuredLatency >= 0
-                                        onClicked: EngineController.confirmRecommendedInsertLatency(EngineController.externalInsertMeasuredLatency)
+                                        onClicked: EngineController.confirmRecommendedInsertLatency(false)
                                     }
                                 }
 

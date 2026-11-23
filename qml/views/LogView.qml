@@ -124,6 +124,7 @@ Item {
     }
 
     Component.onCompleted: refresh()
+    onVisibleChanged: if (visible) refresh()
 
     Timer {
         id: logRefreshDebounce
@@ -138,47 +139,6 @@ Item {
         target: LogService
         function onLogAppended() {
             if (logViewRoot.visible) logRefreshDebounce.restart()
-        }
-    }
-
-    component DarkCombo: ComboBox {
-        font.pixelSize: 11
-        implicitHeight: 30
-        contentItem: Label {
-            leftPadding: 10; rightPadding: 24
-            text: parent.displayText
-            font: parent.font
-            color: "#DCE6F0"
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        background: Rectangle {
-            radius: 4
-            color: "#090D12"
-            border.color: parent.activeFocus ? "#33E3FF" : "#2E3846"
-        }
-        delegate: ItemDelegate {
-            width: parent ? parent.width : 160
-            height: 28
-            contentItem: Text {
-                text: modelData
-                color: highlighted ? "#33E3FF" : "#DCE6F0"
-                font.pixelSize: 11
-                verticalAlignment: Text.AlignVCenter
-            }
-            background: Rectangle {
-                color: highlighted ? "#152534" : "#0D1117"
-            }
-        }
-        popup: Popup {
-            y: parent.height + 2
-            width: parent.width
-            padding: 2
-            background: Rectangle {
-                radius: 4
-                color: "#0D1117"
-                border.color: "#334050"
-            }
         }
     }
 
@@ -214,16 +174,16 @@ Item {
                     font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#E8BA6B"
                 }
 
-                DarkCombo {
+                ConsoleComboBox {
                     Layout.preferredWidth: 146
-                    model: ["All", "Session", "AudioEngine", "Deck", "FolderSession", "Playback", "DSP", "ExternalInsert", "Render", "Workspace", "MasterControl", "Preset", "Settings"]
+                    model: ["All", "Session", "AudioEngine", "Deck", "Transport", "FolderSession", "Playback", "DSP", "ExternalInsert", "Render", "Workspace", "MasterControl", "Preset", "Settings"]
                     onActivated: {
                         logViewRoot.categoryFilter = currentText
                         logViewRoot.refresh()
                     }
                 }
 
-                DarkCombo {
+                ConsoleComboBox {
                     Layout.preferredWidth: 112
                     model: ["All", "Success", "Info", "Warning", "Failed"]
                     onActivated: {
@@ -262,7 +222,7 @@ Item {
                     }
                 }
 
-                DarkCombo {
+                ConsoleComboBox {
                     Layout.preferredWidth: 112
                     model: ["200", "500", "1000"]
                     currentIndex: 1
@@ -297,8 +257,10 @@ Item {
             // LEFT: COLUMN-HEADED PARENT/CHILD OPERATION TREE TABLE
             BrushedMetalPanel {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.preferredWidth: 1620
                 Layout.fillHeight: true
+                clip: true
                 baseTint: "#13171d"
                 borderColor: "#2f3743"
                 showScrews: true
@@ -312,6 +274,8 @@ Item {
                     // Column Header Row
                     Rectangle {
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 28
+                        Layout.minimumHeight: 28
                         height: 28
                         radius: 3
                         color: "#0A0D12"
@@ -319,15 +283,15 @@ Item {
 
                         RowLayout {
                             anchors.fill: parent
-                            anchors.leftMargin: 8; anchors.rightMargin: 8
+                            anchors.leftMargin: 10; anchors.rightMargin: 20
                             spacing: 8
-                            Label { Layout.preferredWidth: 170; text: qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
-                            Label { Layout.preferredWidth: 112; text: qsTr("CATEGORY"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
-                            Label { Layout.preferredWidth: 150; text: qsTr("OPERATION"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
-                            Label { Layout.preferredWidth: 74;  text: qsTr("STATUS"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
-                            Label { Layout.preferredWidth: 170; text: qsTr("TARGET"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
-                            Label { Layout.preferredWidth: 68;  text: qsTr("DUR(ms)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; horizontalAlignment: Text.AlignRight }
-                            Label { Layout.fillWidth: true;      text: qsTr("MESSAGE"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8" }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176; text: qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 112; Layout.minimumWidth: 112; Layout.maximumWidth: 112; text: qsTr("CATEGORY"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148; text: qsTr("OPERATION"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 76;  Layout.minimumWidth: 76;  Layout.maximumWidth: 76;  text: qsTr("STATUS"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176; text: qsTr("TARGET"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 68;  Layout.minimumWidth: 68;  Layout.maximumWidth: 68;  text: qsTr("DUR(ms)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; horizontalAlignment: Text.AlignRight }
+                            Label { Layout.fillWidth: true;  Layout.minimumWidth: 0;   leftPadding: 8; text: qsTr("MESSAGE"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
                         }
                     }
 
@@ -340,15 +304,18 @@ Item {
                         border.color: "#1E2632"
 
                         ListView {
+                            id: logListView
                             anchors.fill: parent
                             anchors.margins: 4
                             clip: true
                             spacing: 2
                             model: logViewRoot.treeRows
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                             delegate: Rectangle {
-                                width: ListView.view.width
+                                width: logListView.width - 12
                                 height: 28
                                 radius: 2
+                                clip: true
                                 readonly property var ev: modelData.event
                                 readonly property bool isSelected: logViewRoot.selectedLog && logViewRoot.selectedLog.eventId === ev.eventId
                                 color: isSelected ? "#13293A" : (index % 2 === 0 ? "#0B0F15" : "#0E131B")
@@ -370,10 +337,18 @@ Item {
 
                                     // Tree Expand Chevron + Timestamp
                                     RowLayout {
-                                        Layout.preferredWidth: Math.max(80, 170 - modelData.depth * 18)
+                                        readonly property int colW: Math.max(80, 176 - modelData.depth * 18)
+                                        Layout.fillWidth: false
+                                        Layout.preferredWidth: colW
+                                        Layout.minimumWidth: colW
+                                        Layout.maximumWidth: colW
                                         spacing: 4
                                         Rectangle {
                                             visible: modelData.hasChildren
+                                            Layout.preferredWidth: 16
+                                            Layout.minimumWidth: 16
+                                            Layout.preferredHeight: 16
+                                            Layout.alignment: Qt.AlignVCenter
                                             width: 16; height: 16; radius: 2
                                             color: "#162432"; border.color: "#316882"
                                             Label {
@@ -389,6 +364,7 @@ Item {
                                         }
                                         Label {
                                             Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
                                             text: (ev.timestampUtc || "").replace("T", " ").replace("Z", "")
                                             font.family: "Monospace"; font.pixelSize: 10; color: "#90A4B8"
                                             elide: Text.ElideRight
@@ -396,21 +372,23 @@ Item {
                                     }
 
                                     Label {
-                                        Layout.preferredWidth: 112
+                                        Layout.fillWidth: false; Layout.preferredWidth: 112; Layout.minimumWidth: 112; Layout.maximumWidth: 112
                                         text: ev.category || ""
                                         font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7ED9F0"
                                         elide: Text.ElideRight
                                     }
 
                                     Label {
-                                        Layout.preferredWidth: 150
+                                        Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148
                                         text: ev.operation || ""
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#DCE6F0"
                                         elide: Text.ElideRight
                                     }
 
                                     Rectangle {
-                                        Layout.preferredWidth: 74
+                                        Layout.fillWidth: false; Layout.preferredWidth: 76; Layout.minimumWidth: 76; Layout.maximumWidth: 76
+                                        Layout.preferredHeight: 18
+                                        Layout.alignment: Qt.AlignVCenter
                                         height: 18; radius: 3
                                         color: "#090D12"
                                         border.color: logViewRoot.statusColor(ev.status)
@@ -423,14 +401,14 @@ Item {
                                     }
 
                                     Label {
-                                        Layout.preferredWidth: 170
+                                        Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176
                                         text: ev.target || "-"
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#B8C7D6"
                                         elide: Text.ElideMiddle
                                     }
 
                                     Label {
-                                        Layout.preferredWidth: 68
+                                        Layout.fillWidth: false; Layout.preferredWidth: 68; Layout.minimumWidth: 68; Layout.maximumWidth: 68
                                         text: ev.durationMs > 0 ? ev.durationMs.toFixed(1) : "-"
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#8C9EAE"
                                         horizontalAlignment: Text.AlignRight
@@ -438,6 +416,8 @@ Item {
 
                                     Label {
                                         Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        leftPadding: 8
                                         text: ev.message || ""
                                         font.pixelSize: 11; color: "#D4DFEA"
                                         elide: Text.ElideRight
@@ -447,6 +427,7 @@ Item {
                                 MouseArea {
                                     anchors.fill: parent
                                     z: -1
+                                    cursorShape: Qt.PointingHandCursor
                                     onClicked: logViewRoot.selectEvent(ev)
                                 }
                             }
@@ -458,8 +439,10 @@ Item {
             // RIGHT: OPERATION DETAILS, RELATED EVENTS & DETAILS_JSON
             BrushedMetalPanel {
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.preferredWidth: 900
                 Layout.fillHeight: true
+                clip: true
                 baseTint: "#13171d"
                 borderColor: "#2f3743"
                 showScrews: true
@@ -491,7 +474,9 @@ Item {
 
                     Rectangle {
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 162
                         implicitHeight: 162
+                        clip: true
                         radius: 4; color: "#070A0F"; border.color: "#222C38"
                         ColumnLayout {
                             id: opDetailsCol
@@ -501,24 +486,24 @@ Item {
                                 text: opDetailsCol.s ? qsTr("Category: %1  •  Op: %2  •  Status: %3").arg(opDetailsCol.s.category || "").arg(opDetailsCol.s.operation || "").arg(opDetailsCol.s.status || "") : qsTr("No log event selected")
                                 font.family: "Monospace"; font.pixelSize: 11; font.bold: true
                                 color: opDetailsCol.s ? logViewRoot.statusColor(opDetailsCol.s.status) : "#5D6E7F"
-                                Layout.fillWidth: true; elide: Text.ElideRight
+                                Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                             }
                             Label {
                                 text: opDetailsCol.s ? qsTr("Timestamp: %1 (%2)").arg(opDetailsCol.s.timestampUtc || "-").arg(opDetailsCol.s.localUtcOffset || "UTC") : ""
-                                font.family: "Monospace"; font.pixelSize: 10; color: "#9AA9B8"; Layout.fillWidth: true
+                                font.family: "Monospace"; font.pixelSize: 10; color: "#9AA9B8"; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                             }
                             Label {
                                 text: opDetailsCol.s ? qsTr("Op ID: %1   |   Parent Op: %2").arg(opDetailsCol.s.operationId || "-").arg(opDetailsCol.s.parentOperationId || "(root)") : ""
-                                font.family: "Monospace"; font.pixelSize: 10; color: "#78D8F0"; Layout.fillWidth: true; elide: Text.ElideMiddle
+                                font.family: "Monospace"; font.pixelSize: 10; color: "#78D8F0"; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideMiddle
                             }
                             Label {
                                 text: opDetailsCol.s ? qsTr("Target: [%1] %2   |   ErrorCode: %3   |   Duration: %4 ms")
                                           .arg(opDetailsCol.s.targetType || "-").arg(opDetailsCol.s.target || "-").arg(opDetailsCol.s.errorCode || 0).arg((opDetailsCol.s.durationMs || 0).toFixed(2)) : ""
-                                font.family: "Monospace"; font.pixelSize: 10; color: "#B8C7D6"; Layout.fillWidth: true; elide: Text.ElideRight
+                                font.family: "Monospace"; font.pixelSize: 10; color: "#B8C7D6"; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                             }
                             Label {
                                 text: opDetailsCol.s ? (opDetailsCol.s.message || "") : ""
-                                font.pixelSize: 11; color: "#E4ECF4"; wrapMode: Text.WordWrap; Layout.fillWidth: true; maximumLineCount: 2; elide: Text.ElideRight
+                                font.pixelSize: 11; color: "#E4ECF4"; wrapMode: Text.WordWrap; Layout.fillWidth: true; Layout.minimumWidth: 0; maximumLineCount: 2; elide: Text.ElideRight
                             }
                         }
                     }
@@ -533,16 +518,18 @@ Item {
                         Layout.preferredHeight: 150
                         radius: 4; color: "#070A0F"; border.color: "#222C38"
                         ListView {
+                            id: relatedLogsList
                             anchors.fill: parent; anchors.margins: 6; clip: true; spacing: 3
                             model: logViewRoot.relatedLogs
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                             delegate: Rectangle {
-                                width: ListView.view.width; height: 24; radius: 2
+                                width: relatedLogsList.width - 10; height: 24; radius: 2; clip: true
                                 color: "#0E131B"; border.color: "#1E2836"
                                 RowLayout {
                                     anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 6
                                     Label { text: modelData.category + "/" + modelData.operation; font.family: "Monospace"; font.pixelSize: 9; font.bold: true; color: "#7ED9F0" }
                                     Label { text: modelData.status; font.family: "Monospace"; font.pixelSize: 9; color: logViewRoot.statusColor(modelData.status) }
-                                    Label { Layout.fillWidth: true; text: modelData.message; font.pixelSize: 10; color: "#C6D3E0"; elide: Text.ElideRight }
+                                    Label { Layout.fillWidth: true; Layout.minimumWidth: 0; text: modelData.message; font.pixelSize: 10; color: "#C6D3E0"; elide: Text.ElideRight }
                                 }
                                 MouseArea {
                                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -563,8 +550,11 @@ Item {
                         radius: 4; color: "#06090D"; border.color: "#222C38"
                         ScrollView {
                             anchors.fill: parent; anchors.margins: 6; clip: true
+                            contentWidth: availableWidth
                             TextArea {
                                 readOnly: true
+                                selectByMouse: true
+                                wrapMode: TextEdit.Wrap
                                 text: logViewRoot.selectedLog ? logViewRoot.formatPrettyJson(logViewRoot.selectedLog.detailsJson) : qsTr("{}")
                                 font.family: "Monospace"; font.pixelSize: 10; color: "#90E4F5"
                                 background: Rectangle { color: "transparent" }
@@ -580,6 +570,8 @@ Item {
         // =====================================================================
         Rectangle {
             Layout.fillWidth: true
+            Layout.preferredHeight: 26
+            Layout.minimumHeight: 26
             height: 26
             radius: 3
             color: "#090D12"
@@ -592,7 +584,7 @@ Item {
                           .arg(logViewRoot.treeRows.length)
                           .arg(LogService.sessionId())
                     font.family: "Monospace"; font.pixelSize: 10; color: "#8899AA"
-                    Layout.fillWidth: true; elide: Text.ElideRight
+                    Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight
                 }
                 Label {
                     visible: logViewRoot.exportFeedbackText.length > 0
@@ -610,7 +602,7 @@ Item {
         nameFilters: ["JSON Lines (*.jsonl)", "All Files (*)"]
         defaultSuffix: "jsonl"
         onAccepted: {
-            var p = selectedFile.toString().replace(/^file:\/\//, "")
+            var p = decodeURIComponent(selectedFile.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
                 var ok = LogService.exportFilteredToJsonl(p, logViewRoot.buildFilterMap())
                 logViewRoot.exportFeedbackText = ok ? qsTr("Exported JSONL: %1").arg(p) : qsTr("Export failed")

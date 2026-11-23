@@ -218,21 +218,33 @@ void LogService::processBatch() {
 
 std::vector<LogEvent> LogService::queryLogs(const LogFilter& filter) {
     if (!m_queryRepo) return {};
+    if (m_running.load(std::memory_order_relaxed) && m_queue.size() > 0) {
+        flush();
+    }
     return m_queryRepo->queryEvents(filter);
 }
 
 std::vector<LogEvent> LogService::queryRelatedLogs(const std::string& operationId) {
     if (!m_queryRepo) return {};
+    if (m_running.load(std::memory_order_relaxed) && m_queue.size() > 0) {
+        flush();
+    }
     return m_queryRepo->queryRelatedEvents(operationId);
 }
 
 std::vector<LogEvent> LogService::queryPlaybackHistory(int limit) {
     if (!m_queryRepo) return {};
+    if (m_running.load(std::memory_order_relaxed) && m_queue.size() > 0) {
+        flush();
+    }
     return m_queryRepo->queryPlaybackHistory(limit);
 }
 
 bool LogService::exportJsonl(const QString& filePath, const LogFilter& filter) {
     if (!m_queryRepo) return false;
+    if (m_running.load(std::memory_order_relaxed) && m_queue.size() > 0) {
+        flush();
+    }
     return m_queryRepo->exportToJsonl(filePath, filter);
 }
 

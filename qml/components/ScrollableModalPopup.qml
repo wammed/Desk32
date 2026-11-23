@@ -41,6 +41,8 @@ Popup {
             spacing: 10
 
             Rectangle {
+                Layout.preferredWidth: 8
+                Layout.preferredHeight: 8
                 width: 8
                 height: 8
                 radius: 4

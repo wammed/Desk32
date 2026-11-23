@@ -53,48 +53,6 @@ Item {
         function onDiagnosticsChanged() { settingsRoot.audioCaps = EngineController.getAudioCapabilities() || ({}) }
     }
 
-    component DarkCombo: ComboBox {
-        font.pixelSize: 11
-        implicitHeight: 32
-        contentItem: Label {
-            leftPadding: 10; rightPadding: 24
-            text: parent.displayText
-            font: parent.font
-            color: parent.enabled ? "#DCE6F0" : "#5F6F80"
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        background: Rectangle {
-            radius: 4
-            color: parent.enabled ? "#090D12" : "#0D1117"
-            border.color: parent.activeFocus ? "#33E3FF" : "#2E3846"
-        }
-        delegate: ItemDelegate {
-            width: parent ? parent.width : 200
-            height: 28
-            contentItem: Text {
-                text: modelData
-                color: highlighted ? "#33E3FF" : "#DCE6F0"
-                font.pixelSize: 11
-                verticalAlignment: Text.AlignVCenter
-                elide: Text.ElideRight
-            }
-            background: Rectangle {
-                color: highlighted ? "#152534" : "#0D1117"
-            }
-        }
-        popup: Popup {
-            y: parent.height + 2
-            width: parent.width
-            padding: 2
-            background: Rectangle {
-                radius: 4
-                color: "#0D1117"
-                border.color: "#334050"
-            }
-        }
-    }
-
     component DarkSectionCard: Rectangle {
         radius: 4
         color: "#080B10"
@@ -132,7 +90,7 @@ Item {
                     font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#E8BA6B"
                 }
 
-                Rectangle { Layout.fillWidth: true; height: 1; color: "#27303C" }
+                Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#27303C" }
 
                 Repeater {
                     model: [
@@ -169,12 +127,12 @@ Item {
                         Label {
                             text: (EngineController.graphicsBackend || "Unknown") + "  •  " + (EngineController.audioBackend || "PipeWire")
                             font.family: "Monospace"; font.pixelSize: 11; font.bold: true; color: "#00E5FF"
-                            elide: Text.ElideRight; Layout.fillWidth: true
+                            elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0
                         }
                         Label {
                             text: EngineController.gpuRendererName || "-"
                             font.family: "Monospace"; font.pixelSize: 9; color: "#9AA9B8"
-                            elide: Text.ElideRight; Layout.fillWidth: true
+                            elide: Text.ElideRight; Layout.fillWidth: true; Layout.minimumWidth: 0
                         }
                     }
                 }
@@ -213,11 +171,12 @@ Item {
                 Rectangle {
                     visible: settingsRoot.feedbackBanner.length > 0
                     Layout.fillWidth: true
+                    Layout.preferredHeight: 30
                     height: 30; radius: 4
                     color: "#092117"; border.color: "#227A54"
                     RowLayout {
                         anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 8
-                        Label { Layout.fillWidth: true; text: settingsRoot.feedbackBanner; font.family: "Monospace"; font.pixelSize: 10; color: "#B9F6CA"; elide: Text.ElideMiddle }
+                        Label { Layout.fillWidth: true; Layout.minimumWidth: 0; text: settingsRoot.feedbackBanner; font.family: "Monospace"; font.pixelSize: 10; color: "#B9F6CA"; elide: Text.ElideMiddle }
                         ConsoleButton { text: "✕"; implicitWidth: 24; implicitHeight: 20; fontSize: 9; onClicked: settingsRoot.feedbackBanner = "" }
                     }
                 }
@@ -243,8 +202,9 @@ Item {
                                 columns: 2; columnSpacing: 18; rowSpacing: 12
 
                                 Label { text: qsTr("Audio Backend"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: EngineController.availableAudioBackends()
                                     currentIndex: Math.max(0, model.indexOf(EngineController.audioBackend))
                                     onActivated: {
@@ -256,14 +216,24 @@ Item {
                                 Label { text: qsTr("Target Output Device"); font.pixelSize: 12; color: "#BCC8D4" }
                                 RowLayout {
                                     Layout.fillWidth: true; spacing: 6
-                                    DarkCombo {
+                                    ConsoleComboBox {
                                         Layout.fillWidth: true
+                                        implicitHeight: 32
                                         model: {
                                             var names = []
                                             for (var i = 0; i < settingsRoot.devicesList.length; ++i) {
                                                 names.push(settingsRoot.devicesList[i].description || settingsRoot.devicesList[i].name || settingsRoot.devicesList[i].id)
                                             }
                                             return names.length > 0 ? names : [EngineController.currentOutputDevice || qsTr("Default System Output")]
+                                        }
+                                        currentIndex: {
+                                            var cur = EngineController.currentOutputDevice || ""
+                                            for (var i = 0; i < settingsRoot.devicesList.length; ++i) {
+                                                var d = settingsRoot.devicesList[i]
+                                                if ((d.name && d.name === cur) || (d.id && d.id === cur) || (d.description && d.description === cur))
+                                                    return i
+                                            }
+                                            return 0
                                         }
                                         onActivated: function(idx) {
                                             if (idx >= 0 && idx < settingsRoot.devicesList.length) {
@@ -281,24 +251,27 @@ Item {
                                 }
 
                                 Label { text: qsTr("Output PCM Quantization"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: ["F32LE", "S32LE", "S24_32LE", "S16LE"]
                                     currentIndex: Math.max(0, model.indexOf(EngineController.outputPcmFormat))
                                     onActivated: EngineController.setOutputPcmFormat(currentText)
                                 }
 
                                 Label { text: qsTr("Buffer Quantum (Frames)"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: ["64", "128", "256", "512", "1024", "2048"]
                                     currentIndex: Math.max(0, model.indexOf(String(SettingsManager.audioBufferFrames)))
                                     onActivated: EngineController.setOutputBufferFrames(parseInt(currentText, 10) || 256)
                                 }
 
                                 Label { text: qsTr("Fixed Graph Sample Rate"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     enabled: !EngineController.directModeEnabled
                                     model: ["44100 Hz", "48000 Hz", "88200 Hz", "96000 Hz", "176400 Hz", "192000 Hz"]
                                     currentIndex: {
@@ -393,16 +366,18 @@ Item {
                                 anchors.fill: parent; anchors.margins: 16; columns: 2; columnSpacing: 18; rowSpacing: 14
 
                                 Label { text: qsTr("External Insert Disconnect Policy"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: [qsTr("Safe Auto-Bypass (Dry)"), qsTr("Mute Output on Disconnect"), qsTr("Stop Playback & Safe Mute")]
                                     currentIndex: Math.max(0, Math.min(2, EngineController.externalInsertDisconnectPolicy))
                                     onActivated: function(idx) { EngineController.setExternalInsertDisconnectPolicy(idx) }
                                 }
 
                                 Label { text: qsTr("Reverb Max Tail Retention (Offline Render)"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: ["2.0 s", "5.0 s", "10.0 s", "15.0 s", "30.0 s"]
                                     currentIndex: {
                                         var t = SettingsManager.reverbMaxTailSeconds
@@ -445,8 +420,9 @@ Item {
                                 }
 
                                 Label { text: qsTr("Active Listening Correction Preset"); font.pixelSize: 12; color: "#BCC8D4" }
-                                DarkCombo {
+                                ConsoleComboBox {
                                     Layout.fillWidth: true
+                                    implicitHeight: 32
                                     model: EngineController.availableListeningPresets()
                                     currentIndex: Math.max(0, model.indexOf(EngineController.listeningPresetName))
                                     onActivated: EngineController.setListeningPreset(currentText)
@@ -517,12 +493,12 @@ Item {
                                 anchors.fill: parent; anchors.margins: 16; spacing: 8
                                 Label { text: qsTr("APPLICATION CONFIGURATION & AUDIT DATABASE PATHS"); font.family: "Monospace"; font.pixelSize: 11; font.bold: true; color: "#78D8F0" }
                                 Label {
-                                    Layout.fillWidth: true
+                                    Layout.fillWidth: true; Layout.minimumWidth: 0
                                     text: qsTr("Settings TOML/JSON: %1").arg(SettingsManager.configFilePath)
                                     font.family: "Monospace"; font.pixelSize: 10; color: "#DCE6F0"; elide: Text.ElideMiddle
                                 }
                                 Label {
-                                    Layout.fillWidth: true
+                                    Layout.fillWidth: true; Layout.minimumWidth: 0
                                     text: qsTr("SQLite Audit DB:    %1").arg(EngineController.logDatabasePath())
                                     font.family: "Monospace"; font.pixelSize: 10; color: "#DCE6F0"; elide: Text.ElideMiddle
                                 }
@@ -636,7 +612,7 @@ Item {
                                 Label { text: EngineController.graphicsBackend || "-"; font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#00E676" }
 
                                 Label { text: qsTr("Detected GPU Renderer:"); font.family: "Monospace"; font.pixelSize: 11; color: "#8E9FAD" }
-                                Label { text: EngineController.gpuRendererName || "-"; font.family: "Monospace"; font.pixelSize: 11; color: "#DCE6F0"; Layout.fillWidth: true; elide: Text.ElideRight }
+                                Label { text: EngineController.gpuRendererName || "-"; font.family: "Monospace"; font.pixelSize: 11; color: "#DCE6F0"; Layout.fillWidth: true; Layout.minimumWidth: 0; elide: Text.ElideRight }
 
                                 Label { text: qsTr("Audio Driver & Format:"); font.family: "Monospace"; font.pixelSize: 11; color: "#8E9FAD" }
                                 Label {

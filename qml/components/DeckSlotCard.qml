@@ -33,7 +33,16 @@ BrushedMetalPanel {
 
     function refreshState() {
         deckState = EngineController.getDeckState(deckId)
+        syncSeekSlider()
     }
+
+    function syncSeekSlider() {
+        if (typeof deckSeekSlider === "undefined" || deckSeekSlider.pressed) return
+        var pos = (deckState && deckState.playhead !== undefined) ? deckState.playhead : 0
+        deckSeekSlider.value = pos
+    }
+
+    Component.onCompleted: syncSeekSlider()
 
     function formatMsTime(frames, sampleRate) {
         var sr = (sampleRate && sampleRate > 0) ? sampleRate : 48000.0
@@ -132,6 +141,7 @@ BrushedMetalPanel {
 
                 Rectangle {
                     implicitWidth: stLbl.implicitWidth + 8
+                    Layout.preferredHeight: 16
                     height: 16
                     radius: 2
                     color: "#0b0f14"
@@ -165,6 +175,7 @@ BrushedMetalPanel {
 
                 Rectangle {
                     Layout.fillWidth: true
+                    Layout.preferredHeight: 22
                     height: 22
                     radius: 3
                     color: "#090c10"
@@ -325,9 +336,26 @@ BrushedMetalPanel {
                         enabled: cardRoot.hasTrack && (cardRoot.deckState && cardRoot.deckState.totalFrames > 0)
                         from: 0.0
                         to: (cardRoot.deckState && cardRoot.deckState.totalFrames > 0) ? cardRoot.deckState.totalFrames : 1.0
-                        value: pressed ? value : (cardRoot.deckState ? (cardRoot.deckState.positionFrames || 0) : 0)
+                        property bool pendingSeek: false
 
-                        onMoved: EngineController.seek(cardRoot.deckId, Math.round(value))
+                        onMoved: {
+                            if (pressed) {
+                                pendingSeek = true
+                            } else {
+                                pendingSeek = false
+                                EngineController.seek(cardRoot.deckId, Math.round(value))
+                                cardRoot.refreshState()
+                            }
+                        }
+                        onPressedChanged: {
+                            if (!pressed && pendingSeek) {
+                                pendingSeek = false
+                                EngineController.seek(cardRoot.deckId, Math.round(value))
+                                cardRoot.refreshState()
+                            } else if (!pressed) {
+                                cardRoot.syncSeekSlider()
+                            }
+                        }
 
                         background: Rectangle {
                             x: deckSeekSlider.leftPadding
@@ -361,7 +389,9 @@ BrushedMetalPanel {
                         spacing: 6
                         Label {
                             text: cardRoot.hasTrack
-                                  ? cardRoot.formatMsTime(cardRoot.deckState.positionFrames || 0, cardRoot.deckState.sampleRate)
+                                  ? cardRoot.formatMsTime(
+                                        deckSeekSlider.pressed ? Math.round(deckSeekSlider.value) : (cardRoot.deckState.playhead || 0),
+                                        cardRoot.deckState.sampleRate)
                                     + " / " + cardRoot.formatMsTime(cardRoot.deckState.totalFrames || 0, cardRoot.deckState.sampleRate)
                                   : "00:00.000 / 00:00.000"
                             font.family: "Monospace"
@@ -421,6 +451,7 @@ BrushedMetalPanel {
 
                 Rectangle {
                     implicitWidth: nudgeLbl.implicitWidth + 6
+                    Layout.preferredHeight: 22
                     height: 22
                     radius: 3
                     color: "#090c10"
@@ -502,6 +533,7 @@ BrushedMetalPanel {
                 Connections {
                     target: cardRoot
                     function onDeckStateChanged() {
+                        if (deckLevelTrimKnob.isDragging) return
                         deckLevelTrimKnob.value = (cardRoot.deckState && cardRoot.deckState.levelMatchDb !== undefined)
                                                   ? cardRoot.deckState.levelMatchDb : 0.0
                     }

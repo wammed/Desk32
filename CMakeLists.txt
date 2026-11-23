@@ -159,6 +159,7 @@ qt_add_qml_module(desk32
         qml/PrototypeGallery.qml
         qml/components/BrushedMetalPanel.qml
         qml/components/ConsoleButton.qml
+        qml/components/ConsoleComboBox.qml
         qml/components/ConsoleFader.qml
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml
@@ -193,6 +194,7 @@ qt_add_translations(desk32
         qml/WorkspacePanel.qml
         qml/components/BrushedMetalPanel.qml
         qml/components/ConsoleButton.qml
+        qml/components/ConsoleComboBox.qml
         qml/components/ConsoleFader.qml
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml

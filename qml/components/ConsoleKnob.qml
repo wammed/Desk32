@@ -21,6 +21,7 @@ Item {
 
     signal valueEdited(double newValue)
 
+    readonly property bool isDragging: knobMouse.pressed
     readonly property bool isCompactKnob: knobDiameter < 70
     readonly property int dialPad: isCompactKnob ? 18 : 26
     readonly property int readoutHeight: isCompactKnob ? 20 : 26
@@ -192,6 +193,7 @@ Item {
             }
 
             MouseArea {
+                id: knobMouse
                 anchors.fill: parent
                 cursorShape: Qt.SizeVerCursor
                 property real startY: 0

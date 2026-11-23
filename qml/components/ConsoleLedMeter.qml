@@ -7,6 +7,7 @@ Item {
     property double rmsValue: 0.0    // linear 0.0 .. 1.0+
     property bool clipped: false
     property bool horizontal: false
+    property bool linearScale: false
     property int segmentCount: 28
     property color greenColor: "#00E676"
     property color amberColor: "#F5B841"
@@ -16,6 +17,9 @@ Item {
     implicitHeight: horizontal ? 12 : 200
 
     function linearToNormalized(lin) {
+        if (linearScale) {
+            return Math.max(0.0, Math.min(1.0, lin))
+        }
         if (lin <= 1e-5) return 0.0
         var db = 20.0 * Math.log10(lin)
         // Map -60 dB .. +3 dB into 0.0 .. 1.0
