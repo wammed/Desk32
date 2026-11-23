@@ -19,6 +19,7 @@ BrushedMetalPanel {
     readonly property bool isLocked: !!(deckState && deckState.isLocked)
     readonly property bool isErrorStopped: !!(deckState && deckState.hasError)
     readonly property bool folderActive: !!(deckState && deckState.folderActive)
+    property string endedSessionLabel: ""
     readonly property bool canCopyToWorkspace: WorkspaceManager.hasOpenWorkspace
                                                && hasTrack
                                                && !!(deckState && deckState.canCopyToWorkspace !== false)
@@ -84,11 +85,30 @@ BrushedMetalPanel {
         function onDeckStateChanged(id) {
             if (id === cardRoot.deckId || id === "" || id === "ALL") {
                 cardRoot.refreshState()
+                if (cardRoot.folderActive) {
+                    cardRoot.endedSessionLabel = ""
+                    endedSessionTimer.stop()
+                }
             }
         }
         function onActiveDeckChanged() {
             cardRoot.refreshState()
         }
+        function onFolderSessionEnded(id, reason, folderPath, trackIndex, totalTracks) {
+            if (id === cardRoot.deckId && reason !== "new_folder_session" && reason !== "app_shutdown") {
+                cardRoot.endedSessionLabel = (reason === "track_replaced" || reason === "deck_locked")
+                                             ? qsTr("DISCARDED")
+                                             : qsTr("ENDED")
+                endedSessionTimer.restart()
+            }
+        }
+    }
+
+    Timer {
+        id: endedSessionTimer
+        interval: 8000
+        repeat: false
+        onTriggered: cardRoot.endedSessionLabel = ""
     }
 
     Timer {
@@ -179,17 +199,17 @@ BrushedMetalPanel {
                     height: 22
                     radius: 3
                     color: "#090c10"
-                    border.color: "#2b323e"
+                    border.color: cardRoot.folderActive ? "#1F6E80" : (cardRoot.endedSessionLabel.length > 0 ? "#A67C23" : "#2b323e")
                     Label {
                         anchors.centerIn: parent
                         text: cardRoot.folderActive
                               ? "%1/%2".arg((cardRoot.deckState ? (cardRoot.deckState.folderCurrentIndex || 0) : 0) + 1)
                                            .arg(cardRoot.deckState ? (cardRoot.deckState.folderTotalTracks || 0) : 0)
-                              : "="
+                              : (cardRoot.endedSessionLabel.length > 0 ? cardRoot.endedSessionLabel : "=")
                         font.family: "Monospace"
-                        font.pixelSize: 9
-                        font.bold: cardRoot.folderActive
-                        color: cardRoot.folderActive ? "#00E5FF" : "#677584"
+                        font.pixelSize: cardRoot.endedSessionLabel.length > 0 && !cardRoot.folderActive ? 7 : 9
+                        font.bold: cardRoot.folderActive || cardRoot.endedSessionLabel.length > 0
+                        color: cardRoot.folderActive ? "#00E5FF" : (cardRoot.endedSessionLabel.length > 0 ? "#F5B841" : "#677584")
                     }
                 }
 

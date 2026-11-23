@@ -44,6 +44,7 @@ private slots:
     void testWorkspaceImportFailureUiDisplay();
     void testSettingsManagerPersistenceAndIntegration();
     void testDeckStateContractFolderSessionAndSeek();
+    void testWorkspaceViewDeckSelectionLockAndFolderDiscard();
     void testMainQmlCompilesWithOutputDevicePanel();
 
 private:
@@ -421,6 +422,83 @@ void TestOutputDeviceUi::testDeckStateContractFolderSessionAndSeek()
     }
     QVERIFY2(maxPeqDb > 4.5, qPrintable(QString("Expected PEQ curve > 4.5 dB, got %1").arg(maxPeqDb)));
     ctrl.setPeqBand(false, 8, 1000.0, 0.0, 1.0, 0, true);
+}
+
+void TestOutputDeviceUi::testWorkspaceViewDeckSelectionLockAndFolderDiscard()
+{
+    auto& ws = WorkspaceManager::instance();
+    const QString wsDir = m_tempDir->path() + "/ws_deck_load_test";
+    const QString srcDir = m_tempDir->path() + "/ws_deck_load_src";
+    const QString fldDir = m_tempDir->path() + "/ws_folder_b_src";
+    QVERIFY(QDir().mkpath(wsDir));
+    QVERIFY(QDir().mkpath(srcDir));
+    QVERIFY(QDir().mkpath(fldDir));
+
+    const QString wsWavSrc = srcDir + "/ws_master.wav";
+    const QString fldWav1 = fldDir + "/f1.wav";
+    const QString fldWav2 = fldDir + "/f2.wav";
+    for (const QString& p : {wsWavSrc, fldWav1, fldWav2}) {
+        QProcess ff;
+        ff.start("ffmpeg", {"-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3",
+                            "-ar", "48000", "-ac", "2", p});
+        QVERIFY(ff.waitForFinished(10000) && ff.exitCode() == 0);
+    }
+
+    QString wsErr;
+    QVERIFY2(ws.registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
+    const QVariantMap impRes = ws.importFileFromUi(wsWavSrc, QString());
+    QCOMPARE(impRes.value(QStringLiteral("status")).toInt(), 0);
+
+    auto& ctrl = EngineController::instance();
+    ctrl.setDeckLocked(QStringLiteral("C"), true);
+    QVERIFY(ctrl.startFolderSession(QStringLiteral("B"), fldDir));
+    QVERIFY(ctrl.getDeckState(QStringLiteral("B")).value(QStringLiteral("folderActive")).toBool());
+
+    const QUrl wsViewUrl = QUrl::fromLocalFile(
+        QStringLiteral(DESK32_SOURCE_DIR "/qml/views/WorkspaceView.qml"));
+    QQmlComponent comp(m_qmlEngine.get(), wsViewUrl);
+    if (comp.isError()) qWarning() << comp.errors();
+    QVERIFY2(comp.status() == QQmlComponent::Ready, qPrintable(comp.errorString()));
+
+    std::unique_ptr<QObject> wsView(comp.create());
+    QVERIFY2(wsView != nullptr, qPrintable(comp.errorString()));
+
+    // 1. Locked Deck C cannot be selected and exposes explicit lock rejection reason
+    wsView->setProperty("targetDeckId", QStringLiteral("A"));
+    QVERIFY(QMetaObject::invokeMethod(wsView.get(), "selectTargetDeck",
+                                      Q_ARG(QVariant, QStringLiteral("C"))));
+    QCOMPARE(wsView->property("targetDeckId").toString(), QStringLiteral("A"));
+    QVERIFY(!wsView->property("lockRejectedMsg").toString().isEmpty());
+
+    // Even if targetDeckId were C directly, loading rejects safely with reason
+    wsView->setProperty("targetDeckId", QStringLiteral("C"));
+    QVariant loadLockedOk;
+    QVERIFY(QMetaObject::invokeMethod(wsView.get(), "loadTrackRelToTargetDeck",
+                                      Q_RETURN_ARG(QVariant, loadLockedOk),
+                                      Q_ARG(QVariant, QStringLiteral("ws_master.wav"))));
+    QCOMPARE(loadLockedOk.toBool(), false);
+    QVERIFY(!wsView->property("lockRejectedMsg").toString().isEmpty());
+
+    // 2. Selecting Folder Session Deck B and loading terminates/discards session + sets visible screen notice
+    QVERIFY(QMetaObject::invokeMethod(wsView.get(), "selectTargetDeck",
+                                      Q_ARG(QVariant, QStringLiteral("B"))));
+    QCOMPARE(wsView->property("targetDeckId").toString(), QStringLiteral("B"));
+    QSignalSpy endSpy(&ctrl, &EngineController::folderSessionEnded);
+    QVariant loadBOk;
+    QVERIFY(QMetaObject::invokeMethod(wsView.get(), "loadTrackRelToTargetDeck",
+                                      Q_RETURN_ARG(QVariant, loadBOk),
+                                      Q_ARG(QVariant, QStringLiteral("ws_master.wav"))));
+    QCOMPARE(loadBOk.toBool(), true);
+    QCOMPARE(endSpy.count(), 1);
+    QCOMPARE(endSpy.takeFirst()[1].toString(), QStringLiteral("track_replaced"));
+    QCOMPARE(ctrl.getDeckState(QStringLiteral("B")).value(QStringLiteral("folderActive")).toBool(), false);
+    const QVariantMap discarded = wsView->property("sessionDiscardedInfo").toMap();
+    QCOMPARE(discarded.value(QStringLiteral("deckId")).toString(), QStringLiteral("B"));
+    QCOMPARE(discarded.value(QStringLiteral("totalTracks")).toInt(), 2);
+    QVERIFY(wsView->property("statusNotice").toString().contains(QStringLiteral("discarded"), Qt::CaseInsensitive));
+
+    ctrl.setDeckLocked(QStringLiteral("C"), false);
+    ws.resetForTesting();
 }
 
 void TestOutputDeviceUi::testMainQmlCompilesWithOutputDevicePanel()

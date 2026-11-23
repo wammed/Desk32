@@ -510,6 +510,9 @@ signals:
     void deckWorkspaceImportFinished(const QString& deckId, bool ok,
                                      const QString& statusText,
                                      const QString& message);
+    void folderSessionEnded(const QString& deckId, const QString& reason,
+                            const QString& folderPath, int trackIndex,
+                            int totalTracks);
 
 private:
     void syncMasterDspToRenderEngine();

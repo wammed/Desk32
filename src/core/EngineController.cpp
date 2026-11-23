@@ -321,6 +321,9 @@ bool EngineController::initialize(bool offlineMode) {
                 QString::fromUtf8(
                     QJsonDocument(det).toJson(QJsonDocument::Compact)),
                 QString(), QString(), ev.errorCode, 0.0);
+            emit folderSessionEnded(deckStr, reasonStr, folderPath,
+                                    static_cast<int>(ev.trackIndex),
+                                    static_cast<int>(ev.totalTracks));
             emit deckStateChanged(deckStr);
           });
     }

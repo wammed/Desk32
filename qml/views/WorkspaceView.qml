@@ -26,9 +26,116 @@ Item {
     property string statusSeverity: "info"
     property bool deleteFileConfirmArmed: false
 
+    property string targetDeckId: EngineController.activeDeckId || "A"
+    property var deckStates: ({ "A": ({}), "B": ({}), "C": ({}), "D": ({}) })
+    property string lockRejectedMsg: ""
+    property var sessionDiscardedInfo: null
+
     function setNotice(msg, sev) {
         statusNotice = msg || ""
         statusSeverity = sev || "info"
+    }
+
+    function refreshDeckStates() {
+        var next = ({})
+        var ids = ["A", "B", "C", "D"]
+        for (var i = 0; i < ids.length; ++i) {
+            var id = ids[i]
+            next[id] = EngineController.getDeckState(id) || ({})
+        }
+        deckStates = next
+    }
+
+    function selectTargetDeck(id) {
+        refreshDeckStates()
+        var st = deckStates[id]
+        if (st && st.isLocked) {
+            lockRejectedMsg = qsTr("Cannot select Deck %1: Deck is LOCKED (audio context protected). Unlock Deck %1 in Console first.").arg(id)
+            setNotice(lockRejectedMsg, "error")
+            return
+        }
+        lockRejectedMsg = ""
+        targetDeckId = id
+    }
+
+    function loadTrackRelToTargetDeck(relPath) {
+        if (!WorkspaceManager.hasOpenWorkspace || !relPath || relPath.length === 0) {
+            return false
+        }
+        refreshDeckStates()
+        var id = targetDeckId || "A"
+        var st = deckStates[id]
+        if (st && st.isLocked) {
+            lockRejectedMsg = qsTr("Load rejected: Deck %1 is LOCKED (audio context protected). Select an unlocked deck or unlock Deck %1 in Console.").arg(id)
+            setNotice(lockRejectedMsg, "error")
+            return false
+        }
+        var wasFolder = !!(st && st.folderActive)
+        var prevIdx = st ? ((st.folderCurrentIndex || 0) + 1) : 0
+        var prevTotal = st ? (st.folderTotalTracks || 0) : 0
+        var ok = EngineController.loadWorkspaceTrack(id, relPath)
+        refreshDeckStates()
+        if (ok) {
+            lockRejectedMsg = ""
+            if (wasFolder) {
+                sessionDiscardedInfo = {
+                    deckId: id,
+                    trackIndex: prevIdx,
+                    totalTracks: prevTotal,
+                    loadedFile: relPath
+                }
+                setNotice(qsTr("Loaded '%1' into Deck %2 — Active Folder Session (%3/%4) ended & discarded (§2.7.5).")
+                          .arg(relPath, id).arg(prevIdx).arg(prevTotal), "warning")
+            } else {
+                sessionDiscardedInfo = null
+                setNotice(qsTr("Loaded '%1' into Deck %2").arg(relPath, id), "success")
+            }
+        } else {
+            var stAfter = deckStates[id]
+            if (stAfter && stAfter.isLocked) {
+                lockRejectedMsg = qsTr("Load rejected: Deck %1 is LOCKED (audio context protected).").arg(id)
+                setNotice(lockRejectedMsg, "error")
+            } else {
+                setNotice(qsTr("Failed to load '%1' into Deck %2").arg(relPath, id), "error")
+            }
+        }
+        return ok
+    }
+
+    function loadAbsPathToTargetDeck(absPath, displayName) {
+        if (!absPath || absPath.length === 0) return false
+        refreshDeckStates()
+        var id = targetDeckId || "A"
+        var st = deckStates[id]
+        if (st && st.isLocked) {
+            lockRejectedMsg = qsTr("Load rejected: Deck %1 is LOCKED (audio context protected).").arg(id)
+            setNotice(lockRejectedMsg, "error")
+            return false
+        }
+        var wasFolder = !!(st && st.folderActive)
+        var prevIdx = st ? ((st.folderCurrentIndex || 0) + 1) : 0
+        var prevTotal = st ? (st.folderTotalTracks || 0) : 0
+        var ok = EngineController.loadTrack(id, absPath)
+        refreshDeckStates()
+        if (ok) {
+            lockRejectedMsg = ""
+            if (wasFolder) {
+                sessionDiscardedInfo = {
+                    deckId: id,
+                    trackIndex: prevIdx,
+                    totalTracks: prevTotal,
+                    loadedFile: displayName
+                }
+                setNotice(qsTr("Loaded snapshot '%1' into Deck %2 — Active Folder Session (%3/%4) ended & discarded (§2.7.5).")
+                          .arg(displayName, id).arg(prevIdx).arg(prevTotal), "warning")
+            } else {
+                sessionDiscardedInfo = null
+                setNotice(qsTr("Loaded snapshot '%1' into Deck %2").arg(displayName, id), "info")
+            }
+        } else {
+            setNotice(qsTr("Failed to load '%1' into Deck %2").arg(displayName, id), "error")
+        }
+        return ok
     }
 
     function formatBytes(bytes) {
@@ -141,13 +248,34 @@ Item {
         moveFileDirField.text = ""
     }
 
-    Component.onCompleted: refresh()
+    Component.onCompleted: {
+        refresh()
+        refreshDeckStates()
+        var initSt = deckStates[targetDeckId]
+        if (initSt && initSt.isLocked) {
+            var ids = ["A", "B", "C", "D"]
+            for (var i = 0; i < ids.length; ++i) {
+                if (deckStates[ids[i]] && !deckStates[ids[i]].isLocked) {
+                    targetDeckId = ids[i]
+                    break
+                }
+            }
+        }
+    }
+    onVisibleChanged: if (visible) refreshDeckStates()
 
     Connections {
         target: WorkspaceManager
         function onWorkspaceStateChanged() { wsRoot.refresh() }
         function onWorkspaceContentsChanged() { wsRoot.refresh() }
         function onExternalModificationDetected() { wsRoot.refresh() }
+    }
+
+    Connections {
+        target: EngineController
+        function onDeckStateChanged() { wsRoot.refreshDeckStates() }
+        function onActiveDeckChanged() { wsRoot.refreshDeckStates() }
+        function onFolderSessionEnded() { wsRoot.refreshDeckStates() }
     }
 
     component DarkField: TextField {
@@ -360,23 +488,273 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         DarkField {
-                            Layout.preferredWidth: 240
+                            Layout.preferredWidth: 260
                             placeholderText: qsTr("Filter filename, title, artist...")
                             onTextChanged: {
                                 wsRoot.searchFilter = text
                                 wsRoot.applyFilters()
                             }
                         }
-                        ConsoleButton {
-                            text: qsTr("LOAD → DECK %1").arg(EngineController.activeDeckId)
-                            implicitWidth: 132; implicitHeight: 28; fontSize: 10; accentColor: "#00E676"
-                            enabled: WorkspaceManager.hasOpenWorkspace && wsRoot.selectedFileRel.length > 0
-                            onClicked: {
-                                var ok = EngineController.loadWorkspaceTrack(EngineController.activeDeckId, wsRoot.selectedFileRel)
-                                wsRoot.setNotice(ok
-                                                 ? qsTr("Loaded '%1' into Deck %2").arg(wsRoot.selectedFileRel, EngineController.activeDeckId)
-                                                 : qsTr("Failed to load '%1' into Deck %2").arg(wsRoot.selectedFileRel, EngineController.activeDeckId),
-                                                 ok ? "success" : "error")
+                    }
+
+                    // Unified Target Deck (A-D) Selector + Prominent Primary Load CTA + Session Warning/Discarded Bar
+                    Rectangle {
+                        id: targetDeckPanel
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 98
+                        implicitHeight: 98
+                        radius: 5
+                        color: "#090D13"
+                        border.color: "#283444"
+
+                        readonly property var tgtSt: wsRoot.deckStates[wsRoot.targetDeckId] || ({})
+                        readonly property bool tgtLocked: !!(tgtSt && tgtSt.isLocked)
+                        readonly property bool tgtFolder: !!(tgtSt && tgtSt.folderActive)
+                        readonly property bool canLoadNow: WorkspaceManager.hasOpenWorkspace
+                                                           && wsRoot.selectedFileRel.length > 0
+                                                           && !tgtLocked
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            spacing: 6
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+
+                                Label {
+                                    text: qsTr("TARGET DECK")
+                                    font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#8FA4B8"
+                                }
+
+                                Repeater {
+                                    model: ["A", "B", "C", "D"]
+                                    Rectangle {
+                                        id: deckPill
+                                        readonly property string dId: modelData
+                                        readonly property var st: wsRoot.deckStates[dId] || ({})
+                                        readonly property bool isSel: wsRoot.targetDeckId === dId
+                                        readonly property bool locked: !!(st && st.isLocked)
+                                        readonly property bool folder: !!(st && st.folderActive)
+                                        readonly property bool loaded: !!(st && st.path && st.path.length > 0)
+
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 46
+                                        height: 46
+                                        radius: 4
+                                        color: locked
+                                               ? "#241115"
+                                               : (isSel ? "#12293A" : (deckMouse.containsMouse ? "#151C26" : "#0D1219"))
+                                        border.color: locked
+                                                      ? "#C8404A"
+                                                      : (isSel ? "#00E5FF" : (folder ? "#F5B841" : "#293545"))
+                                        border.width: isSel && !locked ? 2 : 1
+
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 2
+                                            RowLayout {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                spacing: 5
+                                                Rectangle {
+                                                    Layout.preferredWidth: 7; Layout.preferredHeight: 7
+                                                    width: 7; height: 7; radius: 3.5
+                                                    color: deckPill.locked
+                                                           ? "#FF5252"
+                                                           : (deckPill.folder
+                                                              ? "#F5B841"
+                                                              : (deckPill.isSel ? "#00E5FF" : (deckPill.loaded ? "#00E676" : "#3E4A59")))
+                                                }
+                                                Label {
+                                                    text: qsTr("DECK %1").arg(deckPill.dId)
+                                                    font.family: "Monospace"; font.pixelSize: 11; font.bold: true
+                                                    color: deckPill.locked ? "#FF8A8A" : (deckPill.isSel ? "#EBF8FF" : "#C5D2DF")
+                                                }
+                                            }
+                                            Label {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                text: deckPill.locked
+                                                      ? qsTr("🔒 LOCKED")
+                                                      : (deckPill.folder
+                                                         ? qsTr("FOLDER %1/%2").arg((deckPill.st.folderCurrentIndex || 0) + 1).arg(deckPill.st.folderTotalTracks || 0)
+                                                         : (deckPill.loaded ? qsTr("LOADED") : qsTr("EMPTY")))
+                                                font.family: "Monospace"; font.pixelSize: 8; font.bold: deckPill.locked || deckPill.folder
+                                                color: deckPill.locked ? "#FF6B74" : (deckPill.folder ? "#F5B841" : (deckPill.loaded ? "#78D8F0" : "#677584"))
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: deckMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: deckPill.locked ? Qt.ForbiddenCursor : Qt.PointingHandCursor
+                                            onClicked: wsRoot.selectTargetDeck(deckPill.dId)
+                                        }
+                                    }
+                                }
+
+                                // Large, High-Contrast Primary LOAD Button
+                                Rectangle {
+                                    id: primaryLoadBtn
+                                    readonly property bool activeOk: targetDeckPanel.canLoadNow
+                                    readonly property bool tgtLockedNow: targetDeckPanel.tgtLocked
+                                    Layout.preferredWidth: 276
+                                    Layout.preferredHeight: 46
+                                    height: 46
+                                    radius: 5
+                                    border.width: activeOk ? 2 : 1
+                                    border.color: tgtLockedNow
+                                                  ? "#C8404A"
+                                                  : (activeOk ? "#00E676" : "#2D3846")
+                                    gradient: Gradient {
+                                        GradientStop {
+                                            position: 0.0
+                                            color: primaryLoadBtn.tgtLockedNow
+                                                   ? "#3A161B"
+                                                   : (primaryLoadBtn.activeOk
+                                                      ? (primaryLoadMouse.pressed ? "#186442" : (primaryLoadMouse.containsMouse ? "#289A68" : "#1F7D54"))
+                                                      : "#171D26")
+                                        }
+                                        GradientStop {
+                                            position: 1.0
+                                            color: primaryLoadBtn.tgtLockedNow
+                                                   ? "#210C0F"
+                                                   : (primaryLoadBtn.activeOk
+                                                      ? (primaryLoadMouse.pressed ? "#0D3B27" : "#0F462F")
+                                                      : "#0F1319")
+                                        }
+                                    }
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        spacing: 1
+                                        Item { Layout.fillHeight: true }
+                                        Label {
+                                            Layout.alignment: Qt.AlignHCenter
+                                            text: primaryLoadBtn.tgtLockedNow
+                                                  ? qsTr("🔒 DECK %1 LOCKED").arg(wsRoot.targetDeckId)
+                                                  : qsTr("▶  LOAD TO DECK %1").arg(wsRoot.targetDeckId)
+                                            font.family: "Monospace"; font.pixelSize: 13; font.bold: true
+                                            color: primaryLoadBtn.tgtLockedNow
+                                                   ? "#FF8A8A"
+                                                   : (primaryLoadBtn.activeOk ? "#E8FFF4" : "#5F6E7E")
+                                        }
+                                        Label {
+                                            Layout.fillWidth: true; Layout.minimumWidth: 0
+                                            horizontalAlignment: Text.AlignHCenter
+                                            elide: Text.ElideMiddle
+                                            text: wsRoot.selectedFileRel.length > 0
+                                                  ? wsRoot.selectedFileRel.split('/').pop()
+                                                  : qsTr("Select a file below")
+                                            font.family: "Monospace"; font.pixelSize: 9
+                                            color: primaryLoadBtn.activeOk ? "#A6F4CC" : "#4E5C6B"
+                                        }
+                                        Item { Layout.fillHeight: true }
+                                    }
+
+                                    MouseArea {
+                                        id: primaryLoadMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: primaryLoadBtn.tgtLockedNow
+                                                     ? Qt.ForbiddenCursor
+                                                     : (primaryLoadBtn.activeOk ? Qt.PointingHandCursor : Qt.ArrowCursor)
+                                        onClicked: wsRoot.loadTrackRelToTargetDeck(wsRoot.selectedFileRel)
+                                    }
+                                }
+                            }
+
+                            // Target Deck Context / Lock Protection / Folder Session Warning & Discarded Display Strip
+                            Rectangle {
+                                id: targetCtxStrip
+                                readonly property bool hasDiscarded: wsRoot.sessionDiscardedInfo !== null
+                                readonly property bool hasLockErr: wsRoot.lockRejectedMsg.length > 0 || targetDeckPanel.tgtLocked
+                                readonly property bool hasFolderWarn: !hasDiscarded && !hasLockErr && targetDeckPanel.tgtFolder
+
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 30
+                                height: 30
+                                radius: 4
+                                color: hasLockErr
+                                       ? "#2D1216"
+                                       : ((hasDiscarded || hasFolderWarn) ? "#2B200B" : "#070A0F")
+                                border.color: hasLockErr
+                                              ? "#FF5252"
+                                              : ((hasDiscarded || hasFolderWarn) ? "#F5B841" : "#1F2935")
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    spacing: 8
+
+                                    Rectangle {
+                                        implicitWidth: ctxPillLbl.implicitWidth + 10
+                                        Layout.preferredHeight: 18
+                                        height: 18; radius: 2
+                                        color: targetCtxStrip.hasLockErr
+                                               ? "#4D171D"
+                                               : ((targetCtxStrip.hasDiscarded || targetCtxStrip.hasFolderWarn) ? "#47330E" : "#12212E")
+                                        border.color: targetCtxStrip.hasLockErr
+                                                      ? "#FF6B74"
+                                                      : ((targetCtxStrip.hasDiscarded || targetCtxStrip.hasFolderWarn) ? "#F5B841" : "#2D6A84")
+                                        Label {
+                                            id: ctxPillLbl
+                                            anchors.centerIn: parent
+                                            font.family: "Monospace"; font.pixelSize: 8; font.bold: true
+                                            color: targetCtxStrip.hasLockErr
+                                                   ? "#FFB4B8"
+                                                   : ((targetCtxStrip.hasDiscarded || targetCtxStrip.hasFolderWarn) ? "#FFE099" : "#78D8F0")
+                                            text: targetCtxStrip.hasDiscarded
+                                                  ? qsTr("SESSION DISCARDED")
+                                                  : (targetCtxStrip.hasLockErr
+                                                     ? qsTr("LOCK PROTECTED")
+                                                     : (targetCtxStrip.hasFolderWarn
+                                                        ? qsTr("FOLDER SESSION ACTIVE")
+                                                        : qsTr("DECK %1 READY").arg(wsRoot.targetDeckId)))
+                                        }
+                                    }
+
+                                    Label {
+                                        Layout.fillWidth: true; Layout.minimumWidth: 0
+                                        elide: Text.ElideMiddle
+                                        font.family: "Monospace"; font.pixelSize: 10
+                                        color: targetCtxStrip.hasLockErr
+                                               ? "#FFD2D5"
+                                               : ((targetCtxStrip.hasDiscarded || targetCtxStrip.hasFolderWarn) ? "#FFE5AD" : "#B8C7D6")
+                                        text: {
+                                            if (targetCtxStrip.hasDiscarded) {
+                                                var d = wsRoot.sessionDiscardedInfo
+                                                return qsTr("Deck %1 Folder Session (%2/%3) ended & discarded (§2.7.5) — Replaced by '%4'")
+                                                       .arg(d.deckId).arg(d.trackIndex).arg(d.totalTracks).arg(d.loadedFile)
+                                            }
+                                            if (wsRoot.lockRejectedMsg.length > 0) return wsRoot.lockRejectedMsg
+                                            if (targetDeckPanel.tgtLocked) {
+                                                return qsTr("Deck %1 is LOCKED — Protected audio context cannot be overwritten. Select an unlocked deck.").arg(wsRoot.targetDeckId)
+                                            }
+                                            if (targetDeckPanel.tgtFolder) {
+                                                var st = targetDeckPanel.tgtSt
+                                                return qsTr("Deck %1 is running a Folder Session (%2/%3) — Loading here will end & discard that session (§2.7.5).")
+                                                       .arg(wsRoot.targetDeckId).arg((st.folderCurrentIndex || 0) + 1).arg(st.folderTotalTracks || 0)
+                                            }
+                                            var curP = (targetDeckPanel.tgtSt && targetDeckPanel.tgtSt.path) ? targetDeckPanel.tgtSt.path : ""
+                                            return curP.length > 0
+                                                   ? qsTr("Current Deck %1 track: %2").arg(wsRoot.targetDeckId, curP.split('/').pop())
+                                                   : qsTr("Deck %1 is empty — double-click a file or press LOAD TO DECK %1").arg(wsRoot.targetDeckId)
+                                        }
+                                    }
+
+                                    ConsoleButton {
+                                        visible: targetCtxStrip.hasDiscarded || wsRoot.lockRejectedMsg.length > 0
+                                        text: "✕"
+                                        implicitWidth: 22; implicitHeight: 20; fontSize: 9
+                                        onClicked: {
+                                            wsRoot.sessionDiscardedInfo = null
+                                            wsRoot.lockRejectedMsg = ""
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -526,21 +904,17 @@ Item {
                                                 elide: Text.ElideRight
                                             }
                                         }
-
-                                        ConsoleButton {
-                                            text: qsTr("LOAD")
-                                            implicitWidth: 56; implicitHeight: 28; fontSize: 9; accentColor: "#00E5FF"
-                                            onClicked: {
-                                                wsRoot.loadFileInspector(modelData.relativePath)
-                                                EngineController.loadWorkspaceTrack(EngineController.activeDeckId, modelData.relativePath)
-                                            }
-                                        }
                                     }
 
                                     MouseArea {
                                         anchors.fill: parent
                                         z: -1
+                                        cursorShape: Qt.PointingHandCursor
                                         onClicked: wsRoot.loadFileInspector(modelData.relativePath)
+                                        onDoubleClicked: {
+                                            wsRoot.loadFileInspector(modelData.relativePath)
+                                            wsRoot.loadTrackRelToTargetDeck(modelData.relativePath)
+                                        }
                                     }
                                 }
 
@@ -898,11 +1272,11 @@ Item {
                                                 text: qsTr("AUDITION")
                                                 implicitWidth: 74; implicitHeight: 28; fontSize: 9; accentColor: "#33E3FF"
                                                 enabled: wsRoot.selectedFileRel.length > 0
+                                                toolTipText: qsTr("Audition checkpoint snapshot on Deck %1").arg(wsRoot.targetDeckId)
                                                 onClicked: {
                                                     var p = WorkspaceManager.prepareSavedTrackForAuditionFromUi(modelData.saveId, wsRoot.selectedFileRel)
                                                     if (p.length > 0) {
-                                                        EngineController.loadTrack(EngineController.activeDeckId, p)
-                                                        wsRoot.setNotice(qsTr("Loaded snapshot track '%1' (%2) to Deck %3").arg(wsRoot.selectedFileRel, modelData.saveId, EngineController.activeDeckId), "info")
+                                                        wsRoot.loadAbsPathToTargetDeck(p, wsRoot.selectedFileRel + " [" + modelData.saveId + "]")
                                                     } else {
                                                         wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                                     }
@@ -1009,11 +1383,6 @@ Item {
                                         WorkspaceManager.continueInReadOnlyMode()
                                         wsRoot.refresh()
                                     }
-                                }
-                                ConsoleButton {
-                                    text: qsTr("REGISTER NEW...")
-                                    implicitWidth: 126; implicitHeight: 30; fontSize: 10; accentColor: "#00E676"
-                                    onClicked: openWorkspaceFolderDlg.open()
                                 }
                             }
 
