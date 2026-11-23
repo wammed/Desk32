@@ -102,18 +102,18 @@ BrushedMetalPanel {
         }
     }
 
-    // Compact 2-Column Hardware Deck Card matching Reference Mockups (NO artwork, NO 0-10 knob, NO Level Match)
+    // Compact 3-Column Hardware Deck Card: Left Transport | Center OLED & Actions | Right LEVEL TRIM Knob
     RowLayout {
         anchors.fill: parent
         anchors.margins: 7
-        spacing: 8
+        spacing: 7
         z: 1
 
         // -----------------------------------------------------------------
         // Left Column: DECK Header + State + Folder Steppers / Transport Keys
         // -----------------------------------------------------------------
         ColumnLayout {
-            Layout.preferredWidth: 134
+            Layout.preferredWidth: 124
             Layout.fillHeight: true
             spacing: 4
 
@@ -381,7 +381,7 @@ BrushedMetalPanel {
                 }
             }
 
-            // Bottom Action Row inside Right Column: Load | Folder | [->WS] | Nudge -10/+10
+            // Bottom Action Row inside Center Column: Load | Folder | [->WS] | Nudge -10/+10
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 3
@@ -389,8 +389,8 @@ BrushedMetalPanel {
                 ConsoleButton {
                     text: qsTr("Load")
                     fontSize: 9
-                    leftPadding: 5; rightPadding: 5
-                    implicitWidth: 42; implicitHeight: 22
+                    leftPadding: 4; rightPadding: 4
+                    implicitWidth: 38; implicitHeight: 22
                     enabled: !cardRoot.isLocked
                     toolTipText: qsTr("Load audio file into Deck %1").arg(cardRoot.deckId)
                     onClicked: cardRoot.loadFileRequested(cardRoot.deckId)
@@ -399,8 +399,8 @@ BrushedMetalPanel {
                 ConsoleButton {
                     text: qsTr("Folder")
                     fontSize: 9
-                    leftPadding: 5; rightPadding: 5
-                    implicitWidth: 46; implicitHeight: 22
+                    leftPadding: 4; rightPadding: 4
+                    implicitWidth: 42; implicitHeight: 22
                     enabled: !cardRoot.isLocked
                     toolTipText: qsTr("Start Folder Session from first track")
                     onClicked: cardRoot.startFolderRequested(cardRoot.deckId)
@@ -410,8 +410,8 @@ BrushedMetalPanel {
                     visible: cardRoot.canCopyToWorkspace
                     text: "→WS"
                     fontSize: 8
-                    leftPadding: 4; rightPadding: 4
-                    implicitWidth: 36; implicitHeight: 22
+                    leftPadding: 3; rightPadding: 3
+                    implicitWidth: 34; implicitHeight: 22
                     accentColor: "#00E676"
                     toolTipText: qsTr("Copy track into open Workspace")
                     onClicked: EngineController.copyDeckTrackToWorkspace(cardRoot.deckId)
@@ -420,7 +420,7 @@ BrushedMetalPanel {
                 Item { Layout.fillWidth: true }
 
                 Rectangle {
-                    implicitWidth: nudgeLbl.implicitWidth + 8
+                    implicitWidth: nudgeLbl.implicitWidth + 6
                     height: 22
                     radius: 3
                     color: "#090c10"
@@ -445,8 +445,8 @@ BrushedMetalPanel {
                 ConsoleButton {
                     text: "-10"
                     fontSize: 8
-                    leftPadding: 4; rightPadding: 4
-                    implicitWidth: 32; implicitHeight: 22
+                    leftPadding: 3; rightPadding: 3
+                    implicitWidth: 26; implicitHeight: 22
                     toolTipText: qsTr("Compare Nudge -10 ms (double-click ms box to reset)")
                     onClicked: {
                         var sr = (cardRoot.deckState && cardRoot.deckState.sampleRate > 0) ? cardRoot.deckState.sampleRate : 48000.0
@@ -458,8 +458,8 @@ BrushedMetalPanel {
                 ConsoleButton {
                     text: "+10"
                     fontSize: 8
-                    leftPadding: 4; rightPadding: 4
-                    implicitWidth: 32; implicitHeight: 22
+                    leftPadding: 3; rightPadding: 3
+                    implicitWidth: 26; implicitHeight: 22
                     toolTipText: qsTr("Compare Nudge +10 ms (double-click ms box to reset)")
                     onClicked: {
                         var sr = (cardRoot.deckState && cardRoot.deckState.sampleRate > 0) ? cardRoot.deckState.sampleRate : 48000.0
@@ -468,6 +468,47 @@ BrushedMetalPanel {
                     }
                 }
             }
+        }
+
+        // -----------------------------------------------------------------
+        // Right Column: Per-Deck Monitor LEVEL TRIM Knob (-24 .. +24 dB)
+        // -----------------------------------------------------------------
+        ColumnLayout {
+            Layout.fillWidth: false
+            Layout.preferredWidth: 78
+            Layout.fillHeight: true
+
+            Item { Layout.fillHeight: true }
+
+            ConsoleKnob {
+                id: deckLevelTrimKnob
+                Layout.alignment: Qt.AlignHCenter
+                labelText: qsTr("LEVEL TRIM")
+                minValue: -24.0
+                maxValue: 24.0
+                defaultValue: 0.0
+                logarithmic: false
+                bipolar: true
+                unitSuffix: " dB"
+                decimals: 1
+                knobDiameter: 44
+                arcColor: cardRoot.isActive ? "#38DEFA" : "#E8BA6B"
+                enabled: !EngineController.directModeEnabled
+                Component.onCompleted: value = (cardRoot.deckState && cardRoot.deckState.levelMatchDb !== undefined)
+                                               ? cardRoot.deckState.levelMatchDb : 0.0
+                onValueEdited: function(v) {
+                    EngineController.setDeckLevelMatchDb(cardRoot.deckId, v)
+                }
+                Connections {
+                    target: cardRoot
+                    function onDeckStateChanged() {
+                        deckLevelTrimKnob.value = (cardRoot.deckState && cardRoot.deckState.levelMatchDb !== undefined)
+                                                  ? cardRoot.deckState.levelMatchDb : 0.0
+                    }
+                }
+            }
+
+            Item { Layout.fillHeight: true }
         }
     }
 }

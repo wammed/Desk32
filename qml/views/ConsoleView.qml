@@ -249,10 +249,10 @@ Item {
             spacing: 8
 
             // =================================================================
-            // REGION 1: LEFT WING — REFERENCE DECK (Mockup proportions: ~470px)
+            // REGION 1: LEFT WING — REFERENCE DECK (~488px)
             // =================================================================
             BrushedMetalPanel {
-                Layout.preferredWidth: 468
+                Layout.preferredWidth: 488
                 Layout.fillHeight: true
                 baseTint: "#13171d"
                 borderColor: "#2f3743"
@@ -1273,7 +1273,7 @@ Item {
                                     accentColor: "#32E6FF"
                                     highlighted: !EngineController.geqBypassed
                                     enabled: !consoleRoot.isDirect
-                                    onClicked: EngineController.setDspNodeBypass("geq", !EngineController.geqBypassed)
+                                    onClicked: EngineController.setDspNodeBypass("GEQ", !EngineController.geqBypassed)
                                 }
 
                                 RowLayout {
@@ -1679,7 +1679,7 @@ Item {
                                                     visible: !consoleRoot.peqEditListening
                                                     highlighted: !EngineController.peqBypassed
                                                     enabled: !consoleRoot.isDirect
-                                                    onClicked: EngineController.setDspNodeBypass("peq", !EngineController.peqBypassed)
+                                                    onClicked: EngineController.setDspNodeBypass("PEQ", !EngineController.peqBypassed)
                                                 }
                                             }
 
@@ -2017,12 +2017,14 @@ Item {
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
-                                        text: consoleRoot.dspFilterBypassed ? qsTr("BYP") : qsTr("ON")
-                                        implicitWidth: 48; implicitHeight: 24; fontSize: 10
-                                        showLed: true; ledColor: consoleRoot.dspFilterBypassed ? "#555" : "#00E676"
+                                        text: consoleRoot.dspFilterBypassed ? qsTr("OFF") : qsTr("ON")
+                                        implicitWidth: 68; implicitHeight: 26; fontSize: 10
+                                        showLed: true; ledColor: consoleRoot.dspFilterBypassed ? "#4A5462" : "#00E676"
+                                        accentColor: "#48D8FF"
                                         highlighted: !consoleRoot.dspFilterBypassed
                                         enabled: !consoleRoot.isDirect
-                                        onClicked: EngineController.setDspNodeBypass("filter", !consoleRoot.dspFilterBypassed)
+                                        toolTipText: qsTr("Toggle HPF/LPF Module ON / OFF")
+                                        onClicked: EngineController.setDspNodeBypass("Filter", !consoleRoot.dspFilterBypassed)
                                     }
                                 }
 
@@ -2255,12 +2257,14 @@ Item {
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
-                                        text: consoleRoot.dspCompBypassed ? qsTr("BYP") : qsTr("ON")
-                                        implicitWidth: 48; implicitHeight: 24; fontSize: 10
-                                        showLed: true; ledColor: consoleRoot.dspCompBypassed ? "#555" : "#00E676"
+                                        text: consoleRoot.dspCompBypassed ? qsTr("OFF") : qsTr("ON")
+                                        implicitWidth: 68; implicitHeight: 26; fontSize: 10
+                                        showLed: true; ledColor: consoleRoot.dspCompBypassed ? "#4A5462" : "#00E676"
+                                        accentColor: "#F5B841"
                                         highlighted: !consoleRoot.dspCompBypassed
                                         enabled: !consoleRoot.isDirect
-                                        onClicked: EngineController.setDspNodeBypass("compressor", !consoleRoot.dspCompBypassed)
+                                        toolTipText: qsTr("Toggle Compressor ON / OFF")
+                                        onClicked: EngineController.setDspNodeBypass("Compressor", !consoleRoot.dspCompBypassed)
                                     }
                                 }
 
@@ -2453,12 +2457,14 @@ Item {
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
-                                        text: consoleRoot.dspLimBypassed ? qsTr("BYP") : qsTr("ON")
-                                        implicitWidth: 48; implicitHeight: 24; fontSize: 10
-                                        showLed: true; ledColor: consoleRoot.dspLimBypassed ? "#555" : "#00E676"
+                                        text: consoleRoot.dspLimBypassed ? qsTr("OFF") : qsTr("ON")
+                                        implicitWidth: 68; implicitHeight: 26; fontSize: 10
+                                        showLed: true; ledColor: consoleRoot.dspLimBypassed ? "#4A5462" : "#00E676"
+                                        accentColor: "#F2C044"
                                         highlighted: !consoleRoot.dspLimBypassed
                                         enabled: !consoleRoot.isDirect
-                                        onClicked: EngineController.setDspNodeBypass("limiter", !consoleRoot.dspLimBypassed)
+                                        toolTipText: qsTr("Toggle Peak Limiter ON / OFF")
+                                        onClicked: EngineController.setDspNodeBypass("Limiter", !consoleRoot.dspLimBypassed)
                                     }
                                 }
 
@@ -2605,12 +2611,14 @@ Item {
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
-                                        text: consoleRoot.dspRevBypassed ? qsTr("BYP") : qsTr("ON")
-                                        implicitWidth: 48; implicitHeight: 24; fontSize: 10
-                                        showLed: true; ledColor: consoleRoot.dspRevBypassed ? "#555" : "#00E676"
+                                        text: consoleRoot.dspRevBypassed ? qsTr("OFF") : qsTr("ON")
+                                        implicitWidth: 68; implicitHeight: 26; fontSize: 10
+                                        showLed: true; ledColor: consoleRoot.dspRevBypassed ? "#4A5462" : "#00E676"
+                                        accentColor: "#48D8FF"
                                         highlighted: !consoleRoot.dspRevBypassed
                                         enabled: !consoleRoot.isDirect
-                                        onClicked: EngineController.setDspNodeBypass("reverb", !consoleRoot.dspRevBypassed)
+                                        toolTipText: qsTr("Toggle Reverb ON / OFF")
+                                        onClicked: EngineController.setDspNodeBypass("Reverb", !consoleRoot.dspRevBypassed)
                                     }
                                 }
 
