@@ -166,8 +166,10 @@ Item {
             dspLimGainReductionDb = lp.gainReductionDb !== undefined ? lp.gainReductionDb : 0.0
             dspLimBypassed = !!lp.bypassed
         }
-        filterInTrimKnob.value = EngineController.getDspTrim("filter", false)
-        filterOutTrimKnob.value = EngineController.getDspTrim("filter", true)
+        hpfInTrimKnob.value = EngineController.getDspTrim("hpf", false)
+        hpfOutTrimKnob.value = EngineController.getDspTrim("hpf", true)
+        lpfInTrimKnob.value = EngineController.getDspTrim("lpf", false)
+        lpfOutTrimKnob.value = EngineController.getDspTrim("lpf", true)
         compInTrimKnob.value = EngineController.getDspTrim("compressor", false)
         compOutTrimKnob.value = EngineController.getDspTrim("compressor", true)
         revInTrimKnob.value = EngineController.getDspTrim("reverb", false)
@@ -2082,22 +2084,26 @@ Item {
                                     }
                                 }
 
-                                // Row 3: Parameters + IN/OUT Trim
-                                RowLayout {
+                                // Row 3: HPF (with independent HPF IN/OUT Trim) & LPF (with independent LPF IN/OUT Trim)
+                                ColumnLayout {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    spacing: 8
+                                    spacing: 6
 
-                                    ColumnLayout {
+                                    // HPF Strip
+                                    RowLayout {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        spacing: 4
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 6
+                                        spacing: 6
+
+                                        ColumnLayout {
+                                            Layout.preferredWidth: 46
+                                            spacing: 4
                                             ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 42
                                                 text: consoleRoot.dspHpfEnabled ? qsTr("HPF\nON") : qsTr("HPF\nOFF")
-                                                implicitWidth: 48; implicitHeight: 46; fontSize: 9
+                                                fontSize: 9
                                                 highlighted: consoleRoot.dspHpfEnabled
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
@@ -2105,18 +2111,11 @@ Item {
                                                     EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
                                                 }
                                             }
-                                            ConsoleKnob {
-                                                id: dspHpfKnob
-                                                Layout.fillWidth: true
-                                                labelText: qsTr("HPF Cutoff")
-                                                minValue: 20.0; maxValue: 2000.0; defaultValue: 20.0; logarithmic: true
-                                                unitSuffix: " Hz"; decimals: 0; knobDiameter: 48; arcColor: "#48D8FF"
-                                                enabled: !consoleRoot.isDirect
-                                                onValueEdited: function(v) { value = v; EngineController.setFilterParams(v, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
-                                            }
                                             ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 24
                                                 text: consoleRoot.dspHpfSlope === 1 ? "24dB" : "12dB"
-                                                implicitWidth: 44; implicitHeight: 28; fontSize: 9
+                                                fontSize: 9
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
                                                     consoleRoot.dspHpfSlope = consoleRoot.dspHpfSlope === 1 ? 0 : 1
@@ -2125,12 +2124,54 @@ Item {
                                             }
                                         }
 
-                                        RowLayout {
+                                        ConsoleKnob {
+                                            id: dspHpfKnob
                                             Layout.fillWidth: true
-                                            spacing: 6
+                                            labelText: qsTr("HPF Cutoff")
+                                            minValue: 20.0; maxValue: 2000.0; defaultValue: 20.0; logarithmic: true
+                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(v, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
+                                        }
+
+                                        Rectangle { width: 1; Layout.fillHeight: true; color: "#2D526E" }
+
+                                        ConsoleKnob {
+                                            id: hpfInTrimKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("HPF IN")
+                                            minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("hpf", false, v) }
+                                        }
+                                        ConsoleKnob {
+                                            id: hpfOutTrimKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("HPF OUT")
+                                            minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("hpf", true, v) }
+                                        }
+                                    }
+
+                                    Rectangle { Layout.fillWidth: true; height: 1; color: "#26465E" }
+
+                                    // LPF Strip
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        spacing: 6
+
+                                        ColumnLayout {
+                                            Layout.preferredWidth: 46
+                                            spacing: 4
                                             ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 42
                                                 text: consoleRoot.dspLpfEnabled ? qsTr("LPF\nON") : qsTr("LPF\nOFF")
-                                                implicitWidth: 48; implicitHeight: 46; fontSize: 9
+                                                fontSize: 9
                                                 highlighted: consoleRoot.dspLpfEnabled
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
@@ -2138,18 +2179,11 @@ Item {
                                                     EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
                                                 }
                                             }
-                                            ConsoleKnob {
-                                                id: dspLpfKnob
-                                                Layout.fillWidth: true
-                                                labelText: qsTr("LPF Cutoff")
-                                                minValue: 1000.0; maxValue: 20000.0; defaultValue: 20000.0; logarithmic: true
-                                                unitSuffix: " Hz"; decimals: 0; knobDiameter: 48; arcColor: "#48D8FF"
-                                                enabled: !consoleRoot.isDirect
-                                                onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, v, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
-                                            }
                                             ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 24
                                                 text: consoleRoot.dspLpfSlope === 1 ? "24dB" : "12dB"
-                                                implicitWidth: 44; implicitHeight: 28; fontSize: 9
+                                                fontSize: 9
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
                                                     consoleRoot.dspLpfSlope = consoleRoot.dspLpfSlope === 1 ? 0 : 1
@@ -2157,30 +2191,36 @@ Item {
                                                 }
                                             }
                                         }
-                                    }
 
-                                    Rectangle { width: 1; Layout.fillHeight: true; color: "#2D526E" }
-                                    ColumnLayout {
-                                        Layout.preferredWidth: 102
-                                        Layout.fillHeight: true
-                                        spacing: 4
                                         ConsoleKnob {
-                                            id: filterInTrimKnob
+                                            id: dspLpfKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("IN")
+                                            labelText: qsTr("LPF Cutoff")
+                                            minValue: 1000.0; maxValue: 20000.0; defaultValue: 20000.0; logarithmic: true
+                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, v, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
+                                        }
+
+                                        Rectangle { width: 1; Layout.fillHeight: true; color: "#2D526E" }
+
+                                        ConsoleKnob {
+                                            id: lpfInTrimKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("LPF IN")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
                                             unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("filter", false, v) }
+                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("lpf", false, v) }
                                         }
                                         ConsoleKnob {
-                                            id: filterOutTrimKnob
+                                            id: lpfOutTrimKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("OUT")
+                                            labelText: qsTr("LPF OUT")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
                                             unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("filter", true, v) }
+                                            onValueEdited: function(v) { value = v; EngineController.setDspTrim("lpf", true, v) }
                                         }
                                     }
                                 }
