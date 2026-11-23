@@ -146,12 +146,46 @@ public:
     [[nodiscard]] bool renderMonitorMuted() const noexcept { return m_renderMonitorMuted.load(std::memory_order_relaxed); }
     void setRenderMonitorMuted(bool muted) noexcept { m_renderMonitorMuted.store(muted, std::memory_order_relaxed); }
 
+    /// Fixed -20 dB Monitor-Only Dim (Listening and Render Monitor only; never affects offline Render-File).
+    [[nodiscard]] bool monitorDimEnabled() const noexcept { return m_monitorDimEnabled.load(std::memory_order_relaxed); }
+    void setMonitorDimEnabled(bool enabled) noexcept { m_monitorDimEnabled.store(enabled, std::memory_order_relaxed); }
+
     /// Internal temporary monitor mute used during hardware latency calibration (smooth 10ms ramp, preserves user mute state).
     [[nodiscard]] bool calibrationMonitorMute() const noexcept { return m_calibrationMonitorMute.load(std::memory_order_acquire); }
     void setCalibrationMonitorMute(bool muted) noexcept { m_calibrationMonitorMute.store(muted, std::memory_order_release); }
 
     [[nodiscard]] bool liveDitherEnabled() const noexcept { return m_liveDitherEnabled.load(std::memory_order_relaxed); }
     void setLiveDitherEnabled(bool enabled) noexcept { m_liveDitherEnabled.store(enabled, std::memory_order_relaxed); }
+
+    /// Lock-free Control/UI Thread snapshot reader of the latest monitor audio frames (for FFT spectrum).
+    /// Returns false if fewer than `count` frames have been written or a concurrent RT write lapped the read.
+    [[nodiscard]] bool readLatestMonitorSamples(double* outL, double* outR, size_t count, uint64_t& outWritePos) const noexcept {
+        if (!outL || !outR || count == 0 || count > FFT_RING_CAPACITY / 2) {
+            outWritePos = 0;
+            return false;
+        }
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            const uint64_t w1 = m_fftWritePos.load(std::memory_order_acquire);
+            if (w1 < count) {
+                outWritePos = w1;
+                return false;
+            }
+            const uint64_t start = w1 - count;
+            for (size_t i = 0; i < count; ++i) {
+                const size_t idx = static_cast<size_t>((start + i) & (FFT_RING_CAPACITY - 1));
+                outL[i] = m_fftRingL[idx];
+                outR[i] = m_fftRingR[idx];
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint64_t w2 = m_fftWritePos.load(std::memory_order_acquire);
+            if (w2 >= w1 && (w2 - w1) <= (FFT_RING_CAPACITY - count)) {
+                outWritePos = w1;
+                return true;
+            }
+        }
+        outWritePos = m_fftWritePos.load(std::memory_order_relaxed);
+        return false;
+    }
 
     [[nodiscard]] std::unique_ptr<AudioChain> cloneMasterChainForVerification() const {
         auto guard = m_masterReclaimer.enterRead();
@@ -548,12 +582,13 @@ public:
         // 3. Logical Render Tap Branching (Section 5.11, Spec §5.2 downstream Master Gain & Level Match)
         const OutputPathMode currentMode = m_outputMode.load(std::memory_order_relaxed);
         const bool calMute = m_calibrationMonitorMute.load(std::memory_order_acquire);
+        const double dimGain = m_monitorDimEnabled.load(std::memory_order_relaxed) ? 0.1 : 1.0;
         const double listenVol = (m_listeningMuted.load(std::memory_order_relaxed) || calMute)
                                      ? 0.0
-                                     : m_listeningVolume.load(std::memory_order_relaxed);
+                                     : (m_listeningVolume.load(std::memory_order_relaxed) * dimGain);
         const double renderMonVol = (m_renderMonitorMuted.load(std::memory_order_relaxed) || calMute)
                                         ? 0.0
-                                        : m_renderMonitorVolume.load(std::memory_order_relaxed);
+                                        : (m_renderMonitorVolume.load(std::memory_order_relaxed) * dimGain);
         if (!m_smoothersInitialized.load(std::memory_order_relaxed)) {
             m_listeningVolSmoother.reset(listenVol);
             m_renderMonVolSmoother.reset(renderMonVol);
@@ -994,6 +1029,17 @@ private:
             t.reverbWetLevel = 0.0;
         }
 
+        // Push final monitor block to lock-free SPSC FFT sample ring (zero alloc, zero locks)
+        if (left && right && frames > 0) {
+            uint64_t w = m_fftWritePos.load(std::memory_order_relaxed);
+            for (size_t i = 0; i < frames; ++i) {
+                const size_t idx = static_cast<size_t>((w + i) & (FFT_RING_CAPACITY - 1));
+                m_fftRingL[idx] = left[i];
+                m_fftRingR[idx] = right[i];
+            }
+            m_fftWritePos.store(w + frames, std::memory_order_release);
+        }
+
         uint32_t newState = static_cast<uint32_t>(m_writerTelemetryIndex & 3) | TELEMETRY_NEW_DATA;
         uint32_t oldShared = m_sharedTelemetryState.exchange(newState, std::memory_order_acq_rel);
         m_writerTelemetryIndex = static_cast<int>(oldShared & 3);
@@ -1007,6 +1053,7 @@ private:
     std::atomic<double> m_renderMonitorVolume{1.0};
     std::atomic<bool> m_listeningMuted{false};
     std::atomic<bool> m_renderMonitorMuted{false};
+    std::atomic<bool> m_monitorDimEnabled{false};
     std::atomic<bool> m_calibrationMonitorMute{false};
     std::atomic<bool> m_liveDitherEnabled{true};
 
@@ -1038,6 +1085,11 @@ private:
     alignas(64) std::atomic<uint64_t> m_level1VerifiedBlocks{0};
     alignas(64) std::atomic<uint64_t> m_level1TotalBlocks{0};
     alignas(64) std::atomic<uint64_t> m_level1Generation{0};
+
+    static constexpr size_t FFT_RING_CAPACITY = 8192;
+    alignas(64) std::array<double, FFT_RING_CAPACITY> m_fftRingL{};
+    alignas(64) std::array<double, FFT_RING_CAPACITY> m_fftRingR{};
+    alignas(64) std::atomic<uint64_t> m_fftWritePos{0};
 
     mutable EpochReclaimer<AudioChain> m_masterReclaimer;
     mutable EpochReclaimer<AudioChain> m_listeningReclaimer;

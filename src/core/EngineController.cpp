@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <filesystem>
 
@@ -177,6 +178,7 @@ EngineController::EngineController(QObject *parent)
 }
 
 EngineController::~EngineController() {
+  m_waveformExtractor.reset();
   m_levelMatchCancel.store(true, std::memory_order_release);
   if (m_levelMatchThread.joinable()) {
     m_levelMatchThread.join();
@@ -222,7 +224,31 @@ bool EngineController::initialize(bool offlineMode) {
     m_lastPresetImportReport.clear();
   }
 
-  // 1. Initialize 4-Deck Manager
+  // 1. Initialize 4-Deck Manager & Background Waveform Extractor
+  m_waveformExtractor = std::make_unique<engine::audio::WaveformExtractor>();
+  m_waveformExtractor->setReadyCallback([this](const std::string &canonPath, bool ok) {
+    if (!ok) return;
+    const QString readyPath = QString::fromStdString(canonPath);
+    QMetaObject::invokeMethod(
+        this,
+        [this, readyPath]() {
+          if (!m_deckManager) return;
+          std::error_code ec;
+          for (char cid : {'A', 'B', 'C', 'D'}) {
+            if (const auto *d = m_deckManager->deck(cid)) {
+              if (!d->isOpen() || d->trackInfo().path.empty()) continue;
+              const auto cp = std::filesystem::weakly_canonical(d->trackInfo().path, ec);
+              const QString deckCanon = ec ? QString::fromStdString(d->trackInfo().path)
+                                           : QString::fromStdString(cp.string());
+              if (deckCanon == readyPath) {
+                emit deckWaveformReady(QString(cid));
+              }
+            }
+          }
+          emit waveformCacheChanged();
+        },
+        Qt::QueuedConnection);
+  });
   m_deckManager = std::make_unique<engine::deck::DeckManager>(48000.0);
 
   for (char cid : {'A', 'B', 'C', 'D'}) {
@@ -741,6 +767,9 @@ bool EngineController::initialize(bool offlineMode) {
       }
 
       if (d->checkAndResetTrackChanged()) {
+        if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+          m_waveformExtractor->requestWaveform(d->trackInfo().path);
+        }
         emit deckStateChanged(QString(c));
       }
     }
@@ -973,10 +1002,19 @@ bool EngineController::setupAudioBackend(const QString &backendName,
                                            chunk);
 
           const bool isMuted = m_masterMute.load(std::memory_order_relaxed);
+          const bool isMutedL = m_masterMuteL.load(std::memory_order_relaxed);
+          const bool isMutedR = m_masterMuteR.load(std::memory_order_relaxed);
+          const double bal = m_masterBalance.load(std::memory_order_relaxed);
+          const double balGainL = (bal > 0.0) ? std::max(0.0, 1.0 - bal) : 1.0;
+          const double balGainR = (bal < 0.0) ? std::max(0.0, 1.0 + bal) : 1.0;
           m_gainSmootherL.setTarget(
-              isMuted ? 0.0 : m_masterGainL.load(std::memory_order_relaxed));
+              (isMuted || isMutedL)
+                  ? 0.0
+                  : (m_masterGainL.load(std::memory_order_relaxed) * balGainL));
           m_gainSmootherR.setTarget(
-              isMuted ? 0.0 : m_masterGainR.load(std::memory_order_relaxed));
+              (isMuted || isMutedR)
+                  ? 0.0
+                  : (m_masterGainR.load(std::memory_order_relaxed) * balGainR));
           const auto *activeD = m_deckManager->activeDeck();
           const double levelMatchGain =
               activeD ? activeD->levelMatchLinearGain() : 1.0;
@@ -1120,6 +1158,9 @@ void EngineController::applyInitialSettingsIfLoaded() {
 
 void EngineController::recordSessionStart(const QString &graphicsBackend,
                                           const QString &gpuName) {
+  m_graphicsBackend = graphicsBackend;
+  m_gpuRendererName = gpuName;
+  emit diagnosticsChanged();
   if (m_sessionStartRecorded)
     return;
   m_sessionStartRecorded = true;
@@ -1574,6 +1615,13 @@ void EngineController::pollExternalInsertHealth() {
     emit externalInsertStatusChanged();
     emit diagnosticsChanged();
   }
+
+  const int polledSt = static_cast<int>(bridge.state());
+  if (polledSt != m_lastPolledInsertState) {
+    m_lastPolledInsertState = polledSt;
+    emit externalInsertStatusChanged();
+    emit diagnosticsChanged();
+  }
 }
 
 void EngineController::copyToClipboard(const QString &text) {
@@ -1636,8 +1684,24 @@ double EngineController::masterGainR() const {
   return m_masterGainR.load(std::memory_order_relaxed);
 }
 
+double EngineController::masterBalance() const {
+  return m_masterBalance.load(std::memory_order_relaxed);
+}
+
 bool EngineController::isMasterMute() const {
   return m_masterMute.load(std::memory_order_relaxed);
+}
+
+bool EngineController::isMasterMuteL() const {
+  return m_masterMuteL.load(std::memory_order_relaxed);
+}
+
+bool EngineController::isMasterMuteR() const {
+  return m_masterMuteR.load(std::memory_order_relaxed);
+}
+
+bool EngineController::isMonitorDimEnabled() const {
+  return m_pipeline ? m_pipeline->monitorDimEnabled() : false;
 }
 
 double EngineController::masterPeakL() const {
@@ -2096,6 +2160,10 @@ int EngineController::bitPerfectStatus() const {
       return 1; // TPDF dither active on integer PCM quantization
     }
     if (m_masterMute.load(std::memory_order_relaxed) ||
+        m_masterMuteL.load(std::memory_order_relaxed) ||
+        m_masterMuteR.load(std::memory_order_relaxed) ||
+        std::abs(m_masterBalance.load(std::memory_order_relaxed)) > 1e-6 ||
+        (m_pipeline && m_pipeline->monitorDimEnabled()) ||
         std::abs(m_masterGainL.load(std::memory_order_relaxed) - 1.0) > 1e-6 ||
         std::abs(m_masterGainR.load(std::memory_order_relaxed) - 1.0) > 1e-6 ||
         (active && std::abs(active->levelMatchGainDb()) > 1e-4)) {
@@ -2500,6 +2568,18 @@ QString EngineController::externalInsertClientName() const {
   return client.isEmpty() ? QStringLiteral("Carla") : client;
 }
 
+double EngineController::externalInsertSendPeak() const {
+  if (!m_insertNode)
+    return 0.0;
+  return m_insertNode->bridge().sendPeak();
+}
+
+double EngineController::externalInsertReturnPeak() const {
+  if (!m_insertNode)
+    return 0.0;
+  return m_insertNode->bridge().returnPeak();
+}
+
 QString EngineController::externalInsertSendPortL() const {
   if (!m_insertNode)
     return QStringLiteral("carla:audio_in_1");
@@ -2804,6 +2884,9 @@ bool EngineController::resyncGlobalDspBypass() {
 }
 
 void EngineController::setMasterMute(bool mute) {
+  if (mute && m_directModeEnabled.load(std::memory_order_relaxed)) {
+    setDirectModeEnabled(false);
+  }
   bool prev = m_masterMute.exchange(mute);
   if (prev != mute) {
     emit masterMuteChanged(mute);
@@ -2812,6 +2895,60 @@ void EngineController::setMasterMute(bool mute) {
                                     mute ? "Master Output Muted"
                                          : "Master Output Unmuted",
                                     "Master", mute ? "MuteOn" : "MuteOff");
+  }
+}
+
+void EngineController::setMasterMuteL(bool mute) {
+  if (mute && m_directModeEnabled.load(std::memory_order_relaxed)) {
+    setDirectModeEnabled(false);
+  }
+  const bool prev = m_masterMuteL.exchange(mute, std::memory_order_relaxed);
+  if (prev != mute) {
+    emit masterMuteLChanged(mute);
+    emit diagnosticsChanged();
+    log::LogService::instance().log("MasterControl", "MuteL", "Success",
+                                    mute ? "Master Left Muted"
+                                         : "Master Left Unmuted",
+                                    "Master", mute ? "MuteLOn" : "MuteLOff");
+  }
+}
+
+void EngineController::setMasterMuteR(bool mute) {
+  if (mute && m_directModeEnabled.load(std::memory_order_relaxed)) {
+    setDirectModeEnabled(false);
+  }
+  const bool prev = m_masterMuteR.exchange(mute, std::memory_order_relaxed);
+  if (prev != mute) {
+    emit masterMuteRChanged(mute);
+    emit diagnosticsChanged();
+    log::LogService::instance().log("MasterControl", "MuteR", "Success",
+                                    mute ? "Master Right Muted"
+                                         : "Master Right Unmuted",
+                                    "Master", mute ? "MuteROn" : "MuteROff");
+  }
+}
+
+void EngineController::setMasterBalance(double balance) {
+  const double clamped = std::clamp(balance, -1.0, 1.0);
+  const double prev = m_masterBalance.exchange(clamped, std::memory_order_relaxed);
+  if (std::abs(prev - clamped) > 1e-6) {
+    emit masterBalanceChanged(clamped);
+    emit diagnosticsChanged();
+  }
+}
+
+void EngineController::setMonitorDimEnabled(bool dim) {
+  if (!m_pipeline)
+    return;
+  if (m_pipeline->monitorDimEnabled() != dim) {
+    m_pipeline->setMonitorDimEnabled(dim);
+    emit monitorDimEnabledChanged(dim);
+    emit diagnosticsChanged();
+    log::LogService::instance().log(
+        "MasterControl", "MonitorDim", "Success",
+        dim ? "Monitor Dim -20 dB engaged (Listening / Render Monitor only)"
+            : "Monitor Dim disengaged",
+        "Master", dim ? "DimOn" : "DimOff");
   }
 }
 
@@ -3502,6 +3639,9 @@ bool EngineController::loadTrack(const QString &deckId,
                             .count();
 
   if (ok) {
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -3616,6 +3756,9 @@ bool EngineController::startFolderSession(const QString &deckId,
   bool ok = d->startFolderSession(folderPath.toStdString(), files,
                                   m_deckManager->graphRate());
   if (ok) {
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -3681,6 +3824,9 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
 
   bool ok = d->startFolderSessionFromCurrentTrack(m_deckManager->graphRate());
   if (ok) {
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -4957,8 +5103,8 @@ bool EngineController::configureExternalInsertWithMetadata(
             .arg(trDiag.simulationMode
                      ? QStringLiteral("Simulation")
                      : (m_activeAudioBackend == QStringLiteral("JACK")
-                            ? QStringLiteral("LiveJACK")
-                            : QStringLiteral("LivePipeWire")))
+                            ? QStringLiteral("Live JACK")
+                            : QStringLiteral("Live PipeWire")))
             .arg(latencyReported
                      ? (QString::number(reportedLatencyFrames) + " frames")
                      : QStringLiteral("Not Reported")),
@@ -6957,7 +7103,11 @@ bool EngineController::saveSessionState(const QString &filePath) const {
   root["global_dsp_bypass"] = globalDspBypass();
   root["master_gain_l"] = masterGainL();
   root["master_gain_r"] = masterGainR();
+  root["master_balance"] = masterBalance();
   root["master_mute"] = isMasterMute();
+  root["master_mute_l"] = isMasterMuteL();
+  root["master_mute_r"] = isMasterMuteR();
+  root["monitor_dim"] = isMonitorDimEnabled();
 
   auto *nonConstThis = const_cast<EngineController *>(this);
   root["master_dsp"] =
@@ -7066,8 +7216,20 @@ bool EngineController::restoreSessionState(const QString &filePath) {
   if (root.contains("master_gain_r")) {
     setMasterGainR(root["master_gain_r"].toDouble(1.0));
   }
+  if (root.contains("master_balance")) {
+    setMasterBalance(root["master_balance"].toDouble(0.0));
+  }
   if (root.contains("master_mute")) {
     setMasterMute(root["master_mute"].toBool(false));
+  }
+  if (root.contains("master_mute_l")) {
+    setMasterMuteL(root["master_mute_l"].toBool(false));
+  }
+  if (root.contains("master_mute_r")) {
+    setMasterMuteR(root["master_mute_r"].toBool(false));
+  }
+  if (root.contains("monitor_dim")) {
+    setMonitorDimEnabled(root["monitor_dim"].toBool(false));
   }
 
   const QJsonArray decksArr = root["decks"].toArray();
@@ -7099,6 +7261,252 @@ bool EngineController::restoreSessionState(const QString &filePath) {
 
   emit diagnosticsChanged();
   return true;
+}
+
+QVariantMap EngineController::getDeckWaveformPeaks(const QString &deckId,
+                                                   int targetBins) const {
+  QVariantMap out;
+  out["ready"] = false;
+  out["extracting"] = false;
+  out["bucketCount"] = 0;
+
+  if (!m_deckManager || !m_waveformExtractor || deckId.isEmpty()) {
+    return out;
+  }
+  const char id = deckId.toUpper().at(0).toLatin1();
+  const auto *d = m_deckManager->deck(id);
+  if (!d || !d->isOpen() || d->trackInfo().path.empty()) {
+    return out;
+  }
+
+  const std::string &path = d->trackInfo().path;
+  out["extracting"] = m_waveformExtractor->isExtracting(path);
+
+  engine::audio::WaveformData data;
+  if (!m_waveformExtractor->getWaveform(path, data) || !data.valid ||
+      data.bucketCount == 0) {
+    return out;
+  }
+
+  const int bins = std::clamp(targetBins, 32, static_cast<int>(data.bucketCount));
+  QVariantList minL, maxL, minR, maxR;
+  minL.reserve(bins);
+  maxL.reserve(bins);
+  minR.reserve(bins);
+  maxR.reserve(bins);
+
+  const size_t srcN = data.bucketCount;
+  for (int i = 0; i < bins; ++i) {
+    const size_t s0 = (static_cast<size_t>(i) * srcN) / static_cast<size_t>(bins);
+    const size_t s1 = std::max(
+        s0 + 1, (static_cast<size_t>(i + 1) * srcN) / static_cast<size_t>(bins));
+    float mnL = 1.0f, mxL = -1.0f, mnR = 1.0f, mxR = -1.0f;
+    for (size_t s = s0; s < s1 && s < srcN; ++s) {
+      mnL = std::min(mnL, data.minL[s]);
+      mxL = std::max(mxL, data.maxL[s]);
+      mnR = std::min(mnR, data.minR[s]);
+      mxR = std::max(mxR, data.maxR[s]);
+    }
+    minL.append(static_cast<double>(mnL));
+    maxL.append(static_cast<double>(mxL));
+    minR.append(static_cast<double>(mnR));
+    maxR.append(static_cast<double>(mxR));
+  }
+
+  out["ready"] = true;
+  out["extracting"] = false;
+  out["bucketCount"] = bins;
+  out["sampleRate"] = data.sampleRate;
+  out["totalFrames"] = static_cast<qint64>(data.totalFrames);
+  out["minL"] = minL;
+  out["maxL"] = maxL;
+  out["minR"] = minR;
+  out["maxR"] = maxR;
+  return out;
+}
+
+bool EngineController::isDeckWaveformExtracting(const QString &deckId) const {
+  if (!m_deckManager || !m_waveformExtractor || deckId.isEmpty())
+    return false;
+  const char id = deckId.toUpper().at(0).toLatin1();
+  const auto *d = m_deckManager->deck(id);
+  if (!d || !d->isOpen() || d->trackInfo().path.empty())
+    return false;
+  return m_waveformExtractor->isExtracting(d->trackInfo().path);
+}
+
+void EngineController::requestDeckWaveform(const QString &deckId) {
+  if (!m_deckManager || !m_waveformExtractor || deckId.isEmpty())
+    return;
+  const char id = deckId.toUpper().at(0).toLatin1();
+  const auto *d = m_deckManager->deck(id);
+  if (d && d->isOpen() && !d->trackInfo().path.empty()) {
+    m_waveformExtractor->requestWaveform(d->trackInfo().path);
+  }
+}
+
+QString EngineController::waveformCachePath() const {
+  return QString::fromStdString(
+      engine::audio::WaveformExtractor::cacheDirectoryPath());
+}
+
+qint64 EngineController::waveformCacheSizeBytes() const {
+  return m_waveformExtractor
+             ? static_cast<qint64>(m_waveformExtractor->diskCacheSizeBytes())
+             : 0;
+}
+
+int EngineController::waveformCacheFileCount() const {
+  return m_waveformExtractor
+             ? static_cast<int>(m_waveformExtractor->diskCacheFileCount())
+             : 0;
+}
+
+bool EngineController::clearWaveformCache() {
+  if (!m_waveformExtractor)
+    return false;
+  const bool ok = m_waveformExtractor->clearDiskCache();
+  emit waveformCacheChanged();
+  log::LogService::instance().log(
+      QStringLiteral("Settings"), QStringLiteral("ClearWaveformCache"),
+      ok ? QStringLiteral("Success") : QStringLiteral("Warning"),
+      QStringLiteral("Cleared disk waveform cache."), QStringLiteral("Cache"),
+      waveformCachePath());
+  return ok;
+}
+
+QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
+                                               bool autoPreferRight) {
+  constexpr size_t FFT_N = 2048;
+  const int bins = std::clamp(numBins, 16, 512);
+  QVariantList result;
+  result.reserve(bins);
+
+  if (!m_pipeline) {
+    for (int i = 0; i < bins; ++i)
+      result.append(-90.0);
+    return result;
+  }
+
+  std::array<double, FFT_N> ringL{};
+  std::array<double, FFT_N> ringR{};
+  uint64_t writePos = 0;
+  if (!m_pipeline->readLatestMonitorSamples(ringL.data(), ringR.data(), FFT_N,
+                                            writePos)) {
+    for (int i = 0; i < bins; ++i)
+      result.append(-90.0);
+    return result;
+  }
+
+  if (writePos == m_lastSpectrumWritePos) {
+    if (++m_spectrumStaleCount > 3) {
+      for (int i = 0; i < bins; ++i)
+        result.append(-90.0);
+      return result;
+    }
+  } else {
+    m_lastSpectrumWritePos = writePos;
+    m_spectrumStaleCount = 0;
+  }
+
+  // Channel focus selection: 0 = L+R, 1 = L, 2 = R, 3 = AUTO (tracks active PEQ edit channel or L+R)
+  const int effectiveCh =
+      (channelMode == 3) ? (autoPreferRight ? 2 : 0) : channelMode;
+
+  std::vector<std::complex<double>> fft(FFT_N);
+  constexpr double TWO_PI = 6.28318530717958647692;
+  for (size_t i = 0; i < FFT_N; ++i) {
+    double s = 0.0;
+    if (effectiveCh == 1) {
+      s = ringL[i];
+    } else if (effectiveCh == 2) {
+      s = ringR[i];
+    } else {
+      s = 0.5 * (ringL[i] + ringR[i]);
+    }
+    const double win =
+        0.5 * (1.0 - std::cos(TWO_PI * static_cast<double>(i) /
+                              static_cast<double>(FFT_N - 1)));
+    fft[i] = std::complex<double>(s * win, 0.0);
+  }
+
+  // In-place radix-2 Cooley-Tukey FFT
+  for (size_t i = 1, j = 0; i < FFT_N; ++i) {
+    size_t bit = FFT_N >> 1;
+    for (; j & bit; bit >>= 1) {
+      j ^= bit;
+    }
+    j ^= bit;
+    if (i < j) {
+      std::swap(fft[i], fft[j]);
+    }
+  }
+  for (size_t len = 2; len <= FFT_N; len <<= 1) {
+    const double ang = -TWO_PI / static_cast<double>(len);
+    const std::complex<double> wlen(std::cos(ang), std::sin(ang));
+    for (size_t i = 0; i < FFT_N; i += len) {
+      std::complex<double> w(1.0, 0.0);
+      for (size_t j = 0; j < len / 2; ++j) {
+        const std::complex<double> u = fft[i + j];
+        const std::complex<double> v = fft[i + j + len / 2] * w;
+        fft[i + j] = u + v;
+        fft[i + j + len / 2] = u - v;
+        w *= wlen;
+      }
+    }
+  }
+
+  const double sr = std::max(8000.0, graphSampleRate());
+  const double invScale = 4.0 / static_cast<double>(FFT_N);
+  const size_t halfN = FFT_N / 2;
+
+  std::array<double, FFT_N / 2 + 1> mag{};
+  for (size_t k = 0; k <= halfN; ++k) {
+    mag[k] = std::abs(fft[k]) * invScale;
+  }
+
+  const double minLog = std::log(20.0);
+  const double maxLog = std::log(20000.0);
+  const double nyq = sr * 0.5;
+  for (int b = 0; b < bins; ++b) {
+    const double frac0 =
+        (b == 0) ? 0.0
+                 : (static_cast<double>(b) - 0.5) / static_cast<double>(bins - 1);
+    const double frac1 =
+        (b == bins - 1)
+            ? 1.0
+            : (static_cast<double>(b) + 0.5) / static_cast<double>(bins - 1);
+    const double f0 = std::min(nyq, std::exp(minLog + frac0 * (maxLog - minLog)));
+    const double f1 = std::min(nyq, std::exp(minLog + frac1 * (maxLog - minLog)));
+    const double fc =
+        std::min(nyq, std::exp(minLog + (static_cast<double>(b) /
+                                         std::max(1, bins - 1)) *
+                                            (maxLog - minLog)));
+
+    const double k0f = (f0 * static_cast<double>(FFT_N)) / sr;
+    const double k1f = (f1 * static_cast<double>(FFT_N)) / sr;
+    const size_t kStart = static_cast<size_t>(std::floor(k0f));
+    const size_t kEnd = static_cast<size_t>(std::ceil(k1f));
+
+    double peakMag = 0.0;
+    if (kEnd > kStart + 1) {
+      for (size_t k = std::clamp<size_t>(kStart, 1, halfN);
+           k <= std::clamp<size_t>(kEnd, 1, halfN); ++k) {
+        peakMag = std::max(peakMag, mag[k]);
+      }
+    } else {
+      const double kf = std::clamp((fc * static_cast<double>(FFT_N)) / sr, 1.0,
+                                   static_cast<double>(halfN));
+      const size_t lo = static_cast<size_t>(std::floor(kf));
+      const size_t hi = std::min(halfN, lo + 1);
+      const double t = kf - static_cast<double>(lo);
+      peakMag = mag[lo] * (1.0 - t) + mag[hi] * t;
+    }
+
+    const double db = (peakMag > 1e-5) ? (20.0 * std::log10(peakMag)) : -90.0;
+    result.append(std::clamp(db, -90.0, 6.0));
+  }
+  return result;
 }
 
 } // namespace desk32::core

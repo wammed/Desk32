@@ -188,6 +188,15 @@ void onDiscRegistryGlobal(void* data, uint32_t id, uint32_t /*permissions*/,
                 return;
             }
         }
+        if (const char* fmtDsp = spa_dict_lookup(props, PW_KEY_FORMAT_DSP)) {
+            std::string fLower(fmtDsp);
+            std::transform(fLower.begin(), fLower.end(), fLower.begin(), ::tolower);
+            if (fLower.find("midi") != std::string::npos ||
+                fLower.find("control") != std::string::npos ||
+                (fLower.find("audio") == std::string::npos)) {
+                return;
+            }
+        }
         HostDiscoveryContext::PortEntry p;
         p.id = id;
         if (const char* nid = spa_dict_lookup(props, PW_KEY_NODE_ID)) {
@@ -209,6 +218,19 @@ void onDiscRegistryGlobal(void* data, uint32_t id, uint32_t /*permissions*/,
         }
         if (const char* pd = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION)) {
             p.direction = pd;
+        }
+        auto isNonAudioPortName = [](const std::string& s) {
+            std::string lo = s;
+            std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+            return lo.find("midi") != std::string::npos ||
+                   lo.find("events-in") != std::string::npos ||
+                   lo.find("events_in") != std::string::npos ||
+                   lo.find("events-out") != std::string::npos ||
+                   lo.find("events_out") != std::string::npos ||
+                   lo.find("control") != std::string::npos;
+        };
+        if (isNonAudioPortName(p.name) || isNonAudioPortName(p.alias)) {
+            return;
         }
         if (!p.name.empty() && !p.direction.empty()) {
             ctx->ports.push_back(std::move(p));

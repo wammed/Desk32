@@ -105,6 +105,135 @@ Item {
         return f.toFixed(1) + " Hz"
     }
 
+    // Waveform, Live FFT & Interactive PEQ Curve State
+    property var cachedWaveData: ({})
+    property var cachedSpectrumBins: []
+    property var spectrumPeakHold: []
+    property bool spectrumHasSignal: false
+    property bool showGeqOverlayOnPeq: false
+    property int draggedPeqBand: -1
+    property bool draggedPeqIsRight: false
+    property int hoveredPeqBand: -1
+    property bool hoveredPeqIsRight: false
+    property var cachedPeqNodes: []
+
+    function refreshWaveform() {
+        var w = (typeof waveCanvas !== "undefined" && waveCanvas.width > 64) ? Math.min(512, Math.round(waveCanvas.width)) : 320
+        cachedWaveData = EngineController.getDeckWaveformPeaks(EngineController.activeDeckId, w)
+        if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
+    }
+
+    function pollSpectrum() {
+        var bins = EngineController.getSpectrumBins(monitorChannelMode, 160, peqRightChannel)
+        cachedSpectrumBins = bins
+        if (!spectrumPeakHold || spectrumPeakHold.length !== bins.length) {
+            spectrumPeakHold = bins.slice(0)
+        } else {
+            var nextHold = spectrumPeakHold.slice(0)
+            for (var i = 0; i < bins.length; ++i) {
+                nextHold[i] = Math.max(bins[i], nextHold[i] - 0.55)
+            }
+            spectrumPeakHold = nextHold
+        }
+        var maxV = -90.0
+        for (var j = 0; j < spectrumPeakHold.length; ++j) {
+            if (spectrumPeakHold[j] > maxV) maxV = spectrumPeakHold[j]
+        }
+        spectrumHasSignal = (maxV > -86.0)
+        if (typeof monitorCanvas !== "undefined") monitorCanvas.requestPaint()
+    }
+
+    function computeVisiblePeqNodes(plotW, plotH, padL, padT) {
+        var nodes = []
+        if (currentOpTab !== 1 || !showEqOverlay) return nodes
+        var channels = []
+        if (monitorChannelMode === 0) channels = [false, true]
+        else if (monitorChannelMode === 1) channels = [false]
+        else if (monitorChannelMode === 2) channels = [true]
+        else channels = [peqRightChannel]
+
+        var logMin = Math.log(20.0)
+        var logSpan = Math.log(20000.0) - logMin
+        for (var ci = 0; ci < channels.length; ++ci) {
+            var isR = channels[ci]
+            for (var b = 0; b < 16; ++b) {
+                var bd = peqEditListening
+                         ? EngineController.getListeningBand(isR, b)
+                         : EngineController.getPeqBand(isR, b)
+                if (!bd || !bd.enabled) continue
+                var f = Math.max(20.0, Math.min(20000.0, bd.frequency))
+                var g = Math.max(-18.0, Math.min(18.0, bd.gainDb))
+                var tx = padL + ((Math.log(f) - logMin) / logSpan) * plotW
+                var ty = padT + ((18.0 - g) / 36.0) * plotH
+                var ox = tx
+                var oy = ty
+                for (var p = 0; p < nodes.length; ++p) {
+                    var dx = ox - nodes[p].drawX
+                    var dy = oy - nodes[p].drawY
+                    if ((dx * dx + dy * dy) < 169.0) {
+                        var ang = (nodes.length % 6) * (Math.PI / 3.0)
+                        ox = tx + Math.cos(ang) * 7.5
+                        oy = ty + Math.sin(ang) * 7.5
+                    }
+                }
+                nodes.push({
+                    isRight: isR,
+                    band: b,
+                    frequency: f,
+                    gainDb: g,
+                    q: bd.q !== undefined ? bd.q : 1.0,
+                    type: bd.type !== undefined ? bd.type : 0,
+                    trueX: tx,
+                    trueY: ty,
+                    drawX: ox,
+                    drawY: oy
+                })
+            }
+        }
+        return nodes
+    }
+
+    function refreshExternalPorts() {
+        var list = EngineController.discoverExternalInsertPorts()
+        portDiscoveryList = list ? list : []
+        var curClient = EngineController.externalInsertClientName
+        var matched = 0
+        for (var i = 0; i < portDiscoveryList.length; ++i) {
+            if (portDiscoveryList[i].clientName === curClient) {
+                matched = i
+                break
+            }
+        }
+        selectedTargetClientIdx = matched
+        if (typeof patchBayCanvas !== "undefined") patchBayCanvas.requestPaint()
+    }
+
+    function connectSelectedExternalHost() {
+        if (!portDiscoveryList || portDiscoveryList.length === 0) {
+            refreshExternalPorts()
+        }
+        if (!portDiscoveryList || portDiscoveryList.length === 0) return false
+        var idx = Math.max(0, Math.min(portDiscoveryList.length - 1, selectedTargetClientIdx))
+        var item = portDiscoveryList[idx]
+        if (!item || !item.clientName) return false
+        var ok = EngineController.configureExternalInsertWithMetadata(
+            item.clientName,
+            item.sendPortL,
+            item.sendPortR,
+            item.returnPortL,
+            item.returnPortR,
+            item.sampleRate > 0 ? item.sampleRate : EngineController.graphSampleRate,
+            item.bufferSize > 0 ? item.bufferSize : 256,
+            item.reportedLatencyFrames !== undefined ? item.reportedLatencyFrames : -1,
+            !!item.latencyReported,
+            item.clientName,
+            "",
+            ""
+        )
+        if (typeof patchBayCanvas !== "undefined") patchBayCanvas.requestPaint()
+        return ok
+    }
+
     function refreshEqCurve() {
         monitorCanvas.requestPaint()
         peqMiniCanvas.requestPaint()
@@ -121,8 +250,8 @@ Item {
             peqBandTypeIndex = b.type !== undefined ? b.type : 0
             peqBandEnabledState = !!b.enabled
         }
-        peqInTrimKnob.value = EngineController.getDspTrim(consoleRoot.peqEditListening ? "listening_peq" : "peq", false)
-        peqOutTrimKnob.value = EngineController.getDspTrim(consoleRoot.peqEditListening ? "listening_peq" : "peq", true)
+        peqInTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", false)
+        peqOutTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", true)
         peqGridTick++
         peqMiniCanvas.requestPaint()
     }
@@ -185,12 +314,22 @@ Item {
         refreshDspRack()
         geqInTrimFader.value = EngineController.getDspTrim("geq", false)
         geqOutTrimFader.value = EngineController.getDspTrim("geq", true)
+        refreshWaveform()
         refreshEqCurve()
+        if (currentOpTab === 3) refreshExternalPorts()
     }
 
-    onCurrentOpTabChanged: refreshEqCurve()
+    onCurrentOpTabChanged: {
+        refreshEqCurve()
+        if (currentOpTab === 3) refreshExternalPorts()
+    }
     onMonitorViewModeChanged: refreshEqCurve()
-    onMonitorChannelModeChanged: refreshEqCurve()
+    onMonitorChannelModeChanged: {
+        refreshEqCurve()
+        if (spectrumHasSignal) pollSpectrum()
+    }
+    onShowGeqOverlayOnPeqChanged: refreshEqCurve()
+    onSelectedPeqBandChanged: monitorCanvas.requestPaint()
     onPeqEditListeningChanged: {
         refreshPeqInspector()
         refreshEqCurve()
@@ -198,6 +337,18 @@ Item {
     onPeqRightChannelChanged: {
         refreshPeqInspector()
         refreshEqCurve()
+    }
+
+    Timer {
+        id: spectrumTimer
+        interval: 33
+        repeat: true
+        readonly property var actSt: {
+            var _t = consoleRoot.activeDeckPollTick
+            return EngineController.getDeckState(EngineController.activeDeckId)
+        }
+        running: consoleRoot.visible && consoleRoot.showSpectrum && !EngineController.masterMute && ((actSt && actSt.playing) || consoleRoot.spectrumHasSignal)
+        onTriggered: consoleRoot.pollSpectrum()
     }
 
     Connections {
@@ -222,8 +373,24 @@ Item {
             consoleRoot.refreshPeqInspector()
             consoleRoot.refreshDspRack()
         }
-        function onActiveDeckChanged() { consoleRoot.activeDeckPollTick++ }
-        function onDeckStateChanged() { consoleRoot.activeDeckPollTick++ }
+        function onActiveDeckChanged() {
+            consoleRoot.activeDeckPollTick++
+            consoleRoot.refreshWaveform()
+        }
+        function onDeckStateChanged(deckId) {
+            consoleRoot.activeDeckPollTick++
+            if (deckId === EngineController.activeDeckId) {
+                consoleRoot.refreshWaveform()
+            }
+        }
+        function onDeckWaveformReady(deckId) {
+            if (deckId === EngineController.activeDeckId) {
+                consoleRoot.refreshWaveform()
+            }
+        }
+        function onExternalInsertStatusChanged() {
+            if (typeof patchBayCanvas !== "undefined") patchBayCanvas.requestPaint()
+        }
     }
 
     // Dark recessed steel console chassis background
@@ -437,6 +604,19 @@ Item {
                                     }
                                 }
 
+                                ConsoleButton {
+                                    visible: consoleRoot.currentOpTab === 1 && consoleRoot.showEqOverlay
+                                    text: qsTr("+GEQ")
+                                    implicitWidth: 54
+                                    implicitHeight: 26
+                                    fontSize: 9
+                                    cornerRadius: 3
+                                    accentColor: "#78D0FF"
+                                    highlighted: consoleRoot.showGeqOverlayOnPeq
+                                    toolTipText: qsTr("Overlay faint 32-GEQ composite curve in Main Monitor")
+                                    onClicked: consoleRoot.showGeqOverlayOnPeq = !consoleRoot.showGeqOverlayOnPeq
+                                }
+
                                 Item { Layout.fillWidth: true }
                             }
 
@@ -471,8 +651,9 @@ Item {
                                 }
                             }
 
-                            // Upper Waveform Timeline Region (Honest Gate G4 pending state — NO Math.sin)
+                            // Upper Waveform Timeline Region (Real Extracted Peaks + Seek Scrubbing)
                             Rectangle {
+                                id: waveTimelineBox
                                 visible: consoleRoot.showWaveform
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
@@ -481,20 +662,37 @@ Item {
                                 color: "#06090e"
                                 border.color: "#151d26"
 
-                                // Time tick markings along top
-                                Row {
+                                readonly property var actSt: {
+                                    var _t = consoleRoot.activeDeckPollTick
+                                    return EngineController.getDeckState(EngineController.activeDeckId)
+                                }
+                                readonly property real playRatio: (actSt && actSt.totalFrames > 0)
+                                                                  ? Math.max(0.0, Math.min(1.0, actSt.positionFrames / actSt.totalFrames))
+                                                                  : 0.0
+
+                                // Dynamic Time Markings from Track Duration
+                                RowLayout {
                                     anchors.top: parent.top
                                     anchors.left: parent.left
                                     anchors.right: parent.right
-                                    anchors.margins: 6
-                                    spacing: 120
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    anchors.topMargin: 4
                                     Repeater {
-                                        model: 8
+                                        model: 6
                                         Label {
-                                            text: "0" + index + ":00"
+                                            Layout.fillWidth: index < 5
+                                            text: {
+                                                var st = waveTimelineBox.actSt
+                                                var dur = (st && st.totalFrames > 0 && st.sampleRate > 0) ? (st.totalFrames / st.sampleRate) : 0.0
+                                                var sec = Math.max(0, Math.round(dur * (index / 5.0)))
+                                                var m = Math.floor(sec / 60)
+                                                var s = sec % 60
+                                                return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s
+                                            }
                                             font.family: "Monospace"
                                             font.pixelSize: 9
-                                            color: "#435160"
+                                            color: "#4B5B6C"
                                         }
                                     }
                                 }
@@ -508,16 +706,56 @@ Item {
                                     color: "#192533"
                                 }
 
+                                Canvas {
+                                    id: waveCanvas
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 6
+                                    anchors.rightMargin: 6
+                                    anchors.topMargin: 16
+                                    anchors.bottomMargin: 6
+                                    onWidthChanged: consoleRoot.refreshWaveform()
+                                    onHeightChanged: requestPaint()
+                                    onPaint: {
+                                        var ctx = getContext("2d")
+                                        if (!ctx || width <= 4 || height <= 4) return
+                                        ctx.clearRect(0, 0, width, height)
+                                        var wd = consoleRoot.cachedWaveData
+                                        if (!wd || !wd.ready || !wd.bucketCount || wd.bucketCount <= 0) return
+
+                                        var n = wd.bucketCount
+                                        var minL = wd.minL
+                                        var maxL = wd.maxL
+                                        var minR = wd.minR
+                                        var maxR = wd.maxR
+                                        var midY = height * 0.5
+                                        var halfH = height * 0.46
+                                        var playX = waveTimelineBox.playRatio * width
+
+                                        for (var i = 0; i < n; ++i) {
+                                            var x0 = (i / n) * width
+                                            var wBar = Math.max(1.0, (width / n) - 0.35)
+                                            var mn = Math.min(minL[i], minR[i])
+                                            var mx = Math.max(maxL[i], maxR[i])
+                                            var yTop = midY - Math.max(0.0, mx) * halfH
+                                            var yBot = midY - Math.min(0.0, mn) * halfH
+                                            var barH = Math.max(1.5, yBot - yTop)
+
+                                            ctx.fillStyle = (x0 <= playX) ? "#36E3FF" : "#1C6E85"
+                                            ctx.fillRect(x0, yTop, wBar, barH)
+
+                                            // Inner RMS/peak core contrast
+                                            var innerTop = midY - Math.max(0.0, mx * 0.55) * halfH
+                                            var innerBot = midY - Math.min(0.0, mn * 0.55) * halfH
+                                            ctx.fillStyle = (x0 <= playX) ? "#8FF2FF" : "#2D9CB8"
+                                            ctx.fillRect(x0, innerTop, wBar, Math.max(1.0, innerBot - innerTop))
+                                        }
+                                    }
+                                }
+
                                 // Real Playhead Line + Cyan Top Handle Diamond
                                 Item {
-                                    property var actSt: {
-                                        var _t = consoleRoot.activeDeckPollTick
-                                        return EngineController.getDeckState(EngineController.activeDeckId)
-                                    }
-                                    property real ratio: (actSt && actSt.totalFrames > 0)
-                                                         ? Math.max(0.0, Math.min(1.0, actSt.positionFrames / actSt.totalFrames))
-                                                         : 0.5
-                                    x: Math.round(ratio * (parent.width - 12)) + 6
+                                    visible: waveTimelineBox.actSt && waveTimelineBox.actSt.totalFrames > 0
+                                    x: Math.round(waveTimelineBox.playRatio * (parent.width - 12)) + 6
                                     y: 2
                                     width: 1
                                     height: parent.height - 4
@@ -535,21 +773,43 @@ Item {
                                         y: 12
                                         width: 1.5
                                         height: parent.height - 12
-                                        color: "#802CD6F2"
+                                        color: "#992CD6F2"
                                     }
                                 }
 
                                 Label {
                                     anchors.centerIn: parent
-                                    text: qsTr("OVERVIEW WAVEFORM TIMELINE — NO WAVEFORM DATA")
+                                    visible: !consoleRoot.cachedWaveData || !consoleRoot.cachedWaveData.ready
+                                    text: {
+                                        var st = waveTimelineBox.actSt
+                                        if (!st || !st.path || st.path.length === 0)
+                                            return qsTr("OVERVIEW WAVEFORM TIMELINE — NO TRACK LOADED")
+                                        if (consoleRoot.cachedWaveData && consoleRoot.cachedWaveData.extracting)
+                                            return qsTr("EXTRACTING WAVEFORM...")
+                                        return qsTr("WAVEFORM READY ON LOAD")
+                                    }
                                     font.family: "Monospace"
                                     font.pixelSize: 11
                                     font.bold: true
                                     color: "#4E5F70"
                                 }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.LeftButton
+                                    cursorShape: (waveTimelineBox.actSt && waveTimelineBox.actSt.totalFrames > 0) ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    function seekAt(mx) {
+                                        var st = waveTimelineBox.actSt
+                                        if (!st || !st.totalFrames || st.totalFrames <= 0) return
+                                        var r = Math.max(0.0, Math.min(1.0, (mx - 6.0) / Math.max(1.0, parent.width - 12.0)))
+                                        EngineController.seek(EngineController.activeDeckId, Math.round(r * st.totalFrames))
+                                    }
+                                    onPressed: function(mouse) { seekAt(mouse.x) }
+                                    onPositionChanged: function(mouse) { if (pressed) seekAt(mouse.x) }
+                                }
                             }
 
-                            // Lower Spectrum + Composite EQ Curve Canvas (Real EQ Curve + Honest Gate G4 FFT Grid)
+                            // Lower Spectrum + Composite EQ Curve Canvas (Real FFT Analyzer + Draggable 32-PEQ Curve)
                             Rectangle {
                                 visible: consoleRoot.showSpectrum
                                 Layout.fillWidth: true
@@ -581,13 +841,15 @@ Item {
                                         var padB = 20
                                         var plotW = w - padL - padR
                                         var plotH = h - padT - padB
+                                        var logMin = Math.log(20.0)
+                                        var logSpan = Math.log(20000.0) - logMin
 
                                         // Log frequency grid (20 Hz .. 20 kHz)
                                         var freqs = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000]
                                         var labels = ["20Hz", "50", "100", "200", "500", "1k", "2k", "5k", "10k", "20kHz"]
                                         ctx.font = "10px Monospace"
                                         for (var i = 0; i < freqs.length; ++i) {
-                                            var xn = (Math.log(freqs[i]) - Math.log(20.0)) / (Math.log(20000.0) - Math.log(20.0))
+                                            var xn = (Math.log(freqs[i]) - logMin) / logSpan
                                             var x = padL + xn * plotW
                                             ctx.strokeStyle = freqs[i] === 1000 ? "#243445" : "#121a24"
                                             ctx.lineWidth = 1
@@ -619,46 +881,264 @@ Item {
                                             ctx.fillText(txt, padL + plotW + 4, y + 3)
                                         }
 
-                                        // Real EQ Response Curve (only when GEQ or PEQ active in AUTO or SPEC+EQ)
-                                        if (consoleRoot.showEqOverlay) {
-                                            var pts = consoleRoot.currentOpTab === 0
-                                                      ? EngineController.getGeqCurve(180)
-                                                      : (consoleRoot.peqEditListening
-                                                         ? EngineController.getListeningCurve(consoleRoot.peqRightChannel, 180)
-                                                         : EngineController.getPeqCurve(consoleRoot.peqRightChannel, 180))
+                                        // 1. Real-Time 2048-pt FFT Spectrum Fill + Peak Hold Trace
+                                        if (consoleRoot.spectrumHasSignal && consoleRoot.cachedSpectrumBins && consoleRoot.cachedSpectrumBins.length > 2) {
+                                            var sbins = consoleRoot.cachedSpectrumBins
+                                            var nSpec = sbins.length
+                                            var specBot = padT + plotH
+                                            var sGrad = ctx.createLinearGradient(0, padT, 0, specBot)
+                                            sGrad.addColorStop(0.0, "rgba(0, 212, 255, 0.30)")
+                                            sGrad.addColorStop(1.0, "rgba(0, 120, 175, 0.03)")
 
-                                            if (pts && pts.length > 1) {
-                                                // Soft under-curve glow fill
-                                                var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH)
-                                                if (consoleRoot.peqEditListening && consoleRoot.currentOpTab === 1) {
-                                                    grad.addColorStop(0.0, "rgba(245, 184, 65, 0.22)")
-                                                    grad.addColorStop(1.0, "rgba(245, 184, 65, 0.0)")
-                                                    ctx.strokeStyle = "#F5B841"
-                                                } else {
-                                                    grad.addColorStop(0.0, "rgba(0, 229, 255, 0.22)")
-                                                    grad.addColorStop(1.0, "rgba(0, 229, 255, 0.0)")
-                                                    ctx.strokeStyle = "#2FE0FF"
-                                                }
+                                            ctx.beginPath()
+                                            for (var si = 0; si < nSpec; ++si) {
+                                                var sx = padL + (si / (nSpec - 1)) * plotW
+                                                var sdb = Math.max(-90.0, Math.min(0.0, sbins[si]))
+                                                var sy = padT + ((-sdb) / 90.0) * plotH
+                                                if (si === 0) ctx.moveTo(sx, sy)
+                                                else ctx.lineTo(sx, sy)
+                                            }
+                                            ctx.strokeStyle = "rgba(64, 224, 255, 0.72)"
+                                            ctx.lineWidth = 1.4
+                                            ctx.stroke()
 
+                                            ctx.lineTo(padL + plotW, specBot)
+                                            ctx.lineTo(padL, specBot)
+                                            ctx.closePath()
+                                            ctx.fillStyle = sGrad
+                                            ctx.fill()
+
+                                            // Peak-hold hairline
+                                            var ph = consoleRoot.spectrumPeakHold
+                                            if (ph && ph.length === nSpec) {
                                                 ctx.beginPath()
-                                                var yZero = padT + (18.0 / 36.0) * plotH
+                                                for (var pi = 0; pi < nSpec; ++pi) {
+                                                    var pxh = padL + (pi / (nSpec - 1)) * plotW
+                                                    var phdb = Math.max(-90.0, Math.min(0.0, ph[pi]))
+                                                    var pyh = padT + ((-phdb) / 90.0) * plotH
+                                                    if (pi === 0) ctx.moveTo(pxh, pyh)
+                                                    else ctx.lineTo(pxh, pyh)
+                                                }
+                                                ctx.strokeStyle = "rgba(255, 196, 70, 0.45)"
+                                                ctx.lineWidth = 1.0
+                                                ctx.stroke()
+                                            }
+                                        }
+
+                                        // 2. Real EQ Response Curve & Draggable Nodes
+                                        if (consoleRoot.showEqOverlay) {
+                                            var yZero = padT + (18.0 / 36.0) * plotH
+                                            function drawEqCurve(pts, strokeHex, fillTopRgba, lw, dashed) {
+                                                if (!pts || pts.length <= 1) return
+                                                ctx.save()
+                                                if (dashed && ctx.setLineDash) ctx.setLineDash([4, 4])
+                                                ctx.beginPath()
                                                 for (var k = 0; k < pts.length; ++k) {
                                                     var f = pts[k].f
                                                     var gdb = Math.max(-18.0, Math.min(18.0, pts[k].db))
-                                                    var px = padL + ((Math.log(f) - Math.log(20.0)) / (Math.log(20000.0) - Math.log(20.0))) * plotW
+                                                    var px = padL + ((Math.log(f) - logMin) / logSpan) * plotW
                                                     var py = padT + ((18.0 - gdb) / 36.0) * plotH
                                                     if (k === 0) ctx.moveTo(px, py)
                                                     else ctx.lineTo(px, py)
                                                 }
-                                                ctx.lineWidth = 2.4
+                                                ctx.strokeStyle = strokeHex
+                                                ctx.lineWidth = lw
                                                 ctx.stroke()
-
-                                                ctx.lineTo(padL + plotW, yZero)
-                                                ctx.lineTo(padL, yZero)
-                                                ctx.closePath()
-                                                ctx.fillStyle = grad
-                                                ctx.fill()
+                                                if (fillTopRgba) {
+                                                    var grad = ctx.createLinearGradient(0, padT, 0, padT + plotH)
+                                                    grad.addColorStop(0.0, fillTopRgba)
+                                                    grad.addColorStop(1.0, "rgba(0, 0, 0, 0.0)")
+                                                    ctx.lineTo(padL + plotW, yZero)
+                                                    ctx.lineTo(padL, yZero)
+                                                    ctx.closePath()
+                                                    ctx.fillStyle = grad
+                                                    ctx.fill()
+                                                }
+                                                ctx.restore()
                                             }
+
+                                            if (consoleRoot.currentOpTab === 0) {
+                                                drawEqCurve(EngineController.getGeqCurve(180), "#2FE0FF", "rgba(0, 229, 255, 0.22)", 2.4, false)
+                                                consoleRoot.cachedPeqNodes = []
+                                            } else {
+                                                if (consoleRoot.showGeqOverlayOnPeq) {
+                                                    drawEqCurve(EngineController.getGeqCurve(180), "rgba(120, 208, 255, 0.45)", null, 1.4, true)
+                                                }
+                                                var drawBoth = (consoleRoot.monitorChannelMode === 0)
+                                                var showL = drawBoth || consoleRoot.monitorChannelMode === 1 || (consoleRoot.monitorChannelMode === 3 && !consoleRoot.peqRightChannel)
+                                                var showR = drawBoth || consoleRoot.monitorChannelMode === 2 || (consoleRoot.monitorChannelMode === 3 && consoleRoot.peqRightChannel)
+                                                if (showL) {
+                                                    var ptsL = consoleRoot.peqEditListening
+                                                               ? EngineController.getListeningCurve(false, 180)
+                                                               : EngineController.getPeqCurve(false, 180)
+                                                    drawEqCurve(ptsL, consoleRoot.peqEditListening ? "#4CE0B3" : "#2FE0FF",
+                                                                !consoleRoot.peqRightChannel ? "rgba(0, 229, 255, 0.16)" : null,
+                                                                !consoleRoot.peqRightChannel ? 2.4 : 1.5, false)
+                                                }
+                                                if (showR) {
+                                                    var ptsR = consoleRoot.peqEditListening
+                                                               ? EngineController.getListeningCurve(true, 180)
+                                                               : EngineController.getPeqCurve(true, 180)
+                                                    drawEqCurve(ptsR, "#F5B841",
+                                                                consoleRoot.peqRightChannel ? "rgba(245, 184, 65, 0.16)" : null,
+                                                                consoleRoot.peqRightChannel ? 2.4 : 1.5, false)
+                                                }
+
+                                                // Draw enabled PEQ band nodes (unused hidden; slight radial offset when overlapping)
+                                                var nodes = consoleRoot.computeVisiblePeqNodes(plotW, plotH, padL, padT)
+                                                consoleRoot.cachedPeqNodes = nodes
+                                                for (var ni = 0; ni < nodes.length; ++ni) {
+                                                    var nd = nodes[ni]
+                                                    var isSel = (nd.isRight === consoleRoot.peqRightChannel && nd.band === consoleRoot.selectedPeqBand)
+                                                    var isHov = (nd.isRight === consoleRoot.hoveredPeqIsRight && nd.band === consoleRoot.hoveredPeqBand)
+                                                    var col = nd.isRight ? "#F5B841" : (consoleRoot.peqEditListening ? "#4CE0B3" : "#2FE0FF")
+
+                                                    if (Math.abs(nd.drawX - nd.trueX) > 0.5 || Math.abs(nd.drawY - nd.trueY) > 0.5) {
+                                                        ctx.strokeStyle = "rgba(255,255,255,0.28)"
+                                                        ctx.lineWidth = 1
+                                                        ctx.beginPath()
+                                                        ctx.moveTo(nd.trueX, nd.trueY)
+                                                        ctx.lineTo(nd.drawX, nd.drawY)
+                                                        ctx.stroke()
+                                                    }
+
+                                                    if (isSel || isHov) {
+                                                        ctx.strokeStyle = isSel ? "#FFFFFF" : col
+                                                        ctx.lineWidth = 1.6
+                                                        ctx.beginPath()
+                                                        ctx.arc(nd.drawX, nd.drawY, isSel ? 9 : 7.5, 0, Math.PI * 2)
+                                                        ctx.stroke()
+                                                    }
+
+                                                    ctx.fillStyle = isSel ? "#FFFFFF" : "#0A1017"
+                                                    ctx.strokeStyle = col
+                                                    ctx.lineWidth = 2.0
+                                                    ctx.beginPath()
+                                                    ctx.arc(nd.drawX, nd.drawY, 5.0, 0, Math.PI * 2)
+                                                    ctx.fill()
+                                                    ctx.stroke()
+
+                                                    if (isSel) {
+                                                        var tag = (nd.isRight ? "R" : "L") + (nd.band + 1) + " " + consoleRoot.formatHz(nd.frequency) + " " + (nd.gainDb >= 0 ? "+" : "") + nd.gainDb.toFixed(1) + "dB"
+                                                        ctx.font = "bold 9px Monospace"
+                                                        var tagW = Math.max(142, ctx.measureText(tag).width + 10)
+                                                        var txLbl = Math.min(padL + plotW - tagW - 2, Math.max(padL + 4, nd.drawX + 10))
+                                                        var tyLbl = Math.max(padT + 14, nd.drawY - 10)
+                                                        ctx.fillStyle = "rgba(9, 13, 19, 0.88)"
+                                                        ctx.fillRect(txLbl - 3, tyLbl - 10, tagW, 14)
+                                                        ctx.fillStyle = col
+                                                        ctx.fillText(tag, txLbl + 2, tyLbl)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        enabled: consoleRoot.currentOpTab === 1 && consoleRoot.showEqOverlay && !consoleRoot.isDirect
+                                        hoverEnabled: true
+                                        cursorShape: (consoleRoot.draggedPeqBand >= 0 || consoleRoot.hoveredPeqBand >= 0) ? Qt.CrossCursor : Qt.ArrowCursor
+
+                                        function findHitNode(mx, my) {
+                                            var nodes = consoleRoot.cachedPeqNodes
+                                            var best = null
+                                            var bestDist = 196.0 // 14px radius
+                                            for (var i = 0; i < nodes.length; ++i) {
+                                                var dx = mx - nodes[i].drawX
+                                                var dy = my - nodes[i].drawY
+                                                var d2 = dx * dx + dy * dy
+                                                if (d2 <= bestDist) {
+                                                    bestDist = d2
+                                                    best = nodes[i]
+                                                }
+                                            }
+                                            return best
+                                        }
+
+                                        function applyCoords(mx, my, isR, bandIdx) {
+                                            var padL = 28, padR = 28, padT = 10, padB = 20
+                                            var plotW = Math.max(1.0, parent.width - padL - padR)
+                                            var plotH = Math.max(1.0, parent.height - padT - padB)
+                                            var xn = Math.max(0.0, Math.min(1.0, (mx - padL) / plotW))
+                                            var yn = Math.max(0.0, Math.min(1.0, (my - padT) / plotH))
+                                            var freq = 20.0 * Math.pow(1000.0, xn)
+                                            var gain = Math.max(-18.0, Math.min(18.0, 18.0 - yn * 36.0))
+                                            var bd = consoleRoot.peqEditListening
+                                                     ? EngineController.getListeningBand(isR, bandIdx)
+                                                     : EngineController.getPeqBand(isR, bandIdx)
+                                            var qVal = (bd && bd.q !== undefined) ? bd.q : peqQKnob.value
+                                            var tVal = (bd && bd.type !== undefined) ? bd.type : consoleRoot.peqBandTypeIndex
+                                            if (consoleRoot.peqEditListening) {
+                                                EngineController.setListeningBand(isR, bandIdx, freq, gain, qVal, tVal, true)
+                                            } else {
+                                                EngineController.setPeqBand(isR, bandIdx, freq, gain, qVal, tVal, true)
+                                            }
+                                            consoleRoot.peqGridTick++
+                                        }
+
+                                        onPressed: function(mouse) {
+                                            var hit = findHitNode(mouse.x, mouse.y)
+                                            if (hit) {
+                                                consoleRoot.peqRightChannel = hit.isRight
+                                                consoleRoot.selectedPeqBand = hit.band
+                                                consoleRoot.draggedPeqBand = hit.band
+                                                consoleRoot.draggedPeqIsRight = hit.isRight
+                                                consoleRoot.refreshPeqInspector()
+                                                monitorCanvas.requestPaint()
+                                            } else {
+                                                consoleRoot.draggedPeqBand = -1
+                                            }
+                                        }
+                                        onPositionChanged: function(mouse) {
+                                            if (pressed && consoleRoot.draggedPeqBand >= 0) {
+                                                applyCoords(mouse.x, mouse.y, consoleRoot.draggedPeqIsRight, consoleRoot.draggedPeqBand)
+                                            } else {
+                                                var hit = findHitNode(mouse.x, mouse.y)
+                                                var nb = hit ? hit.band : -1
+                                                var nr = hit ? hit.isRight : false
+                                                if (nb !== consoleRoot.hoveredPeqBand || nr !== consoleRoot.hoveredPeqIsRight) {
+                                                    consoleRoot.hoveredPeqBand = nb
+                                                    consoleRoot.hoveredPeqIsRight = nr
+                                                    monitorCanvas.requestPaint()
+                                                }
+                                            }
+                                        }
+                                        onReleased: {
+                                            consoleRoot.draggedPeqBand = -1
+                                            monitorCanvas.requestPaint()
+                                        }
+                                        onDoubleClicked: function(mouse) {
+                                            var hit = findHitNode(mouse.x, mouse.y)
+                                            if (hit) {
+                                                var bd = consoleRoot.peqEditListening
+                                                         ? EngineController.getListeningBand(hit.isRight, hit.band)
+                                                         : EngineController.getPeqBand(hit.isRight, hit.band)
+                                                var qVal = (bd && bd.q !== undefined) ? bd.q : 1.0
+                                                var tVal = (bd && bd.type !== undefined) ? bd.type : 0
+                                                if (consoleRoot.peqEditListening) {
+                                                    EngineController.setListeningBand(hit.isRight, hit.band, hit.frequency, 0.0, qVal, tVal, true)
+                                                } else {
+                                                    EngineController.setPeqBand(hit.isRight, hit.band, hit.frequency, 0.0, qVal, tVal, true)
+                                                }
+                                            }
+                                        }
+                                        onWheel: function(wheel) {
+                                            var hit = findHitNode(wheel.x, wheel.y)
+                                            var isR = hit ? hit.isRight : consoleRoot.peqRightChannel
+                                            var bandIdx = hit ? hit.band : consoleRoot.selectedPeqBand
+                                            var bd = consoleRoot.peqEditListening
+                                                     ? EngineController.getListeningBand(isR, bandIdx)
+                                                     : EngineController.getPeqBand(isR, bandIdx)
+                                            if (!bd || !bd.enabled) return
+                                            var factor = wheel.angleDelta.y > 0 ? 1.12 : (1.0 / 1.12)
+                                            var nextQ = Math.max(0.1, Math.min(18.0, bd.q * factor))
+                                            if (consoleRoot.peqEditListening) {
+                                                EngineController.setListeningBand(isR, bandIdx, bd.frequency, bd.gainDb, nextQ, bd.type, true)
+                                            } else {
+                                                EngineController.setPeqBand(isR, bandIdx, bd.frequency, bd.gainDb, nextQ, bd.type, true)
+                                            }
+                                            consoleRoot.peqGridTick++
                                         }
                                     }
                                 }
@@ -667,12 +1147,20 @@ Item {
                                     anchors.top: parent.top
                                     anchors.right: parent.right
                                     anchors.margins: 8
-                                    text: consoleRoot.showEqOverlay
-                                          ? qsTr("EQ RESPONSE ACTIVE  •  FFT ANALYZER INACTIVE")
-                                          : qsTr("REAL-TIME FFT SPECTRUM INACTIVE")
+                                    text: {
+                                        if (consoleRoot.spectrumHasSignal) {
+                                            var chTxt = consoleRoot.monitorChannelMode === 0 ? "L+R"
+                                                        : (consoleRoot.monitorChannelMode === 1 ? "L"
+                                                           : (consoleRoot.monitorChannelMode === 2 ? "R" : "AUTO"))
+                                            return qsTr("2048-PT HANN FFT (%1)").arg(chTxt)
+                                        }
+                                        return consoleRoot.showEqOverlay
+                                               ? qsTr("EQ RESPONSE ACTIVE  •  FFT STANDBY")
+                                               : qsTr("REAL-TIME FFT SPECTRUM STANDBY")
+                                    }
                                     font.family: "Monospace"
                                     font.pixelSize: 10
-                                    color: "#526374"
+                                    color: consoleRoot.spectrumHasSignal ? "#5ED2EB" : "#526374"
                                 }
                             }
 
@@ -894,13 +1382,89 @@ Item {
                                         onClicked: consoleRoot.linkMasterLR = !consoleRoot.linkMasterLR
                                     }
 
-                                    ConsoleButton {
-                                        text: qsTr("BAL: C")
-                                        implicitWidth: 82
+                                    Rectangle {
+                                        id: balPill
+                                        implicitWidth: 92
                                         implicitHeight: 25
-                                        fontSize: 9
-                                        enabled: false
-                                        toolTipText: qsTr("Independent Balance attenuation (-∞ dB) — Not connected yet")
+                                        radius: 4
+                                        color: "#090D12"
+                                        border.color: Math.abs(EngineController.masterBalance) > 0.01 ? "#00E5FF" : "#2E3744"
+                                        border.width: 1
+                                        opacity: !consoleRoot.isDirect ? 1.0 : 0.45
+
+                                        // Center detent marker
+                                        Rectangle {
+                                            x: parent.width * 0.5 - 0.5
+                                            y: 2
+                                            width: 1
+                                            height: parent.height - 4
+                                            color: "#2A3340"
+                                        }
+
+                                        // Bipolar L/R attenuation bar
+                                        Rectangle {
+                                            readonly property double balVal: EngineController.masterBalance
+                                            y: parent.height - 4
+                                            height: 2
+                                            radius: 1
+                                            x: balVal < 0 ? (parent.width * 0.5 + balVal * (parent.width * 0.44)) : (parent.width * 0.5)
+                                            width: Math.abs(balVal) * (parent.width * 0.44)
+                                            color: "#00E5FF"
+                                            visible: Math.abs(balVal) > 0.01
+                                        }
+
+                                        Text {
+                                            anchors.centerIn: parent
+                                            readonly property double b: EngineController.masterBalance
+                                            readonly property int pct: Math.round(Math.abs(b) * 100)
+                                            text: pct < 1 ? qsTr("BAL: C") : (b < 0 ? qsTr("BAL: L%1").arg(pct) : qsTr("BAL: R%1").arg(pct))
+                                            font.family: "Monospace"
+                                            font.pixelSize: 9
+                                            font.bold: true
+                                            color: pct >= 1 ? "#00E5FF" : "#C4CCD6"
+                                        }
+
+                                        MouseArea {
+                                            id: balMouse
+                                            anchors.fill: parent
+                                            enabled: !consoleRoot.isDirect
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            property double dragStartX: 0.0
+                                            property double dragStartBal: 0.0
+                                            onPressed: function(mouse) {
+                                                if (mouse.button === Qt.RightButton) {
+                                                    EngineController.setMasterBalance(0.0);
+                                                    return;
+                                                }
+                                                dragStartX = mouse.x;
+                                                dragStartBal = EngineController.masterBalance;
+                                            }
+                                            onPositionChanged: function(mouse) {
+                                                if (pressed && (mouse.buttons & Qt.LeftButton)) {
+                                                    let next = Math.max(-1.0, Math.min(1.0, dragStartBal + (mouse.x - dragStartX) / 60.0));
+                                                    if (Math.abs(next) < 0.03) next = 0.0;
+                                                    EngineController.setMasterBalance(next);
+                                                }
+                                            }
+                                            onDoubleClicked: EngineController.setMasterBalance(0.0)
+                                            onWheel: function(wheel) {
+                                                const step = wheel.angleDelta.y > 0 ? 0.05 : -0.05;
+                                                let next = Math.max(-1.0, Math.min(1.0, EngineController.masterBalance + step));
+                                                if (Math.abs(next) < 0.02) next = 0.0;
+                                                EngineController.setMasterBalance(next);
+                                            }
+                                        }
+
+                                        ToolTip.visible: balMouse.containsMouse
+                                        ToolTip.delay: 450
+                                        ToolTip.text: {
+                                            const b = EngineController.masterBalance;
+                                            const lGain = b > 0 ? Math.max(0, 1 - b) : 1;
+                                            const rGain = b < 0 ? Math.max(0, 1 + b) : 1;
+                                            const fmt = function(g) { return g <= 0.0001 ? "-∞ dB" : (20 * Math.log(g) / Math.LN10).toFixed(1) + " dB"; };
+                                            return qsTr("Balance (drag L/R, double-click or right-click to Center)\nL: %1  |  R: %2").arg(fmt(lGain)).arg(fmt(rGain));
+                                        }
                                     }
 
                                     Item { Layout.fillWidth: true }
@@ -1054,10 +1618,16 @@ Item {
                                     ConsoleButton {
                                         Layout.fillWidth: true
                                         implicitHeight: 30
-                                        text: qsTr("L MUTE")
+                                        text: EngineController.masterMuteL ? qsTr("L MUTED") : qsTr("L MUTE")
                                         fontSize: 9
-                                        enabled: false
-                                        toolTipText: qsTr("Independent Left Mute (auto-clears Direct Mode) — Not connected yet")
+                                        anodizedFill: EngineController.masterMuteL
+                                        anodizedTop: "#B33339"
+                                        anodizedBottom: "#61171B"
+                                        anodizedText: "#FFE8EA"
+                                        accentColor: "#FF5252"
+                                        highlighted: EngineController.masterMuteL
+                                        toolTipText: qsTr("Independent Left Mute (auto-clears Direct Mode)")
+                                        onClicked: EngineController.setMasterMuteL(!EngineController.masterMuteL)
                                     }
 
                                     ConsoleButton {
@@ -1077,10 +1647,16 @@ Item {
                                     ConsoleButton {
                                         Layout.fillWidth: true
                                         implicitHeight: 30
-                                        text: qsTr("R MUTE")
+                                        text: EngineController.masterMuteR ? qsTr("R MUTED") : qsTr("R MUTE")
                                         fontSize: 9
-                                        enabled: false
-                                        toolTipText: qsTr("Independent Right Mute (auto-clears Direct Mode) — Not connected yet")
+                                        anodizedFill: EngineController.masterMuteR
+                                        anodizedTop: "#B33339"
+                                        anodizedBottom: "#61171B"
+                                        anodizedText: "#FFE8EA"
+                                        accentColor: "#FF5252"
+                                        highlighted: EngineController.masterMuteR
+                                        toolTipText: qsTr("Independent Right Mute (auto-clears Direct Mode)")
+                                        onClicked: EngineController.setMasterMuteR(!EngineController.masterMuteR)
                                     }
                                 }
                             }
@@ -1134,10 +1710,15 @@ Item {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
                                     leftPadding: 4; rightPadding: 4
-                                    text: qsTr("DIM\n-20dB")
+                                    text: EngineController.monitorDimEnabled ? qsTr("DIM\nON -20dB") : qsTr("DIM\n-20dB")
                                     fontSize: 10
-                                    enabled: false
-                                    toolTipText: qsTr("Fixed -20 dB Monitor-Only Dim — Not connected yet")
+                                    showLed: true
+                                    ledColor: EngineController.monitorDimEnabled ? "#FFB300" : "#444E5C"
+                                    accentColor: "#FFB300"
+                                    highlighted: EngineController.monitorDimEnabled
+                                    enabled: !consoleRoot.isDirect
+                                    toolTipText: qsTr("Fixed -20 dB Monitor-Only Dim (Listening & Render Monitor only; never affects Render-File)")
+                                    onClicked: EngineController.setMonitorDimEnabled(!EngineController.monitorDimEnabled)
                                 }
 
                                 ConsoleButton {
@@ -1830,8 +2411,8 @@ Item {
                                         labelText: qsTr("IN")
                                         minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
                                         unitSuffix: "dB"; decimals: 1; knobDiameter: 94; arcColor: "#33E3FF"
-                                        enabled: !consoleRoot.isDirect
-                                        onValueEdited: function(v) { value = v; EngineController.setDspTrim(consoleRoot.peqEditListening ? "listening_peq" : "peq", false, v) }
+                                        enabled: !consoleRoot.isDirect && !consoleRoot.peqEditListening
+                                        onValueEdited: function(v) { value = v; EngineController.setDspTrim("peq", false, v) }
                                     }
                                     ConsoleKnob {
                                         id: peqOutTrimKnob
@@ -1839,8 +2420,8 @@ Item {
                                         labelText: qsTr("OUT")
                                         minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
                                         unitSuffix: "dB"; decimals: 1; knobDiameter: 94; arcColor: "#33E3FF"
-                                        enabled: !consoleRoot.isDirect
-                                        onValueEdited: function(v) { value = v; EngineController.setDspTrim(consoleRoot.peqEditListening ? "listening_peq" : "peq", true, v) }
+                                        enabled: !consoleRoot.isDirect && !consoleRoot.peqEditListening
+                                        onValueEdited: function(v) { value = v; EngineController.setDspTrim("peq", true, v) }
                                     }
 
                                     Item { Layout.fillHeight: true }
@@ -2828,17 +3409,15 @@ Item {
                                         Label {
                                             anchors.verticalCenter: parent.verticalCenter
                                             anchors.left: parent.left; anchors.leftMargin: 8
-                                            text: (EngineController.audioBackend || "PipeWire") + " (Live)"
+                                            text: qsTr("LIVE %1").arg((EngineController.audioBackend || "PipeWire").toUpperCase())
+                                            font.family: "Monospace"
                                             font.pixelSize: 11; color: "#DCE6F0"
                                         }
                                     }
                                     ConsoleButton {
                                         text: qsTr("SCAN PORTS")
                                         implicitWidth: 96; implicitHeight: 26; fontSize: 10
-                                        onClicked: {
-                                            consoleRoot.portDiscoveryList = EngineController.discoverExternalInsertPorts()
-                                            patchBayCanvas.requestPaint()
-                                        }
+                                        onClicked: consoleRoot.refreshExternalPorts()
                                     }
                                 }
 
@@ -2850,9 +3429,17 @@ Item {
                                         id: extClientCombo
                                         Layout.fillWidth: true
                                         implicitHeight: 26
+                                        textRole: "clientName"
                                         model: consoleRoot.portDiscoveryList.length > 0
                                                ? consoleRoot.portDiscoveryList
-                                               : [qsTr("No External Insert Ports Discovered")]
+                                               : [{ clientName: qsTr("No External Insert Ports Discovered") }]
+                                        currentIndex: consoleRoot.portDiscoveryList.length > 0
+                                                      ? Math.max(0, Math.min(consoleRoot.portDiscoveryList.length - 1, consoleRoot.selectedTargetClientIdx))
+                                                      : 0
+                                        onActivated: function(index) {
+                                            consoleRoot.selectedTargetClientIdx = index
+                                            patchBayCanvas.requestPaint()
+                                        }
                                         contentItem: Label {
                                             leftPadding: 8
                                             rightPadding: 20
@@ -2891,10 +3478,28 @@ Item {
                                             ctx.clearRect(0, 0, width, height)
 
                                             var leftLabels = ["SEND L", "SEND R", "RETURN L", "RETURN R"]
-                                            var connected = EngineController.externalInsertState >= 2
+                                            var st = EngineController.externalInsertState
+                                            var connected = (st === 3 || st === 4)
+                                            var sel = (consoleRoot.portDiscoveryList && consoleRoot.portDiscoveryList.length > 0)
+                                                      ? consoleRoot.portDiscoveryList[Math.max(0, Math.min(consoleRoot.portDiscoveryList.length - 1, consoleRoot.selectedTargetClientIdx))]
+                                                      : null
+                                            function shortPort(p, fb) {
+                                                if (!p || p.length === 0) return fb
+                                                return p.length > 20 ? ("…" + p.slice(p.length - 19)) : p
+                                            }
                                             var rightLabels = connected
-                                                              ? ["ext:in_1", "ext:in_2", "ext:out_1", "ext:out_2"]
-                                                              : [qsTr("(unpatched)"), qsTr("(unpatched)"), qsTr("(unpatched)"), qsTr("(unpatched)")]
+                                                              ? [
+                                                                  shortPort(EngineController.externalInsertSendPortL, "ext:in_1"),
+                                                                  shortPort(EngineController.externalInsertSendPortR, "ext:in_2"),
+                                                                  shortPort(EngineController.externalInsertReturnPortL, "ext:out_1"),
+                                                                  shortPort(EngineController.externalInsertReturnPortR, "ext:out_2")
+                                                              ]
+                                                              : (sel ? [
+                                                                  shortPort(sel.sendPortL, qsTr("(candidate)")),
+                                                                  shortPort(sel.sendPortR, qsTr("(candidate)")),
+                                                                  shortPort(sel.returnPortL, qsTr("(candidate)")),
+                                                                  shortPort(sel.returnPortR, qsTr("(candidate)"))
+                                                              ] : [qsTr("(unpatched)"), qsTr("(unpatched)"), qsTr("(unpatched)"), qsTr("(unpatched)")])
                                             ctx.font = "11px Monospace"
                                             for (var i = 0; i < 4; ++i) {
                                                 var y = 16 + (i / 3.0) * (height - 32)
@@ -2970,12 +3575,16 @@ Item {
 
                                     // Left 2/3: Larger STATUS Box
                                     Rectangle {
+                                        readonly property int st: EngineController.externalInsertState
+                                        readonly property bool isLive: (st === 3 || st === 4)
+                                        readonly property bool isWarn: (st === 7 || st === 9)
+                                        readonly property bool isErr: (st === 5 || st === 6 || st === 10)
                                         Layout.fillWidth: true
                                         Layout.preferredWidth: 520
                                         Layout.fillHeight: true
                                         radius: 4
-                                        color: EngineController.externalInsertState >= 2 ? "#0A1E15" : "#0A1116"
-                                        border.color: EngineController.externalInsertState >= 2 ? "#257852" : "#2D3B48"
+                                        color: isErr ? "#291215" : (isWarn ? "#2C220D" : (isLive ? "#0A1E15" : "#0A1116"))
+                                        border.color: isErr ? "#A83B45" : (isWarn ? "#D49B2A" : (isLive ? "#257852" : "#2D3B48"))
                                         border.width: 1
 
                                         Column {
@@ -2994,16 +3603,27 @@ Item {
                                                 Rectangle {
                                                     anchors.verticalCenter: parent.verticalCenter
                                                     width: 9; height: 9; radius: 4.5
-                                                    color: EngineController.externalInsertState >= 2 ? "#00E676" : "#5B6B7A"
+                                                    color: parent.parent.parent.isErr ? "#FF5252"
+                                                           : (parent.parent.parent.isWarn ? "#FFB300"
+                                                              : (parent.parent.parent.isLive ? "#00E676" : "#5B6B7A"))
                                                 }
                                                 Label {
                                                     text: EngineController.externalInsertStateText.toUpperCase()
                                                     font.family: "Monospace"
                                                     font.pixelSize: 17
                                                     font.bold: true
-                                                    color: EngineController.externalInsertState >= 2 ? "#00E676" : "#D2E0EC"
+                                                    color: parent.parent.parent.isErr ? "#FF8A8A"
+                                                           : (parent.parent.parent.isWarn ? "#FFD166"
+                                                              : (parent.parent.parent.isLive ? "#00E676" : "#D2E0EC"))
                                                 }
                                             }
+                                        }
+                                        ToolTip.visible: extStatusHover.containsMouse && EngineController.externalInsertLastError.length > 0
+                                        ToolTip.text: EngineController.externalInsertLastError
+                                        MouseArea {
+                                            id: extStatusHover
+                                            anchors.fill: parent
+                                            hoverEnabled: true
                                         }
                                     }
 
@@ -3110,8 +3730,8 @@ Item {
                                                 Layout.preferredHeight: 20
                                                 horizontal: true
                                                 segmentCount: 32
-                                                peakValue: EngineController.masterPeakL
-                                                rmsValue: EngineController.masterRmsL
+                                                peakValue: EngineController.externalInsertSendPeak
+                                                rmsValue: EngineController.externalInsertSendPeak * 0.72
                                             }
                                         }
 
@@ -3132,8 +3752,8 @@ Item {
                                                 Layout.preferredHeight: 20
                                                 horizontal: true
                                                 segmentCount: 32
-                                                peakValue: EngineController.masterPeakR
-                                                rmsValue: EngineController.masterRmsR
+                                                peakValue: EngineController.externalInsertReturnPeak
+                                                rmsValue: EngineController.externalInsertReturnPeak * 0.72
                                             }
                                         }
                                     }
@@ -3148,10 +3768,13 @@ Item {
                                     ConsoleButton {
                                         Layout.fillWidth: true
                                         implicitHeight: 38
-                                        text: qsTr("CONNECT / RECONNECT")
+                                        text: (EngineController.externalInsertState === 3 || EngineController.externalInsertState === 4)
+                                              ? qsTr("RECONNECT HOST")
+                                              : qsTr("CONNECT HOST")
                                         fontSize: 11
                                         accentColor: "#00E676"
-                                        onClicked: consoleRoot.portDiscoveryList = EngineController.discoverExternalInsertPorts()
+                                        enabled: !consoleRoot.isDirect
+                                        onClicked: consoleRoot.connectSelectedExternalHost()
                                     }
                                     ConsoleButton {
                                         Layout.fillWidth: true

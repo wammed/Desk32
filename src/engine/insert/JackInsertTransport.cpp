@@ -121,8 +121,22 @@ std::vector<ExternalPortInfo> JackInsertTransport::discoverHosts(double defaultS
         const std::string clientPrefix = full.substr(0, colon);
         if (isSelfJackClient(clientPrefix)) continue;
 
+        const std::string portSuffix = full.substr(colon + 1);
+        std::string lo = portSuffix;
+        std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+        if (lo.find("midi") != std::string::npos ||
+            lo.find("events-in") != std::string::npos ||
+            lo.find("events_in") != std::string::npos ||
+            lo.find("events-out") != std::string::npos ||
+            lo.find("events_out") != std::string::npos ||
+            lo.find("control") != std::string::npos) {
+            continue;
+        }
+
         jack_port_t* portObj = jack_port_by_name(client, full.c_str());
         if (!portObj) continue;
+        const char* ptype = jack_port_type(portObj);
+        if (!ptype || std::strcmp(ptype, JACK_DEFAULT_AUDIO_TYPE) != 0) continue;
         const int flags = jack_port_flags(portObj);
         auto& b = buckets[clientPrefix];
         if ((flags & JackPortIsInput) != 0) {

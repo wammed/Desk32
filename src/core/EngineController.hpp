@@ -32,6 +32,7 @@
 #include "engine/insert/BufferedInsertTransport.hpp"
 #include "engine/insert/PipeWireInsertTransport.hpp"
 #include "engine/insert/JackInsertTransport.hpp"
+#include "engine/audio/WaveformExtractor.hpp"
 #include "core/log/LogService.hpp"
 
 namespace desk32::core {
@@ -49,7 +50,11 @@ class EngineController : public QObject {
     Q_PROPERTY(double masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
     Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY masterGainLChanged)
     Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY masterGainRChanged)
+    Q_PROPERTY(double masterBalance READ masterBalance WRITE setMasterBalance NOTIFY masterBalanceChanged)
     Q_PROPERTY(bool masterMute READ isMasterMute WRITE setMasterMute NOTIFY masterMuteChanged)
+    Q_PROPERTY(bool masterMuteL READ isMasterMuteL WRITE setMasterMuteL NOTIFY masterMuteLChanged)
+    Q_PROPERTY(bool masterMuteR READ isMasterMuteR WRITE setMasterMuteR NOTIFY masterMuteRChanged)
+    Q_PROPERTY(bool monitorDimEnabled READ isMonitorDimEnabled WRITE setMonitorDimEnabled NOTIFY monitorDimEnabledChanged)
     Q_PROPERTY(double masterPeakL READ masterPeakL NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double masterPeakR READ masterPeakR NOTIFY dspTelemetryChanged)
     Q_PROPERTY(double preDspPeakL READ preDspPeakL NOTIFY dspTelemetryChanged)
@@ -73,6 +78,8 @@ class EngineController : public QObject {
     Q_PROPERTY(int backendStatus READ backendStatus NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString backendStatusText READ backendStatusText NOTIFY diagnosticsChanged)
     Q_PROPERTY(QString audioBackend READ audioBackend WRITE setAudioBackend NOTIFY audioBackendChanged)
+    Q_PROPERTY(QString graphicsBackend READ graphicsBackend NOTIFY diagnosticsChanged)
+    Q_PROPERTY(QString gpuRendererName READ gpuRendererName NOTIFY diagnosticsChanged)
 
     // Phase 2: Dynamic DSP Telemetry & Status Properties
     Q_PROPERTY(double compressorGainReductionDb READ compressorGainReductionDb NOTIFY dspTelemetryChanged)
@@ -102,6 +109,8 @@ class EngineController : public QObject {
     Q_PROPERTY(int externalInsertDisconnectPolicy READ externalInsertDisconnectPolicy WRITE setExternalInsertDisconnectPolicy NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(bool externalInsertCalibrating READ isExternalInsertCalibrating NOTIFY externalInsertStatusChanged)
     Q_PROPERTY(bool externalInsertSimulationMode READ isExternalInsertSimulationMode NOTIFY externalInsertStatusChanged)
+    Q_PROPERTY(double externalInsertSendPeak READ externalInsertSendPeak NOTIFY dspTelemetryChanged)
+    Q_PROPERTY(double externalInsertReturnPeak READ externalInsertReturnPeak NOTIFY dspTelemetryChanged)
     Q_PROPERTY(bool syncMasterDspToRender READ syncMasterDspToRenderEnabled WRITE setSyncMasterDspToRender NOTIFY renderStateChanged)
     Q_PROPERTY(bool levelMatchInProgress READ isLevelMatchInProgress NOTIFY levelMatchStateChanged)
 
@@ -162,7 +171,11 @@ public:
     [[nodiscard]] double masterGain() const;
     [[nodiscard]] double masterGainL() const;
     [[nodiscard]] double masterGainR() const;
+    [[nodiscard]] double masterBalance() const;
     [[nodiscard]] bool isMasterMute() const;
+    [[nodiscard]] bool isMasterMuteL() const;
+    [[nodiscard]] bool isMasterMuteR() const;
+    [[nodiscard]] bool isMonitorDimEnabled() const;
     [[nodiscard]] double masterPeakL() const;
     [[nodiscard]] double masterPeakR() const;
     [[nodiscard]] double preDspPeakL() const;
@@ -188,6 +201,9 @@ public:
     Q_INVOKABLE QVariantMap getAudioCapabilities() const;
     Q_INVOKABLE QStringList availableAudioBackends() const;
     [[nodiscard]] QString audioBackend() const;
+    [[nodiscard]] QString graphicsBackend() const { return m_graphicsBackend; }
+    [[nodiscard]] QString gpuRendererName() const { return m_gpuRendererName; }
+    Q_INVOKABLE QString logDatabasePath() const { return log::LogService::defaultDatabasePath(); }
     Q_INVOKABLE bool setAudioBackend(const QString& backendName);
     Q_INVOKABLE QVariantList enumerateOutputDevices() const;
     Q_INVOKABLE bool selectOutputDevice(const QString& deviceIdOrName);
@@ -224,6 +240,8 @@ public:
     [[nodiscard]] QString externalInsertSendPortR() const;
     [[nodiscard]] QString externalInsertReturnPortL() const;
     [[nodiscard]] QString externalInsertReturnPortR() const;
+    [[nodiscard]] double externalInsertSendPeak() const;
+    [[nodiscard]] double externalInsertReturnPeak() const;
 
     // Phase 4 Getters (Delegating directly to RenderEngine & AudioPipeline)
     [[nodiscard]] bool isRenderIdle() const;
@@ -261,7 +279,11 @@ public:
     Q_INVOKABLE void setMasterGain(double gain);
     Q_INVOKABLE void setMasterGainL(double gain);
     Q_INVOKABLE void setMasterGainR(double gain);
+    Q_INVOKABLE void setMasterBalance(double balance);
     Q_INVOKABLE void setMasterMute(bool mute);
+    Q_INVOKABLE void setMasterMuteL(bool mute);
+    Q_INVOKABLE void setMasterMuteR(bool mute);
+    Q_INVOKABLE void setMonitorDimEnabled(bool dim);
     Q_INVOKABLE void setDirectModeEnabled(bool enabled);
     Q_INVOKABLE bool setFixedGraphSampleRate(double sampleRate);
 
@@ -294,6 +316,16 @@ public:
     Q_INVOKABLE bool startFolderSessionFromDeck(const QString& deckId);
     Q_INVOKABLE bool advanceFolderNext(const QString& deckId);
     Q_INVOKABLE bool retreatFolderPrevious(const QString& deckId);
+
+    // Waveform Extraction (+ Disk Cache) & RT-Safe FFT Spectrum Analysis
+    Q_INVOKABLE QVariantMap getDeckWaveformPeaks(const QString& deckId, int targetBins = 280) const;
+    Q_INVOKABLE bool isDeckWaveformExtracting(const QString& deckId) const;
+    Q_INVOKABLE void requestDeckWaveform(const QString& deckId);
+    Q_INVOKABLE QString waveformCachePath() const;
+    Q_INVOKABLE qint64 waveformCacheSizeBytes() const;
+    Q_INVOKABLE int waveformCacheFileCount() const;
+    Q_INVOKABLE bool clearWaveformCache();
+    Q_INVOKABLE QVariantList getSpectrumBins(int channelMode = 0, int numBins = 160, bool autoPreferRight = false);
 
     // QML-invokable DSP & EQ Console Operations
     Q_INVOKABLE void setGeqBandGain(int bandIndex, double gainDb);
@@ -441,7 +473,11 @@ signals:
     void masterGainChanged(double gain);
     void masterGainLChanged(double gain);
     void masterGainRChanged(double gain);
+    void masterBalanceChanged(double balance);
     void masterMuteChanged(bool muted);
+    void masterMuteLChanged(bool muted);
+    void masterMuteRChanged(bool muted);
+    void monitorDimEnabledChanged(bool dimmed);
     void diagnosticsChanged();
     void audioBackendChanged(const QString& backendName);
     void deckStateChanged(const QString& deckId);
@@ -469,6 +505,8 @@ signals:
     void renderTaskFinished(const QString& taskId, int status, const QString& outputDir, const QString& errorMessage);
     void levelMatchStateChanged();
     void levelMatchCompleted(bool success, const QString& summary);
+    void deckWaveformReady(const QString& deckId);
+    void waveformCacheChanged();
     void deckWorkspaceImportFinished(const QString& deckId, bool ok,
                                      const QString& statusText,
                                      const QString& message);
@@ -549,7 +587,10 @@ private:
     std::atomic<double> m_masterGain{1.0};
     std::atomic<double> m_masterGainL{1.0};
     std::atomic<double> m_masterGainR{1.0};
+    std::atomic<double> m_masterBalance{0.0};
     std::atomic<bool> m_masterMute{false};
+    std::atomic<bool> m_masterMuteL{false};
+    std::atomic<bool> m_masterMuteR{false};
     std::atomic<bool> m_directModeEnabled{false};
     std::atomic<double> m_fixedGraphSampleRate{48000.0};
     std::atomic<int> m_externalInsertPosition{4};
@@ -577,6 +618,13 @@ private:
     std::atomic<bool> m_levelMatchInProgress{false};
     std::atomic<bool> m_levelMatchCancel{false};
     std::thread m_levelMatchThread;
+
+    std::unique_ptr<engine::audio::WaveformExtractor> m_waveformExtractor;
+    uint64_t m_lastSpectrumWritePos{0};
+    int m_spectrumStaleCount{0};
+    int m_lastPolledInsertState{-1};
+    QString m_graphicsBackend{QStringLiteral("Unknown")};
+    QString m_gpuRendererName{QStringLiteral("Unknown")};
 
     // Real-Time Safe Parameter Smoothers for master gain (eliminates zipper noise)
     engine::dsp::ParameterSmoother m_gainSmootherL{1.0, 15.0};

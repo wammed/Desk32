@@ -326,6 +326,7 @@ add_executable(test_phase2_dsp
     test_phase2_dsp.cpp
     ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
@@ -386,6 +387,7 @@ add_executable(test_phase3_external_insert
     test_phase3_external_insert.cpp
     ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
@@ -446,6 +448,7 @@ add_executable(test_phase4_export_render
     test_phase4_export_render.cpp
     ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
@@ -550,6 +553,7 @@ add_executable(test_workspace_v381
     test_workspace_v381.cpp
     ../src/core/SettingsManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
@@ -612,6 +616,7 @@ add_executable(test_output_device_ui
     ../src/core/SettingsManager.cpp
     ../src/core/LanguageManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
@@ -680,6 +685,7 @@ add_executable(test_jack_output
     ../src/core/SettingsManager.cpp
     ../src/core/LanguageManager.cpp
     ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp

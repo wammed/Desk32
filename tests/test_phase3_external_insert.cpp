@@ -13,8 +13,11 @@
 #include "engine/insert/ExternalInsertNode.hpp"
 #include "engine/insert/PipeWireInsertTransport.hpp"
 #include "engine/preset/PresetManager.hpp"
+#include "engine/audio/WaveformExtractor.hpp"
 #include "core/EngineController.hpp"
 #include "core/log/LogService.hpp"
+#include <QFile>
+#include <QDir>
 
 using namespace desk32::engine::insert;
 using namespace desk32::engine::preset;
@@ -119,6 +122,15 @@ private slots:
 
     // 15. Live connection enforcement, pipeline bypass sync, isolated probe calibration, reconnect & pw-dump filtering
     void testLiveTransportEnforcementCalibrationAndReconnect();
+
+    // 16. Gate G4: Master Balance / L-R Mute Direct Mode safety / Monitor -20 dB Dim
+    void testMasterBalanceMuteLRDimAndDirectModeSafety();
+
+    // 17. Gate G4: WaveformExtractor async extraction + disk cache & RT-safe FFT SPSC ring
+    void testWaveformExtractorCacheAndSpectrumRing();
+
+    // 18. Gate G4: External Insert Send/Return peak telemetry & immediate Active state poll
+    void testExternalInsertSendReturnTelemetryAndStatusPolling();
 
 private:
     std::unique_ptr<QTemporaryDir> m_tempDir;
@@ -1267,6 +1279,204 @@ void TestPhase3ExternalInsert::testLiveTransportEnforcementCalibrationAndReconne
         }
     }
     QVERIFY(foundGraphDisconnect);
+}
+
+void TestPhase3ExternalInsert::testMasterBalanceMuteLRDimAndDirectModeSafety() {
+    EngineController& ctrl = EngineController::instance();
+    ctrl.setMasterGain(1.0);
+    ctrl.setMasterMute(false);
+    ctrl.setMasterMuteL(false);
+    ctrl.setMasterMuteR(false);
+    ctrl.setMasterBalance(0.0);
+    ctrl.setMonitorDimEnabled(false);
+
+    // 1. Q-04: Engaging L Mute or R Mute automatically disengages Direct Mode
+    ctrl.setDirectModeEnabled(true);
+    QVERIFY(ctrl.isDirectModeEnabled());
+    ctrl.setMasterMuteL(true);
+    QVERIFY(ctrl.isMasterMuteL());
+    QVERIFY(!ctrl.isDirectModeEnabled());
+    ctrl.setMasterMuteL(false);
+
+    ctrl.setDirectModeEnabled(true);
+    QVERIFY(ctrl.isDirectModeEnabled());
+    ctrl.setMasterMuteR(true);
+    QVERIFY(ctrl.isMasterMuteR());
+    QVERIFY(!ctrl.isDirectModeEnabled());
+    ctrl.setMasterMuteR(false);
+
+    // 2. Q-03: Monitor Dim (-20 dB = 0.1 amplitude) affects monitor output cleanly
+    auto pipe = ctrl.pipeline();
+    QVERIFY(pipe != nullptr);
+    pipe->setOutputMode(desk32::engine::routing::OutputPathMode::ListeningPath);
+    ctrl.setListeningVolume(1.0);
+    ctrl.setListeningMuted(false);
+
+    constexpr size_t frames = 512;
+    std::vector<double> pl(frames, 0.8), pr(frames, 0.8);
+    std::vector<float> pcm(frames * 2, 0.0f);
+    for (int b = 0; b < 8; ++b) {
+        std::fill(pl.begin(), pl.end(), 0.8);
+        std::fill(pr.begin(), pr.end(), 0.8);
+        pipe->process(pl.data(), pr.data(), frames, pcm.data(),
+                      desk32::engine::format::SampleFormat::Float32, false);
+    }
+    const float normalAmp = pcm[(frames - 1) * 2];
+    QVERIFY(std::abs(normalAmp - 0.8f) < 0.02f);
+
+    ctrl.setMonitorDimEnabled(true);
+    QVERIFY(ctrl.isMonitorDimEnabled());
+    QCOMPARE(ctrl.bitPerfectStatus(), 1); // Monitor Dim marks Bit-Perfect NotVerified
+    for (int b = 0; b < 10; ++b) {
+        std::fill(pl.begin(), pl.end(), 0.8);
+        std::fill(pr.begin(), pr.end(), 0.8);
+        pipe->process(pl.data(), pr.data(), frames, pcm.data(),
+                      desk32::engine::format::SampleFormat::Float32, false);
+    }
+    const float dimAmp = pcm[(frames - 1) * 2];
+    QVERIFY(std::abs(dimAmp - 0.08f) < 0.01f); // Exact -20 dB (0.8 * 0.1 = 0.08)
+
+    // Render Tap peak inside telemetry MUST remain undimmed (0.8)
+    QVERIFY(std::abs(pipe->currentTelemetry().renderTapPeakL - 0.8) < 1e-4);
+
+    // 3. Balance non-zero marks Bit-Perfect NotVerified and clamps [-1, 1]
+    ctrl.setMonitorDimEnabled(false);
+    ctrl.setMasterBalance(2.5);
+    QCOMPARE(ctrl.masterBalance(), 1.0);
+    QCOMPARE(ctrl.bitPerfectStatus(), 1);
+    ctrl.setMasterBalance(0.0);
+}
+
+void TestPhase3ExternalInsert::testWaveformExtractorCacheAndSpectrumRing() {
+    QTemporaryDir cacheTmp;
+    QVERIFY(cacheTmp.isValid());
+    qputenv("XDG_CACHE_HOME", cacheTmp.path().toUtf8());
+
+    // Build a tiny 0.2s 48kHz 16-bit stereo WAV file with a 1kHz sine wave at 0.5 peak
+    const QString wavPath = cacheTmp.path() + "/sine1k.wav";
+    {
+        QFile f(wavPath);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        const uint32_t sampleRate = 48000;
+        const uint32_t totalSamples = 9600;
+        const uint16_t channels = 2;
+        const uint16_t bits = 16;
+        const uint32_t dataBytes = totalSamples * channels * (bits / 8);
+        const uint32_t riffSize = 36 + dataBytes;
+        const uint32_t byteRate = sampleRate * channels * (bits / 8);
+        const uint16_t blockAlign = channels * (bits / 8);
+        auto w16 = [&](uint16_t v) { f.write(reinterpret_cast<const char*>(&v), 2); };
+        auto w32 = [&](uint32_t v) { f.write(reinterpret_cast<const char*>(&v), 4); };
+        f.write("RIFF", 4); w32(riffSize); f.write("WAVE", 4);
+        f.write("fmt ", 4); w32(16); w16(1); w16(channels);
+        w32(sampleRate); w32(byteRate); w16(blockAlign); w16(bits);
+        f.write("data", 4); w32(dataBytes);
+        for (uint32_t i = 0; i < totalSamples; ++i) {
+            const double val = 0.5 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * i / sampleRate);
+            const int16_t s16 = static_cast<int16_t>(std::clamp(val, -1.0, 1.0) * 32767.0);
+            w16(static_cast<uint16_t>(s16));
+            w16(static_cast<uint16_t>(s16));
+        }
+        f.close();
+    }
+
+    {
+        desk32::engine::audio::WaveformExtractor ext1;
+        std::atomic<bool> ready{false};
+        ext1.setReadyCallback([&ready](const std::string&, bool ok) {
+            if (ok) ready.store(true, std::memory_order_release);
+        });
+        ext1.requestWaveform(wavPath.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(ready.load(std::memory_order_acquire), 3000);
+
+        desk32::engine::audio::WaveformData wd;
+        QVERIFY(ext1.getWaveform(wavPath.toStdString(), wd));
+        QCOMPARE(wd.bucketCount, uint32_t(1024));
+        QVERIFY(wd.totalFrames >= 9000);
+        float maxPeak = 0.0f;
+        for (float v : wd.maxL) maxPeak = std::max(maxPeak, v);
+        QVERIFY(maxPeak > 0.45f && maxPeak < 0.55f);
+        QCOMPARE(ext1.diskCacheFileCount(), size_t(1));
+        QVERIFY(ext1.diskCacheSizeBytes() > 16000);
+
+        // Fresh extractor loads directly from disk cache and clearDiskCache cleans it
+        desk32::engine::audio::WaveformExtractor ext2;
+        std::atomic<bool> ready2{false};
+        ext2.setReadyCallback([&ready2](const std::string&, bool ok) {
+            if (ok) ready2.store(true, std::memory_order_release);
+        });
+        ext2.requestWaveform(wavPath.toStdString());
+        QTRY_VERIFY_WITH_TIMEOUT(ready2.load(std::memory_order_acquire), 2000);
+        QVERIFY(ext2.clearDiskCache());
+        QCOMPARE(ext2.diskCacheFileCount(), size_t(0));
+    }
+
+    // RT-safe FFT SPSC sample push (0 heap allocations) + 1kHz peak check via EngineController
+    EngineController& ctrl = EngineController::instance();
+    auto pipe = ctrl.pipeline();
+    QVERIFY(pipe != nullptr);
+    constexpr size_t blk = 512;
+    std::vector<double> pl(blk, 0.0), pr(blk, 0.0);
+    std::vector<float> pcm(blk * 2, 0.0f);
+
+    t_isAudioThread = true;
+    s_allocationCount.store(0);
+    s_trackAllocations.store(true);
+    for (int iter = 0; iter < 6; ++iter) {
+        for (size_t i = 0; i < blk; ++i) {
+            const double idx = static_cast<double>(static_cast<size_t>(iter) * blk + i);
+            const double s = 0.5 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * idx / 48000.0);
+            pl[i] = s;
+            pr[i] = s;
+        }
+        pipe->process(pl.data(), pr.data(), blk, pcm.data(),
+                      desk32::engine::format::SampleFormat::Float32, false);
+    }
+    s_trackAllocations.store(false);
+    t_isAudioThread = false;
+    QCOMPARE(s_allocationCount.load(), size_t(0));
+
+    const QVariantList bins = ctrl.getSpectrumBins(0, 160);
+    QCOMPARE(bins.size(), 160);
+    // 1kHz sits cleanly around bin index ~91 on 20Hz..20kHz log scale: check strong peak vs 60Hz/15kHz
+    double peakDb = -90.0;
+    int peakIdx = -1;
+    for (int b = 0; b < bins.size(); ++b) {
+        if (bins[b].toDouble() > peakDb) {
+            peakDb = bins[b].toDouble();
+            peakIdx = b;
+        }
+    }
+    QVERIFY(peakDb > -10.0);
+    QVERIFY(peakIdx >= 75 && peakIdx <= 105);
+}
+
+void TestPhase3ExternalInsert::testExternalInsertSendReturnTelemetryAndStatusPolling() {
+    EngineController& ctrl = EngineController::instance();
+    ctrl.insertNode()->bridge().setRequireLiveTransport(false);
+    QVERIFY(ctrl.configureExternalInsert("TelemetryMock", "inL", "inR", "outL", "outR", 48000.0, 256, 0));
+    ctrl.setExternalInsertBypass(false);
+
+    ctrl.insertNode()->bridge().setMockProcessor([](double* l, double* r, size_t n) {
+        for (size_t i = 0; i < n; ++i) {
+            l[i] *= 0.5;
+            r[i] *= 0.5;
+        }
+    });
+
+    QSignalSpy statusSpy(&ctrl, &EngineController::externalInsertStatusChanged);
+    std::vector<double> l(256, 0.8), r(256, 0.8);
+    ctrl.insertNode()->bridge().process(l.data(), r.data(), 256);
+
+    QCOMPARE(ctrl.externalInsertStateText(), QString("Active"));
+    QVERIFY(std::abs(ctrl.externalInsertSendPeak() - 0.8) < 1e-4);
+    QVERIFY(std::abs(ctrl.externalInsertReturnPeak() - 0.4) < 1e-4);
+
+    // 33ms dspTimer automatically polls Connected -> Active transition cleanly
+    QTRY_VERIFY_WITH_TIMEOUT(statusSpy.count() >= 1, 1000);
+
+    ctrl.disconnectExternalInsert();
+    ctrl.insertNode()->bridge().setMockProcessor(nullptr);
 }
 
 QTEST_GUILESS_MAIN(TestPhase3ExternalInsert)

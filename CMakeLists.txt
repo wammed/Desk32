@@ -116,6 +116,8 @@ qt_add_executable(desk32
     src/engine/decoder/FFmpegAudioDecoder.cpp
     src/engine/decoder/DecoderWorker.hpp
     src/engine/decoder/DecoderWorker.cpp
+    src/engine/audio/WaveformExtractor.hpp
+    src/engine/audio/WaveformExtractor.cpp
     src/engine/session/FolderSession.hpp
     src/engine/session/FolderSession.cpp
     src/engine/deck/ReferenceDeck.hpp

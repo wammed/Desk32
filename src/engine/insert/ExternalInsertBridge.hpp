@@ -171,6 +171,8 @@ public:
     [[nodiscard]] double measuredLatencyMs() const noexcept { return m_measuredLatencyMs.load(std::memory_order_acquire); }
     [[nodiscard]] int64_t measuredLatencyFrames() const noexcept { return m_measuredLatencyFrames.load(std::memory_order_acquire); }
     [[nodiscard]] LatencySource latencySource() const noexcept { return m_latencySource.load(std::memory_order_acquire); }
+    [[nodiscard]] double sendPeak() const noexcept { return m_sendPeak.load(std::memory_order_relaxed); }
+    [[nodiscard]] double returnPeak() const noexcept { return m_returnPeak.load(std::memory_order_relaxed); }
     [[nodiscard]] uint32_t xrunCount() const noexcept { return m_xrunCount.load(std::memory_order_relaxed); }
     [[nodiscard]] uint64_t impulseSendFrame() const noexcept { return m_impulseSendFrame.load(std::memory_order_relaxed); }
 
@@ -780,6 +782,8 @@ public:
         if (m_isBypassed.load(std::memory_order_acquire) ||
             (curState != InsertState::Connected && curState != InsertState::Active)) {
             // Passthrough (dry)
+            m_sendPeak.store(0.0, std::memory_order_relaxed);
+            m_returnPeak.store(0.0, std::memory_order_relaxed);
             return;
         }
 
@@ -887,6 +891,13 @@ public:
                 }
             }
 
+            // Measure input peak into External Host Send
+            double sPeak = 0.0;
+            for (size_t i = 0; i < frames; ++i) {
+                sPeak = std::max(sPeak, std::max(std::abs(inOutLeft[i]), std::abs(inOutRight[i])));
+            }
+            m_sendPeak.store(sPeak, std::memory_order_relaxed);
+
             // Execute active mock processor or live transport without any locks or allocations on Audio Thread
             if (hasMock) {
                 m_activeMock->func(inOutLeft, inOutRight, frames);
@@ -919,6 +930,12 @@ public:
                     }
                 }
             }
+
+            double rPeak = 0.0;
+            for (size_t i = 0; i < frames; ++i) {
+                rPeak = std::max(rPeak, std::max(std::abs(inOutLeft[i]), std::abs(inOutRight[i])));
+            }
+            m_returnPeak.store(rPeak, std::memory_order_relaxed);
         }
 
         m_totalFramesProcessed.store(baseFrame + frames, std::memory_order_release);
@@ -1060,6 +1077,8 @@ private:
     LatencyCalibrationCandidate m_calCandidate;
 
     std::atomic<uint32_t> m_xrunCount{0};
+    std::atomic<double> m_sendPeak{0.0};
+    std::atomic<double> m_returnPeak{0.0};
     std::atomic<bool> m_measuringLatency{false};
     std::atomic<uint64_t> m_impulseSendFrame{0};
     std::atomic<uint64_t> m_totalFramesProcessed{0};

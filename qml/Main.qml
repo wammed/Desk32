@@ -84,8 +84,12 @@ ApplicationWindow {
                 currentView: mainWindow.activeViewId
                 onViewSelected: function(viewId) {
                     mainWindow.activeViewId = viewId
-                    if (viewId === "log") {
+                    if (viewId === "workspace") {
+                        workspaceView.refresh()
+                    } else if (viewId === "log") {
                         logView.refresh()
+                    } else if (viewId === "settings") {
+                        settingsView.refresh()
                     }
                 }
             }
