@@ -947,37 +947,54 @@ Item {
                                         minValue: -60.0
                                         maxValue: 6.0
                                         defaultValue: 0.0
-                                        value: consoleRoot.gainToDb(EngineController.masterGainL)
+                                        consoleTaper: true
                                         showHeaderLed: false
                                         showReadout: true
                                         accentColor: "#00E5FF"
                                         enabled: !consoleRoot.isDirect
+                                        Component.onCompleted: value = consoleRoot.gainToDb(EngineController.masterGainL)
                                         onValueEdited: function(dbVal) {
                                             var g = consoleRoot.dbToGain(dbVal)
                                             if (consoleRoot.linkMasterLR) EngineController.setMasterGain(g)
                                             else EngineController.setMasterGainL(g)
                                         }
+                                        Connections {
+                                            target: EngineController
+                                            function onMasterGainLChanged() {
+                                                masterFaderL.value = consoleRoot.gainToDb(EngineController.masterGainL)
+                                            }
+                                        }
                                     }
 
-                                    // Engraved White Silkscreen Center Scale matching fq83 mockup
-                                    ColumnLayout {
-                                        Layout.preferredWidth: 30
+                                    // Engraved White Silkscreen Center Scale aligned pixel-for-pixel with consoleTaper ticks
+                                    Item {
+                                        id: masterScaleCol
+                                        Layout.preferredWidth: 32
                                         Layout.fillHeight: true
-                                        Layout.topMargin: 22
-                                        Layout.bottomMargin: 24
+                                        Layout.bottomMargin: 24   // match ConsoleFader readout + spacing height
+                                        readonly property real padTop: 31
+                                        readonly property real travelH: Math.max(20, height - padTop * 2)
+
                                         Repeater {
-                                            model: ["12", "5", "0", "-5", "-10", "-20", "-30", "-36"]
-                                            Item {
-                                                Layout.fillWidth: true
-                                                Layout.fillHeight: true
-                                                Label {
-                                                    anchors.centerIn: parent
-                                                    text: modelData
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 9
-                                                    font.bold: modelData === "0"
-                                                    color: modelData === "0" ? "#FFFFFF" : "#D4DEE8"
-                                                }
+                                            model: [
+                                                { db: 6.0,   lbl: "+6" },
+                                                { db: 3.0,   lbl: "+3" },
+                                                { db: 0.0,   lbl: "0" },
+                                                { db: -5.0,  lbl: "-5" },
+                                                { db: -10.0, lbl: "-10" },
+                                                { db: -20.0, lbl: "-20" },
+                                                { db: -30.0, lbl: "-30" },
+                                                { db: -36.0, lbl: "-36" },
+                                                { db: -60.0, lbl: "-∞" }
+                                            ]
+                                            Label {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                y: masterScaleCol.padTop + (1.0 - masterFaderL.valueToNormalized(modelData.db)) * masterScaleCol.travelH - height * 0.5
+                                                text: modelData.lbl
+                                                font.family: "Monospace"
+                                                font.pixelSize: modelData.db === 0.0 ? 11 : 9
+                                                font.bold: modelData.db === 0.0 || modelData.db === 6.0
+                                                color: modelData.db === 0.0 ? "#FFFFFF" : (modelData.db > 0 ? "#4CD6F0" : "#CFD9E4")
                                             }
                                         }
                                     }
@@ -990,15 +1007,22 @@ Item {
                                         minValue: -60.0
                                         maxValue: 6.0
                                         defaultValue: 0.0
-                                        value: consoleRoot.gainToDb(EngineController.masterGainR)
+                                        consoleTaper: true
                                         showHeaderLed: false
                                         showReadout: true
                                         accentColor: "#00E5FF"
                                         enabled: !consoleRoot.isDirect
+                                        Component.onCompleted: value = consoleRoot.gainToDb(EngineController.masterGainR)
                                         onValueEdited: function(dbVal) {
                                             var g = consoleRoot.dbToGain(dbVal)
                                             if (consoleRoot.linkMasterLR) EngineController.setMasterGain(g)
                                             else EngineController.setMasterGainR(g)
+                                        }
+                                        Connections {
+                                            target: EngineController
+                                            function onMasterGainRChanged() {
+                                                masterFaderR.value = consoleRoot.gainToDb(EngineController.masterGainR)
+                                            }
                                         }
                                     }
 

@@ -17,6 +17,7 @@ Item {
     property color accentColor: "#00E5FF"
     property bool showHeaderLed: true
     property bool showReadout: true
+    property bool consoleTaper: false
 
     signal valueEdited(double newValue)
     signal enabledToggled(bool newEnabled)
@@ -36,9 +37,35 @@ Item {
         return Math.max(minValue, Math.min(maxValue, clamped))
     }
 
+    function valueToNormalized(v) {
+        if (!consoleTaper) {
+            if (maxValue <= minValue) return 0.5
+            return Math.max(0.0, Math.min(1.0, (v - minValue) / (maxValue - minValue)))
+        }
+        // Studio console taper: generous positive boost travel (0 dB @ 0.68, +6 dB @ 1.00)
+        if (v >= 0.0) {
+            var spanPos = Math.max(0.1, maxValue)
+            return Math.min(1.0, 0.68 + (v / spanPos) * 0.32)
+        }
+        if (v >= -12.0) return 0.40 + ((v + 12.0) / 12.0) * 0.28
+        if (v >= -30.0) return 0.16 + ((v + 30.0) / 18.0) * 0.24
+        var spanBot = Math.max(1.0, -30.0 - minValue)
+        return Math.max(0.0, ((v - minValue) / spanBot) * 0.16)
+    }
+
+    function normalizedToValue(norm) {
+        var n = Math.max(0.0, Math.min(1.0, norm))
+        if (!consoleTaper) {
+            return minValue + n * (maxValue - minValue)
+        }
+        if (n >= 0.68) return ((n - 0.68) / 0.32) * maxValue
+        if (n >= 0.40) return -12.0 + ((n - 0.40) / 0.28) * 12.0
+        if (n >= 0.16) return -30.0 + ((n - 0.16) / 0.24) * 18.0
+        return minValue + (n / 0.16) * (-30.0 - minValue)
+    }
+
     function normalizedPos() {
-        if (maxValue <= minValue) return 0.5
-        return (value - minValue) / (maxValue - minValue)
+        return valueToNormalized(value)
     }
 
     function formatDb(v) {
@@ -127,30 +154,48 @@ Item {
                     var topY = trackArea.travelPadding
                     var len = trackArea.travelHeight
 
-                    // 13 ticks across range (+12 down to -12 in 2 dB steps)
-                    var numTicks = 13
-                    for (var i = 0; i < numTicks; ++i) {
-                        var t = i / (numTicks - 1)
-                        var y = Math.round(topY + t * len) + 0.5
-                        var isCenter = (i === 6)
-                        var isMajor = (i === 0 || i === 3 || i === 6 || i === 9 || i === 12)
-                        var tickLen = isCenter ? 12 : (isMajor ? 8 : 5)
-                        var gap = 6
+                    if (faderRoot.consoleTaper) {
+                        var marks = [faderRoot.maxValue, 3.0, 0.0, -5.0, -10.0, -20.0, -30.0, -36.0, faderRoot.minValue]
+                        for (var m = 0; m < marks.length; ++m) {
+                            var dbM = marks[m]
+                            var nM = faderRoot.valueToNormalized(dbM)
+                            var ym = Math.round(topY + (1.0 - nM) * len) + 0.5
+                            var isUnity = (dbM === 0.0)
+                            var isMajorM = (dbM === faderRoot.maxValue || dbM === 0.0 || dbM === -10.0 || dbM === -20.0 || dbM === -30.0 || dbM === faderRoot.minValue)
+                            var tLen = isUnity ? 13 : (isMajorM ? 9 : 5)
+                            ctx.strokeStyle = isUnity ? "#FFFFFF" : (isMajorM ? "#E2EAF2" : "#9AA7B5")
+                            ctx.lineWidth = isUnity ? 2.0 : (isMajorM ? 1.3 : 1.0)
+                            ctx.beginPath()
+                            ctx.moveTo(cx - 6 - tLen, ym); ctx.lineTo(cx - 6, ym)
+                            ctx.moveTo(cx + 6, ym); ctx.lineTo(cx + 6 + tLen, ym)
+                            ctx.stroke()
+                        }
+                    } else {
+                        // 13 ticks across range (+12 down to -12 in 2 dB steps)
+                        var numTicks = 13
+                        for (var i = 0; i < numTicks; ++i) {
+                            var t = i / (numTicks - 1)
+                            var y = Math.round(topY + t * len) + 0.5
+                            var isCenter = (i === 6)
+                            var isMajor = (i === 0 || i === 3 || i === 6 || i === 9 || i === 12)
+                            var tickLen = isCenter ? 12 : (isMajor ? 8 : 5)
+                            var gap = 6
 
-                        ctx.strokeStyle = isCenter ? "#FFFFFF" : (isMajor ? "#DDE6F0" : "#9AA7B5")
-                        ctx.lineWidth = isCenter ? 1.8 : (isMajor ? 1.3 : 1.0)
+                            ctx.strokeStyle = isCenter ? "#FFFFFF" : (isMajor ? "#DDE6F0" : "#9AA7B5")
+                            ctx.lineWidth = isCenter ? 1.8 : (isMajor ? 1.3 : 1.0)
 
-                        // Left ticks
-                        ctx.beginPath()
-                        ctx.moveTo(cx - gap - tickLen, y)
-                        ctx.lineTo(cx - gap, y)
-                        ctx.stroke()
+                            // Left ticks
+                            ctx.beginPath()
+                            ctx.moveTo(cx - gap - tickLen, y)
+                            ctx.lineTo(cx - gap, y)
+                            ctx.stroke()
 
-                        // Right ticks
-                        ctx.beginPath()
-                        ctx.moveTo(cx + gap, y)
-                        ctx.lineTo(cx + gap + tickLen, y)
-                        ctx.stroke()
+                            // Right ticks
+                            ctx.beginPath()
+                            ctx.moveTo(cx + gap, y)
+                            ctx.lineTo(cx + gap + tickLen, y)
+                            ctx.stroke()
+                        }
                     }
                 }
             }
@@ -207,7 +252,7 @@ Item {
                 function setFromY(mouseY, fine) {
                     var norm = 1.0 - ((mouseY - trackArea.travelPadding) / trackArea.travelHeight)
                     norm = Math.max(0.0, Math.min(1.0, norm))
-                    var nextVal = faderRoot.clampAndSnap(faderRoot.minValue + norm * (faderRoot.maxValue - faderRoot.minValue), fine)
+                    var nextVal = faderRoot.clampAndSnap(faderRoot.normalizedToValue(norm), fine)
                     if (Math.abs(nextVal - faderRoot.value) > 1e-6) {
                         faderRoot.value = nextVal
                         faderRoot.valueEdited(nextVal)
@@ -267,6 +312,7 @@ Item {
 
         // 3. Real text frequency label (e.g., 1k)
         Label {
+            visible: faderRoot.labelText.length > 0
             Layout.alignment: Qt.AlignHCenter
             text: faderRoot.labelText
             font.family: "Monospace"
