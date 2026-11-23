@@ -102,8 +102,9 @@ void parsePresetChannelBands(const QJsonArray &arr, const QString &chLabel,
   }
   for (int i = 0; i < arr.size(); ++i) {
     const QJsonObject bo = arr[i].toObject();
-    const int idx =
-        bo.contains(QStringLiteral("index")) ? bo[QStringLiteral("index")].toInt(i) : i;
+    const int idx = bo.contains(QStringLiteral("index"))
+                        ? bo[QStringLiteral("index")].toInt(i)
+                        : i;
     if (idx < 0) {
       continue;
     }
@@ -226,20 +227,26 @@ bool EngineController::initialize(bool offlineMode) {
 
   // 1. Initialize 4-Deck Manager & Background Waveform Extractor
   m_waveformExtractor = std::make_unique<engine::audio::WaveformExtractor>();
-  m_waveformExtractor->setReadyCallback([this](const std::string &canonPath, bool ok) {
-    if (!ok) return;
+  m_waveformExtractor->setReadyCallback([this](const std::string &canonPath,
+                                               bool ok) {
+    if (!ok)
+      return;
     const QString readyPath = QString::fromStdString(canonPath);
     QMetaObject::invokeMethod(
         this,
         [this, readyPath]() {
-          if (!m_deckManager) return;
+          if (!m_deckManager)
+            return;
           std::error_code ec;
           for (char cid : {'A', 'B', 'C', 'D'}) {
             if (const auto *d = m_deckManager->deck(cid)) {
-              if (!d->isOpen() || d->trackInfo().path.empty()) continue;
-              const auto cp = std::filesystem::weakly_canonical(d->trackInfo().path, ec);
-              const QString deckCanon = ec ? QString::fromStdString(d->trackInfo().path)
-                                           : QString::fromStdString(cp.string());
+              if (!d->isOpen() || d->trackInfo().path.empty())
+                continue;
+              const auto cp =
+                  std::filesystem::weakly_canonical(d->trackInfo().path, ec);
+              const QString deckCanon =
+                  ec ? QString::fromStdString(d->trackInfo().path)
+                     : QString::fromStdString(cp.string());
               if (deckCanon == readyPath) {
                 emit deckWaveformReady(QString(cid));
               }
@@ -401,7 +408,8 @@ bool EngineController::initialize(bool offlineMode) {
   m_uiListeningCorrection.setEnabled(true);
   m_uiListeningCorrection.applyPreset("Monitor Flat");
 
-  // Phase 3: External Insert Node (Default to OFF / Bypassed); transport is bound in setupAudioBackend()
+  // Phase 3: External Insert Node (Default to OFF / Bypassed); transport is
+  // bound in setupAudioBackend()
   m_calActive = false;
   m_calSettleTicks = 0;
   m_calCompletedProbes = 0;
@@ -483,7 +491,8 @@ bool EngineController::initialize(bool offlineMode) {
   }
   const bool backendOk = setupAudioBackend(
       initBackend,
-      /*fallbackToOfflineOnStartFailure=*/(initBackend == QStringLiteral("PipeWire") || offlineMode),
+      /*fallbackToOfflineOnStartFailure=*/
+      (initBackend == QStringLiteral("PipeWire") || offlineMode),
       /*preserveTargetDevice=*/true);
   if (!backendOk && initBackend == QStringLiteral("PipeWire")) {
     return false;
@@ -763,12 +772,27 @@ bool EngineController::initialize(bool offlineMode) {
               QString(), QString(),
               completed ? 0 : rejectErrorCode(res.rejectReason), 0.0);
         }
+        const bool trackChanged = d->checkAndResetTrackChanged();
+        if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+          m_waveformExtractor->requestWaveform(d->trackInfo().path);
+        }
+        if (const auto *ra = d->folderSession().readAheadTrack()) {
+          if (m_waveformExtractor && !ra->path.empty()) {
+            m_waveformExtractor->requestWaveform(ra->path);
+          }
+        }
+        (void)trackChanged;
         emit deckStateChanged(QString(c));
       }
 
       if (d->checkAndResetTrackChanged()) {
         if (m_waveformExtractor && !d->trackInfo().path.empty()) {
           m_waveformExtractor->requestWaveform(d->trackInfo().path);
+        }
+        if (const auto *ra = d->folderSession().readAheadTrack()) {
+          if (m_waveformExtractor && !ra->path.empty()) {
+            m_waveformExtractor->requestWaveform(ra->path);
+          }
         }
         emit deckStateChanged(QString(c));
       }
@@ -811,7 +835,8 @@ bool EngineController::initialize(bool offlineMode) {
 
   log::LogService::instance().log(
       "AudioEngine", "Initialize", "Success",
-      QString("Desk32 Studio Console engine initialized successfully (backend=%1).")
+      QString(
+          "Desk32 Studio Console engine initialized successfully (backend=%1).")
           .arg(m_activeAudioBackend),
       "System", m_activeAudioBackend);
 
@@ -823,9 +848,8 @@ bool EngineController::initialize(bool offlineMode) {
 bool EngineController::setupAudioBackend(const QString &backendName,
                                          bool fallbackToOfflineOnStartFailure,
                                          bool preserveTargetDevice) {
-  const bool isJack =
-      backendName.trimmed().compare(QStringLiteral("JACK"),
-                                    Qt::CaseInsensitive) == 0;
+  const bool isJack = backendName.trimmed().compare(QStringLiteral("JACK"),
+                                                    Qt::CaseInsensitive) == 0;
   const QString normalizedBackend =
       isJack ? QStringLiteral("JACK") : QStringLiteral("PipeWire");
 
@@ -862,14 +886,14 @@ bool EngineController::setupAudioBackend(const QString &backendName,
   }
 
   const bool hasSettings = SettingsManager::instance().isLoaded();
-  const double curFixed = m_fixedGraphSampleRate.load(std::memory_order_relaxed);
+  const double curFixed =
+      m_fixedGraphSampleRate.load(std::memory_order_relaxed);
   const uint32_t initSampleRate =
-      hasSettings
-          ? static_cast<uint32_t>(std::llround(std::clamp(
-                SettingsManager::instance().audioFixedSampleRate(), 8000.0,
-                768000.0)))
-          : static_cast<uint32_t>(
-                std::llround(std::clamp(curFixed, 8000.0, 768000.0)));
+      hasSettings ? static_cast<uint32_t>(std::llround(std::clamp(
+                        SettingsManager::instance().audioFixedSampleRate(),
+                        8000.0, 768000.0)))
+                  : static_cast<uint32_t>(
+                        std::llround(std::clamp(curFixed, 8000.0, 768000.0)));
   const uint32_t initBufferFrames =
       hasSettings
           ? static_cast<uint32_t>(std::clamp(
@@ -1070,7 +1094,8 @@ bool EngineController::setupAudioBackend(const QString &backendName,
   updateSourceBitDepthFromActiveDeck();
   const auto diag = m_audioOutput->diagnostics();
   if (diag.sampleRate > 0 && m_deckManager && m_pipeline &&
-      std::abs(m_deckManager->graphRate() - static_cast<double>(diag.sampleRate)) > 0.5) {
+      std::abs(m_deckManager->graphRate() -
+               static_cast<double>(diag.sampleRate)) > 0.5) {
     const double actualSr = static_cast<double>(diag.sampleRate);
     m_deckManager->setGraphRate(actualSr);
     m_pipeline->setGraphSampleRate(actualSr);
@@ -1080,9 +1105,8 @@ bool EngineController::setupAudioBackend(const QString &backendName,
   }
   m_lastReportedXruns = diag.xrunCount;
   m_lastGraphSampleRate = diag.sampleRate;
-  m_lastGraphBufferFrames = (diag.negotiatedQuantum > 0)
-                                ? diag.negotiatedQuantum
-                                : diag.bufferFrames;
+  m_lastGraphBufferFrames =
+      (diag.negotiatedQuantum > 0) ? diag.negotiatedQuantum : diag.bufferFrames;
   m_lastDirectModeStatus = static_cast<int>(diag.directModeStatus);
 
   emit audioBackendChanged(m_activeAudioBackend);
@@ -1094,16 +1118,15 @@ QStringList EngineController::availableAudioBackends() const {
   return {QStringLiteral("PipeWire"), QStringLiteral("JACK")};
 }
 
-QString EngineController::audioBackend() const {
-  return m_activeAudioBackend;
-}
+QString EngineController::audioBackend() const { return m_activeAudioBackend; }
 
 bool EngineController::setAudioBackend(const QString &backendName) {
   const QString trimmed = backendName.trimmed();
   QString normalized;
   if (trimmed.compare(QStringLiteral("PipeWire"), Qt::CaseInsensitive) == 0) {
     normalized = QStringLiteral("PipeWire");
-  } else if (trimmed.compare(QStringLiteral("JACK"), Qt::CaseInsensitive) == 0) {
+  } else if (trimmed.compare(QStringLiteral("JACK"), Qt::CaseInsensitive) ==
+             0) {
     normalized = QStringLiteral("JACK");
   } else {
     return false;
@@ -1125,10 +1148,10 @@ bool EngineController::setAudioBackend(const QString &backendName) {
       QStringLiteral("AudioEngine"), QStringLiteral("SwitchAudioBackend"),
       ok ? QStringLiteral("Success") : QStringLiteral("Failed"),
       ok ? QString("Switched active audio backend to %1").arg(normalized)
-         : QString("Failed to switch active audio backend to %1").arg(normalized),
-      QStringLiteral("Backend"), normalized,
-      QStringLiteral("{}"), QString(), QString(),
-      ok ? 0 : log::ErrorCode::JackStartFailed, 0.0);
+         : QString("Failed to switch active audio backend to %1")
+               .arg(normalized),
+      QStringLiteral("Backend"), normalized, QStringLiteral("{}"), QString(),
+      QString(), ok ? 0 : log::ErrorCode::JackStartFailed, 0.0);
   return ok;
 }
 
@@ -1799,9 +1822,9 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
                                                            silenceMs)
             : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
     const auto postDiag = m_audioOutput->diagnostics();
-    const double actualRateD =
-        (postDiag.sampleRate > 0) ? static_cast<double>(postDiag.sampleRate)
-                                  : targetRateD;
+    const double actualRateD = (postDiag.sampleRate > 0)
+                                   ? static_cast<double>(postDiag.sampleRate)
+                                   : targetRateD;
     m_deckManager->setGraphRate(actualRateD);
     if (m_pipeline) {
       m_pipeline->setGraphSampleRate(actualRateD);
@@ -1827,7 +1850,8 @@ void EngineController::followActiveDeckSampleRateIfDirectMode() {
     log::LogService::instance().log(
         QStringLiteral("AudioEngine"),
         QStringLiteral("DirectModeSampleRateFollow"),
-        (ok && followed) ? QStringLiteral("Success") : QStringLiteral("Warning"),
+        (ok && followed) ? QStringLiteral("Success")
+                         : QStringLiteral("Warning"),
         QString("Direct Mode rate switch request %1 Hz -> active %2 Hz "
                 "(silence: %3 ms)")
             .arg(targetRate)
@@ -1866,8 +1890,8 @@ bool EngineController::setFixedGraphSampleRate(double sampleRate) {
           ? m_audioControlManager->renegotiateSampleRate(targetRate, silenceMs)
           : m_audioOutput->renegotiateSampleRate(targetRate, silenceMs);
   const auto postDiag = m_audioOutput->diagnostics();
-  const double actualRate =
-      (postDiag.sampleRate > 0) ? static_cast<double>(postDiag.sampleRate)
+  const double actualRate = (postDiag.sampleRate > 0)
+                                ? static_cast<double>(postDiag.sampleRate)
                                 : sampleRate;
   m_deckManager->setGraphRate(actualRate);
   if (m_pipeline) {
@@ -2179,7 +2203,8 @@ int EngineController::bitPerfectStatus() const {
     }
 
     if (!areAllDspTrimsZero()) {
-      return 1; // Non-zero DSP input/output trim alters signal even when DSP is bypassed
+      return 1; // Non-zero DSP input/output trim alters signal even when DSP is
+                // bypassed
     }
 
     if (!m_globalDspBypass.load(std::memory_order_relaxed)) {
@@ -2930,7 +2955,8 @@ void EngineController::setMasterMuteR(bool mute) {
 
 void EngineController::setMasterBalance(double balance) {
   const double clamped = std::clamp(balance, -1.0, 1.0);
-  const double prev = m_masterBalance.exchange(clamped, std::memory_order_relaxed);
+  const double prev =
+      m_masterBalance.exchange(clamped, std::memory_order_relaxed);
   if (std::abs(prev - clamped) > 1e-6) {
     emit masterBalanceChanged(clamped);
     emit diagnosticsChanged();
@@ -3642,6 +3668,11 @@ bool EngineController::loadTrack(const QString &deckId,
     if (m_waveformExtractor && !d->trackInfo().path.empty()) {
       m_waveformExtractor->requestWaveform(d->trackInfo().path);
     }
+    if (const auto *ra = d->folderSession().readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -3759,6 +3790,11 @@ bool EngineController::startFolderSession(const QString &deckId,
     if (m_waveformExtractor && !d->trackInfo().path.empty()) {
       m_waveformExtractor->requestWaveform(d->trackInfo().path);
     }
+    if (const auto *ra = d->folderSession().readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -3827,6 +3863,11 @@ bool EngineController::startFolderSessionFromDeck(const QString &deckId) {
     if (m_waveformExtractor && !d->trackInfo().path.empty()) {
       m_waveformExtractor->requestWaveform(d->trackInfo().path);
     }
+    if (const auto *ra = d->folderSession().readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
     if (m_deckManager->activeDeckId() == id) {
       followActiveDeckSampleRateIfDirectMode();
       updateSourceBitDepthFromActiveDeck();
@@ -3876,6 +3917,25 @@ bool EngineController::advanceFolderNext(const QString &deckId) {
   const std::string pathTo =
       fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
 
+  if (ok) {
+    (void)d->checkAndResetTrackChanged();
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
+    if (const auto *ra = fsAfter.readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
+    if (m_deckManager->activeDeckId() == id) {
+      followActiveDeckSampleRateIfDirectMode();
+      updateSourceBitDepthFromActiveDeck();
+      if (m_pipeline) {
+        m_pipeline->invalidateLevel1Measurement();
+      }
+    }
+  }
+
   QJsonObject det;
   det.insert(QStringLiteral("deck"), deckId);
   det.insert(QStringLiteral("trigger"), QStringLiteral("user"));
@@ -3915,6 +3975,25 @@ bool EngineController::retreatFolderPrevious(const QString &deckId) {
   const int idxTo = static_cast<int>(fsAfter.currentIndex());
   const std::string pathTo =
       fsAfter.currentTrack() ? fsAfter.currentTrack()->path : std::string();
+
+  if (ok) {
+    (void)d->checkAndResetTrackChanged();
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
+    if (const auto *ra = fsAfter.readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
+    if (m_deckManager->activeDeckId() == id) {
+      followActiveDeckSampleRateIfDirectMode();
+      updateSourceBitDepthFromActiveDeck();
+      if (m_pipeline) {
+        m_pipeline->invalidateLevel1Measurement();
+      }
+    }
+  }
 
   QJsonObject det;
   det.insert(QStringLiteral("deck"), deckId);
@@ -4010,7 +4089,7 @@ QVariantList EngineController::getGeqCurve(int numPoints) {
       freqs.end());
 
   std::vector<double> outDb;
-  m_uiGeq.calculateResponseCurve(freqs, outDb);
+  m_uiGeq.calculateResponseCurve(freqs, outDb, true);
 
   for (size_t i = 0; i < freqs.size(); ++i) {
     QVariantMap pt;
@@ -4107,7 +4186,7 @@ QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
   }
 
   std::vector<double> leftDb, rightDb;
-  m_uiPeq.calculateCompositeResponse(freqs, leftDb, rightDb);
+  m_uiPeq.calculateCompositeResponse(freqs, leftDb, rightDb, true);
 
   const auto &target = isRightChannel ? rightDb : leftDb;
   for (int i = 0; i < numPoints; ++i) {
@@ -4410,8 +4489,7 @@ int EngineController::resolveDspTrimIndex(const QString &dspName) noexcept {
   if (key == QLatin1String("compressor") || key == QLatin1String("comp")) {
     return static_cast<int>(engine::dsp::DspTrimTarget::Compressor);
   }
-  if (key == QLatin1String("limiter") ||
-      key == QLatin1String("peaklimiter") ||
+  if (key == QLatin1String("limiter") || key == QLatin1String("peaklimiter") ||
       key == QLatin1String("peak limiter")) {
     return static_cast<int>(engine::dsp::DspTrimTarget::Limiter);
   }
@@ -4676,7 +4754,8 @@ QVariantList EngineController::getListeningCurve(bool isRightChannel,
   }
 
   std::vector<double> leftDb, rightDb;
-  m_uiListeningCorrection.calculateCompositeResponse(freqs, leftDb, rightDb);
+  m_uiListeningCorrection.calculateCompositeResponse(freqs, leftDb, rightDb,
+                                                     true);
   const auto &target = isRightChannel ? rightDb : leftDb;
   for (int i = 0; i < numPoints; ++i) {
     QVariantMap pt;
@@ -4901,6 +4980,14 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
     return map;
 
   if (d->checkAndResetTrackChanged()) {
+    if (m_waveformExtractor && !d->trackInfo().path.empty()) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+    }
+    if (const auto *ra = d->folderSession().readAheadTrack()) {
+      if (m_waveformExtractor && !ra->path.empty()) {
+        m_waveformExtractor->requestWaveform(ra->path);
+      }
+    }
     emit deckStateChanged(deckId);
   }
 
@@ -4916,7 +5003,8 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
   map["hasError"] = d->worker().hasDecodeError();
   const QString trackQPath = QString::fromStdString(d->trackInfo().path);
   map["path"] = trackQPath;
-  map["fileName"] = trackQPath.isEmpty() ? QString() : QFileInfo(trackQPath).fileName();
+  map["fileName"] =
+      trackQPath.isEmpty() ? QString() : QFileInfo(trackQPath).fileName();
   map["sampleRate"] = d->trackInfo().sampleRate;
   map["channels"] = d->trackInfo().channels;
   map["totalFrames"] = QVariant::fromValue(d->trackInfo().totalFrames);
@@ -5784,11 +5872,10 @@ bool EngineController::applyListeningCorrectionJson(
 
   const QString effectiveLabel =
       presetLabel.isEmpty() ? QStringLiteral("Custom") : presetLabel;
-  recordPresetImportReport(
-      QStringLiteral("ListeningCorrection"),
-      QStringLiteral("Listening Correction"),
-      QStringLiteral("ImportListeningPeq"), effectiveLabel, report,
-      unsupportedFilters, preampDb);
+  recordPresetImportReport(QStringLiteral("ListeningCorrection"),
+                           QStringLiteral("Listening Correction"),
+                           QStringLiteral("ImportListeningPeq"), effectiveLabel,
+                           report, unsupportedFilters, preampDb);
 
   m_listeningPresetName = effectiveLabel;
   emit listeningPresetChanged(m_listeningPresetName);
@@ -5858,10 +5945,10 @@ bool EngineController::applyPeqBandsFromJson(const QJsonObject &peq,
 
   const QString effectiveLabel =
       presetLabel.isEmpty() ? QStringLiteral("MasterPEQ") : presetLabel;
-  recordPresetImportReport(
-      QStringLiteral("MasterPEQ"), QStringLiteral("Master PEQ"),
-      QStringLiteral("ImportMasterPeq"), effectiveLabel, report,
-      unsupportedFilters, preampDb);
+  recordPresetImportReport(QStringLiteral("MasterPEQ"),
+                           QStringLiteral("Master PEQ"),
+                           QStringLiteral("ImportMasterPeq"), effectiveLabel,
+                           report, unsupportedFilters, preampDb);
 
   if (peq.contains("enabled")) {
     setDspNodeBypass("PEQ", !peq["enabled"].toBool(false));
@@ -5952,12 +6039,12 @@ void EngineController::recordPresetImportReport(
         presetLabel,
         QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
         QString(), QString(), log::ErrorCode::PresetTruncatedWarn, 0.0);
-    emit presetImportWarning(
-        targetKey, static_cast<int>(report.requestedLeft),
-        static_cast<int>(report.requestedRight),
-        static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
-        static_cast<int>(report.overflowLeft),
-        static_cast<int>(report.overflowRight), summaryMsg);
+    emit presetImportWarning(targetKey, static_cast<int>(report.requestedLeft),
+                             static_cast<int>(report.requestedRight),
+                             static_cast<int>(ParametricEQ::BANDS_PER_CHANNEL),
+                             static_cast<int>(report.overflowLeft),
+                             static_cast<int>(report.overflowRight),
+                             summaryMsg);
   }
 }
 
@@ -6664,8 +6751,9 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
         }
       } else if (dynamic_cast<engine::insert::ExternalInsertNode *>(node) !=
                  nullptr) {
-        // §6.6 External Insert is strictly excluded from offline render equivalence;
-        // do NOT call ExternalInsertNode::setBypassed(true) as it mutates shared m_bridge.
+        // §6.6 External Insert is strictly excluded from offline render
+        // equivalence; do NOT call ExternalInsertNode::setBypassed(true) as it
+        // mutates shared m_bridge.
       }
     }
 
@@ -7293,7 +7381,8 @@ QVariantMap EngineController::getDeckWaveformPeaks(const QString &deckId,
     return out;
   }
 
-  const int bins = std::clamp(targetBins, 32, static_cast<int>(data.bucketCount));
+  const int bins =
+      std::clamp(targetBins, 32, static_cast<int>(data.bucketCount));
   QVariantList minL, maxL, minR, maxR;
   minL.reserve(bins);
   maxL.reserve(bins);
@@ -7302,9 +7391,10 @@ QVariantMap EngineController::getDeckWaveformPeaks(const QString &deckId,
 
   const size_t srcN = data.bucketCount;
   for (int i = 0; i < bins; ++i) {
-    const size_t s0 = (static_cast<size_t>(i) * srcN) / static_cast<size_t>(bins);
-    const size_t s1 = std::max(
-        s0 + 1, (static_cast<size_t>(i + 1) * srcN) / static_cast<size_t>(bins));
+    const size_t s0 =
+        (static_cast<size_t>(i) * srcN) / static_cast<size_t>(bins);
+    const size_t s1 = std::max(s0 + 1, (static_cast<size_t>(i + 1) * srcN) /
+                                           static_cast<size_t>(bins));
     float mnL = 1.0f, mxL = -1.0f, mnR = 1.0f, mxR = -1.0f;
     for (size_t s = s0; s < s1 && s < srcN; ++s) {
       mnL = std::min(mnL, data.minL[s]);
@@ -7414,7 +7504,8 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
     m_spectrumStaleCount = 0;
   }
 
-  // Channel focus selection: 0 = L+R, 1 = L, 2 = R, 3 = AUTO (tracks active PEQ edit channel or L+R)
+  // Channel focus selection: 0 = L+R, 1 = L, 2 = R, 3 = AUTO (tracks active PEQ
+  // edit channel or L+R)
   const int effectiveCh =
       (channelMode == 3) ? (autoPreferRight ? 2 : 0) : channelMode;
 
@@ -7429,9 +7520,8 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
     } else {
       s = 0.5 * (ringL[i] + ringR[i]);
     }
-    const double win =
-        0.5 * (1.0 - std::cos(TWO_PI * static_cast<double>(i) /
-                              static_cast<double>(FFT_N - 1)));
+    const double win = 0.5 * (1.0 - std::cos(TWO_PI * static_cast<double>(i) /
+                                             static_cast<double>(FFT_N - 1)));
     fft[i] = std::complex<double>(s * win, 0.0);
   }
 
@@ -7474,19 +7564,19 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
   const double maxLog = std::log(20000.0);
   const double nyq = sr * 0.5;
   for (int b = 0; b < bins; ++b) {
-    const double frac0 =
-        (b == 0) ? 0.0
-                 : (static_cast<double>(b) - 0.5) / static_cast<double>(bins - 1);
-    const double frac1 =
-        (b == bins - 1)
-            ? 1.0
-            : (static_cast<double>(b) + 0.5) / static_cast<double>(bins - 1);
-    const double f0 = std::min(nyq, std::exp(minLog + frac0 * (maxLog - minLog)));
-    const double f1 = std::min(nyq, std::exp(minLog + frac1 * (maxLog - minLog)));
-    const double fc =
-        std::min(nyq, std::exp(minLog + (static_cast<double>(b) /
-                                         std::max(1, bins - 1)) *
-                                            (maxLog - minLog)));
+    const double frac0 = (b == 0) ? 0.0
+                                  : (static_cast<double>(b) - 0.5) /
+                                        static_cast<double>(bins - 1);
+    const double frac1 = (b == bins - 1) ? 1.0
+                                         : (static_cast<double>(b) + 0.5) /
+                                               static_cast<double>(bins - 1);
+    const double f0 =
+        std::min(nyq, std::exp(minLog + frac0 * (maxLog - minLog)));
+    const double f1 =
+        std::min(nyq, std::exp(minLog + frac1 * (maxLog - minLog)));
+    const double fc = std::min(nyq, std::exp(minLog + (static_cast<double>(b) /
+                                                       std::max(1, bins - 1)) *
+                                                          (maxLog - minLog)));
 
     const double k0f = (f0 * static_cast<double>(FFT_N)) / sr;
     const double k1f = (f1 * static_cast<double>(FFT_N)) / sr;

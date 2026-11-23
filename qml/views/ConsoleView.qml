@@ -420,12 +420,12 @@ Item {
         }
         function onDeckStateChanged(deckId) {
             consoleRoot.activeDeckPollTick++
-            if (deckId === EngineController.activeDeckId) {
+            if (deckId === "" || deckId === "ALL" || deckId.toUpperCase() === EngineController.activeDeckId) {
                 consoleRoot.refreshWaveform()
             }
         }
         function onDeckWaveformReady(deckId) {
-            if (deckId === EngineController.activeDeckId) {
+            if (deckId === "" || deckId === "ALL" || deckId.toUpperCase() === EngineController.activeDeckId) {
                 consoleRoot.refreshWaveform()
             }
         }
@@ -1033,12 +1033,17 @@ Item {
                                             }
 
                                             if (consoleRoot.currentOpTab === 0) {
-                                                drawEqCurve(EngineController.getGeqCurve(180), "#2FE0FF", "rgba(0, 229, 255, 0.22)", 2.4, false)
+                                                var geqByp = EngineController.geqBypassed || consoleRoot.isDirect
+                                                drawEqCurve(EngineController.getGeqCurve(180),
+                                                            geqByp ? "rgba(47, 224, 255, 0.50)" : "#2FE0FF",
+                                                            geqByp ? null : "rgba(0, 229, 255, 0.22)",
+                                                            geqByp ? 1.8 : 2.4, geqByp)
                                                 consoleRoot.cachedPeqNodes = []
                                             } else {
                                                 if (consoleRoot.showGeqOverlayOnPeq) {
                                                     drawEqCurve(EngineController.getGeqCurve(180), "rgba(120, 208, 255, 0.45)", null, 1.4, true)
                                                 }
+                                                var peqByp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || consoleRoot.isDirect)
                                                 var drawBoth = (consoleRoot.monitorChannelMode === 0)
                                                 var showL = drawBoth || consoleRoot.monitorChannelMode === 1 || (consoleRoot.monitorChannelMode === 3 && !consoleRoot.peqRightChannel)
                                                 var showR = drawBoth || consoleRoot.monitorChannelMode === 2 || (consoleRoot.monitorChannelMode === 3 && consoleRoot.peqRightChannel)
@@ -1046,17 +1051,21 @@ Item {
                                                     var ptsL = consoleRoot.peqEditListening
                                                                ? EngineController.getListeningCurve(false, 180)
                                                                : EngineController.getPeqCurve(false, 180)
-                                                    drawEqCurve(ptsL, consoleRoot.peqEditListening ? "#4CE0B3" : "#2FE0FF",
-                                                                !consoleRoot.peqRightChannel ? "rgba(0, 229, 255, 0.16)" : null,
-                                                                !consoleRoot.peqRightChannel ? 2.4 : 1.5, false)
+                                                    var colL = consoleRoot.peqEditListening
+                                                               ? "#4CE0B3"
+                                                               : (peqByp ? "rgba(47, 224, 255, 0.58)" : "#2FE0FF")
+                                                    drawEqCurve(ptsL, colL,
+                                                                (!peqByp && !consoleRoot.peqRightChannel) ? "rgba(0, 229, 255, 0.16)" : null,
+                                                                !consoleRoot.peqRightChannel ? 2.4 : 1.5, peqByp)
                                                 }
                                                 if (showR) {
                                                     var ptsR = consoleRoot.peqEditListening
                                                                ? EngineController.getListeningCurve(true, 180)
                                                                : EngineController.getPeqCurve(true, 180)
-                                                    drawEqCurve(ptsR, "#F5B841",
-                                                                consoleRoot.peqRightChannel ? "rgba(245, 184, 65, 0.16)" : null,
-                                                                consoleRoot.peqRightChannel ? 2.4 : 1.5, false)
+                                                    var colR = peqByp ? "rgba(245, 184, 65, 0.58)" : "#F5B841"
+                                                    drawEqCurve(ptsR, colR,
+                                                                (!peqByp && consoleRoot.peqRightChannel) ? "rgba(245, 184, 65, 0.16)" : null,
+                                                                consoleRoot.peqRightChannel ? 2.4 : 1.5, peqByp)
                                                 }
 
                                                 // Draw enabled PEQ band nodes (unused hidden; slight radial offset when overlapping)
@@ -2243,8 +2252,22 @@ Item {
                                                 var ctx = getContext("2d")
                                                 if (!ctx || width <= 4 || height <= 4) return
                                                 ctx.clearRect(0, 0, width, height)
-                                                ctx.strokeStyle = "#182430"
+
+                                                var logMin = Math.log(20.0)
+                                                var logSpan = Math.log(20000.0) - logMin
+
+                                                // Subtle frequency & dB guide lines
+                                                ctx.strokeStyle = "#14202C"
                                                 ctx.lineWidth = 1
+                                                var guideFreqs = [100, 1000, 10000]
+                                                for (var gi = 0; gi < guideFreqs.length; ++gi) {
+                                                    var gx = ((Math.log(guideFreqs[gi]) - logMin) / logSpan) * width
+                                                    ctx.beginPath()
+                                                    ctx.moveTo(gx, 0)
+                                                    ctx.lineTo(gx, height)
+                                                    ctx.stroke()
+                                                }
+                                                ctx.strokeStyle = "#223446"
                                                 ctx.beginPath()
                                                 ctx.moveTo(0, height * 0.5)
                                                 ctx.lineTo(width, height * 0.5)
@@ -2253,19 +2276,57 @@ Item {
                                                 var pts = consoleRoot.peqEditListening
                                                           ? EngineController.getListeningCurve(consoleRoot.peqRightChannel, 120)
                                                           : EngineController.getPeqCurve(consoleRoot.peqRightChannel, 120)
+                                                var byp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || consoleRoot.isDirect)
+                                                var strokeCol = consoleRoot.peqEditListening
+                                                                ? "#4CE0B3"
+                                                                : (consoleRoot.peqRightChannel ? "#F2C97D" : "#33E3FF")
+
                                                 if (pts && pts.length > 1) {
-                                                    ctx.strokeStyle = consoleRoot.peqRightChannel ? "#F2C97D" : "#33E3FF"
+                                                    ctx.save()
+                                                    if (byp && ctx.setLineDash) ctx.setLineDash([4, 3])
+                                                    ctx.strokeStyle = strokeCol
+                                                    ctx.globalAlpha = byp ? 0.65 : 1.0
                                                     ctx.lineWidth = 2.2
                                                     ctx.beginPath()
                                                     for (var k = 0; k < pts.length; ++k) {
-                                                        var x = (k / (pts.length - 1)) * width
+                                                        var x = ((Math.log(Math.max(20.0, pts[k].f)) - logMin) / logSpan) * width
                                                         var db = Math.max(-18.0, Math.min(18.0, pts[k].db))
                                                         var y = ((18.0 - db) / 36.0) * height
                                                         if (k === 0) ctx.moveTo(x, y)
                                                         else ctx.lineTo(x, y)
                                                     }
                                                     ctx.stroke()
+                                                    if (!byp) {
+                                                        ctx.lineTo(width, height * 0.5)
+                                                        ctx.lineTo(0, height * 0.5)
+                                                        ctx.closePath()
+                                                        ctx.fillStyle = consoleRoot.peqRightChannel
+                                                                        ? "rgba(242, 201, 125, 0.14)"
+                                                                        : (consoleRoot.peqEditListening ? "rgba(76, 224, 179, 0.14)" : "rgba(51, 227, 255, 0.14)")
+                                                        ctx.fill()
+                                                    }
+                                                    ctx.restore()
                                                 }
+
+                                                // Highlight currently selected band crosshair & dot
+                                                var bf = Math.max(20.0, Math.min(20000.0, peqFreqKnob.value))
+                                                var bg = Math.max(-18.0, Math.min(18.0, peqGainKnob.value))
+                                                var bx = ((Math.log(bf) - logMin) / logSpan) * width
+                                                var by = ((18.0 - bg) / 36.0) * height
+                                                ctx.strokeStyle = "rgba(255, 255, 255, 0.20)"
+                                                ctx.lineWidth = 1
+                                                ctx.beginPath()
+                                                ctx.moveTo(bx, 0)
+                                                ctx.lineTo(bx, height)
+                                                ctx.stroke()
+
+                                                ctx.fillStyle = consoleRoot.peqBandEnabledState ? "#FFFFFF" : "#3A4654"
+                                                ctx.strokeStyle = strokeCol
+                                                ctx.lineWidth = 1.8
+                                                ctx.beginPath()
+                                                ctx.arc(bx, by, 4.0, 0, Math.PI * 2)
+                                                ctx.fill()
+                                                ctx.stroke()
                                             }
                                         }
                                     }

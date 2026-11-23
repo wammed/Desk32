@@ -127,12 +127,13 @@ public:
     /// Calculate combined magnitude response curve across all active bands for visualization
     void calculateCompositeResponse(const std::vector<double>& frequencies,
                                     std::vector<double>& outLeftDb,
-                                    std::vector<double>& outRightDb) const
+                                    std::vector<double>& outRightDb,
+                                    bool includeWhenBypassed = false) const
     {
         outLeftDb.resize(frequencies.size(), 0.0);
         outRightDb.resize(frequencies.size(), 0.0);
 
-        if (!m_enabled.load(std::memory_order_relaxed)) {
+        if (!includeWhenBypassed && !m_enabled.load(std::memory_order_relaxed)) {
             return;
         }
 

@@ -401,6 +401,26 @@ void TestOutputDeviceUi::testDeckStateContractFolderSessionAndSeek()
     QVariantMap stAfter = ctrl.getDeckState(QStringLiteral("A"));
     QCOMPARE(stAfter.value(QStringLiteral("playhead")).toLongLong(), 12000);
     QCOMPARE(stAfter.value(QStringLiteral("positionFrames")).toLongLong(), 12000);
+
+    // Advance Folder Session to track 2 and verify waveform extraction triggers & completes
+    QVERIFY(ctrl.advanceFolderNext(QStringLiteral("A")));
+    QVariantMap stTrack2 = ctrl.getDeckState(QStringLiteral("A"));
+    QCOMPARE(stTrack2.value(QStringLiteral("fileName")).toString(), QStringLiteral("02_track.wav"));
+    QCOMPARE(stTrack2.value(QStringLiteral("folderCurrentIndex")).toInt(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        ctrl.getDeckWaveformPeaks(QStringLiteral("A"), 128).value(QStringLiteral("ready")).toBool(),
+        5000);
+
+    // Verify PEQ / GEQ response curves update live even while DSP node starts bypassed
+    QVERIFY(ctrl.isDspNodeBypassed(QStringLiteral("PEQ")));
+    ctrl.setPeqBand(false, 8, 1000.0, 6.0, 1.0, 0, true);
+    const QVariantList peqCurve = ctrl.getPeqCurve(false, 120);
+    double maxPeqDb = -99.0;
+    for (const QVariant& ptVar : peqCurve) {
+        maxPeqDb = std::max(maxPeqDb, ptVar.toMap().value(QStringLiteral("db")).toDouble());
+    }
+    QVERIFY2(maxPeqDb > 4.5, qPrintable(QString("Expected PEQ curve > 4.5 dB, got %1").arg(maxPeqDb)));
+    ctrl.setPeqBand(false, 8, 1000.0, 0.0, 1.0, 0, true);
 }
 
 void TestOutputDeviceUi::testMainQmlCompilesWithOutputDevicePanel()

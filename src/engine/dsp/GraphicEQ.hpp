@@ -142,10 +142,12 @@ public:
     }
 
     /// Calculate combined magnitude response curve for visualization
-    void calculateResponseCurve(const std::vector<double>& frequencies, std::vector<double>& outDb) const
+    void calculateResponseCurve(const std::vector<double>& frequencies,
+                                std::vector<double>& outDb,
+                                bool includeWhenBypassed = false) const
     {
         outDb.resize(frequencies.size(), 0.0);
-        if (!m_enabled.load(std::memory_order_relaxed)) {
+        if (!includeWhenBypassed && !m_enabled.load(std::memory_order_relaxed)) {
             return;
         }
 
