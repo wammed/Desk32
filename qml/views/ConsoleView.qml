@@ -279,37 +279,41 @@ Item {
                         Rectangle { Layout.fillWidth: true; height: 1; color: "#323a46" }
                     }
 
-                    // Switching Mode Bar: A<->B Quick Switch + NORMAL | COMPARE
+                    // Switching Mode Bar: Large A<->B Quick Switch + NORMAL | COMPARE
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 5
+                        spacing: 8
 
                         ConsoleButton {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 140
+                            implicitHeight: 42
                             text: qsTr("A ⇄ B")
-                            implicitWidth: 74
-                            implicitHeight: 24
-                            fontSize: 10
+                            fontSize: 13
+                            font.bold: true
                             accentColor: "#00E5FF"
                             toolTipText: qsTr("Quick Switch Active Deck between A and B")
                             onClicked: EngineController.quickSwitchAB()
                         }
 
-                        Item { Layout.fillWidth: true }
+                        Rectangle { width: 1; height: 28; color: "#2D3642" }
 
                         ConsoleButton {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 140
+                            implicitHeight: 42
                             text: qsTr("NORMAL")
-                            implicitWidth: 80
-                            implicitHeight: 24
-                            fontSize: 10
+                            fontSize: 13
                             highlighted: EngineController.switchingMode === 0
                             onClicked: EngineController.setSwitchingMode(0)
                         }
 
                         ConsoleButton {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 140
+                            implicitHeight: 42
                             text: qsTr("COMPARE")
-                            implicitWidth: 84
-                            implicitHeight: 24
-                            fontSize: 10
+                            fontSize: 13
                             accentColor: "#F5B841"
                             highlighted: EngineController.switchingMode === 1
                             toolTipText: qsTr("Synchronized A/B position + per-deck ms nudge comparison")
@@ -535,7 +539,7 @@ Item {
 
                                 Label {
                                     anchors.centerIn: parent
-                                    text: qsTr("OVERVIEW WAVEFORM TIMELINE — REAL WAVEFORM EXTRACTOR SCHEDULED IN GATE G4")
+                                    text: qsTr("OVERVIEW WAVEFORM TIMELINE — NO WAVEFORM DATA")
                                     font.family: "Monospace"
                                     font.pixelSize: 11
                                     font.bold: true
@@ -662,8 +666,8 @@ Item {
                                     anchors.right: parent.right
                                     anchors.margins: 8
                                     text: consoleRoot.showEqOverlay
-                                          ? qsTr("EQ RESPONSE ACTIVE  •  REAL FFT SPECTRUM PENDING GATE G4")
-                                          : qsTr("REAL-TIME FFT SPECTRUM PENDING GATE G4")
+                                          ? qsTr("EQ RESPONSE ACTIVE  •  FFT ANALYZER INACTIVE")
+                                          : qsTr("REAL-TIME FFT SPECTRUM INACTIVE")
                                     font.family: "Monospace"
                                     font.pixelSize: 10
                                     color: "#526374"
@@ -889,12 +893,12 @@ Item {
                                     }
 
                                     ConsoleButton {
-                                        text: qsTr("BAL: C (G4)")
+                                        text: qsTr("BAL: C")
                                         implicitWidth: 82
                                         implicitHeight: 25
                                         fontSize: 9
                                         enabled: false
-                                        toolTipText: qsTr("Independent Balance attenuation (-∞ dB) — Wired in Gate G4")
+                                        toolTipText: qsTr("Independent Balance attenuation (-∞ dB) — Not connected yet")
                                     }
 
                                     Item { Layout.fillWidth: true }
@@ -1027,7 +1031,7 @@ Item {
                                         text: qsTr("L MUTE")
                                         fontSize: 9
                                         enabled: false
-                                        toolTipText: qsTr("Independent Left Mute (+ Direct Mode override) — Wired in Gate G4")
+                                        toolTipText: qsTr("Independent Left Mute (auto-clears Direct Mode) — Not connected yet")
                                     }
 
                                     ConsoleButton {
@@ -1050,7 +1054,7 @@ Item {
                                         text: qsTr("R MUTE")
                                         fontSize: 9
                                         enabled: false
-                                        toolTipText: qsTr("Independent Right Mute (+ Direct Mode override) — Wired in Gate G4")
+                                        toolTipText: qsTr("Independent Right Mute (auto-clears Direct Mode) — Not connected yet")
                                     }
                                 }
                             }
@@ -1107,7 +1111,7 @@ Item {
                                     text: qsTr("DIM\n-20dB")
                                     fontSize: 10
                                     enabled: false
-                                    toolTipText: qsTr("Fixed -20 dB Monitor-Only Dim — Wired in Gate G4")
+                                    toolTipText: qsTr("Fixed -20 dB Monitor-Only Dim — Not connected yet")
                                 }
 
                                 ConsoleButton {
@@ -1117,7 +1121,7 @@ Item {
                                     text: qsTr("LEVEL\nMATCH")
                                     fontSize: 10
                                     accentColor: "#00E5FF"
-                                    toolTipText: qsTr("Q-03: Batch Auto Level Match across loaded decks")
+                                    toolTipText: qsTr("Batch Auto Level Match across loaded decks")
                                     onClicked: EngineController.startAutoLevelMatch(EngineController.activeDeckId, ["A", "B", "C", "D"])
                                 }
                             }
@@ -1262,10 +1266,10 @@ Item {
                                 ConsoleButton {
                                     Layout.fillWidth: true
                                     implicitHeight: 26
-                                    text: EngineController.geqBypassed ? qsTr("GEQ BYPASS: ON") : qsTr("GEQ BYPASS")
+                                    text: EngineController.geqBypassed ? qsTr("GEQ BYPASSED") : qsTr("GEQ ACTIVE")
                                     fontSize: 10
                                     accentColor: "#32E6FF"
-                                    highlighted: EngineController.geqBypassed
+                                    highlighted: !EngineController.geqBypassed
                                     enabled: !consoleRoot.isDirect
                                     onClicked: EngineController.setDspNodeBypass("geq", !EngineController.geqBypassed)
                                 }
@@ -1662,7 +1666,7 @@ Item {
                                                     fontSize: 9
                                                     accentColor: consoleRoot.peqEditListening ? "#F5B841" : "#33E3FF"
                                                     highlighted: true
-                                                    toolTipText: qsTr("Q-08: Switch between Master PEQ and Listening Correction PEQ")
+                                                    toolTipText: qsTr("Switch between Master PEQ and Listening Correction PEQ")
                                                     onClicked: consoleRoot.peqEditListening = !consoleRoot.peqEditListening
                                                 }
                                                 ConsoleButton {
@@ -2732,10 +2736,11 @@ Item {
                         BrushedMetalPanel {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            baseTint: "#161B22"
-                            borderColor: "#333D4A"
+                            baseTint: "#13171d"
+                            borderColor: "#2f3743"
                             showScrews: true
                             cornerRadius: 5
+                            brushedOpacity: 0.32
 
                             ColumnLayout {
                                 anchors.fill: parent
@@ -2770,11 +2775,27 @@ Item {
                                     spacing: 6
                                     Label { text: qsTr("TARGET CLIENT:"); font.family: "Monospace"; font.pixelSize: 10; color: "#9AA9B8" }
                                     ComboBox {
+                                        id: extClientCombo
                                         Layout.fillWidth: true
                                         implicitHeight: 26
                                         model: consoleRoot.portDiscoveryList.length > 0
                                                ? consoleRoot.portDiscoveryList
                                                : [qsTr("No External Insert Ports Discovered")]
+                                        contentItem: Label {
+                                            leftPadding: 8
+                                            rightPadding: 20
+                                            text: extClientCombo.displayText
+                                            font.pixelSize: 11
+                                            color: consoleRoot.portDiscoveryList.length > 0 ? "#DCE6F0" : "#7E8E9E"
+                                            verticalAlignment: Text.AlignVCenter
+                                            elide: Text.ElideRight
+                                        }
+                                        background: Rectangle {
+                                            radius: 3
+                                            color: "#0B0E13"
+                                            border.color: "#384250"
+                                            border.width: 1
+                                        }
                                     }
                                 }
 
@@ -2843,78 +2864,137 @@ Item {
                             }
                         }
 
-                        // COLUMN 2: SIGNAL FLOW & INSERT STATE (Strict Master Chain Order!)
+                        // COLUMN 2: SIGNAL FLOW & INSERT STATE (2:1 Status/Bit-Perfect + Slot 0-6 + Prominent Send/Return Meters)
                         BrushedMetalPanel {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            baseTint: "#161B22"
-                            borderColor: "#333D4A"
+                            baseTint: "#13171d"
+                            borderColor: "#2f3743"
                             showScrews: true
                             cornerRadius: 5
+                            brushedOpacity: 0.32
 
                             ColumnLayout {
                                 anchors.fill: parent
                                 anchors.margins: 12
-                                spacing: 7
+                                spacing: 8
 
+                                Label {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: qsTr("SIGNAL FLOW & INSERT STATE")
+                                    font.family: "Monospace"
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    color: "#E8BA6B"
+                                }
+
+                                // Row 1: Prominent STATUS (2) + BIT-PERFECT EXCLUDED (1) side-by-side at 2:1 ratio
                                 RowLayout {
                                     Layout.fillWidth: true
-                                    spacing: 6
-                                    Label {
-                                        Layout.fillWidth: true
-                                        text: qsTr("SIGNAL FLOW & INSERT STATE")
-                                        font.family: "Monospace"
-                                        font.pixelSize: 12
-                                        font.bold: true
-                                        color: "#E8BA6B"
-                                    }
+                                    Layout.fillHeight: false
+                                    Layout.preferredHeight: 74
+                                    Layout.maximumHeight: 78
+                                    spacing: 8
+
+                                    // Left 2/3: Larger STATUS Box
                                     Rectangle {
-                                        implicitWidth: bpExclLbl.implicitWidth + 12
-                                        height: 22; radius: 3; color: "#2D1416"; border.color: "#913238"
-                                        Label {
-                                            id: bpExclLbl
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 520
+                                        Layout.fillHeight: true
+                                        radius: 4
+                                        color: EngineController.externalInsertState >= 2 ? "#0A1E15" : "#0A1116"
+                                        border.color: EngineController.externalInsertState >= 2 ? "#257852" : "#2D3B48"
+                                        border.width: 1
+
+                                        Column {
                                             anchors.centerIn: parent
-                                            text: qsTr("BIT-PERFECT: EXCLUDED")
-                                            font.family: "Monospace"; font.pixelSize: 9; font.bold: true; color: "#FF9AA0"
+                                            spacing: 3
+                                            Label {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: qsTr("INSERT STATUS")
+                                                font.family: "Monospace"
+                                                font.pixelSize: 10
+                                                color: "#7E94A6"
+                                            }
+                                            Row {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                spacing: 8
+                                                Rectangle {
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: 9; height: 9; radius: 4.5
+                                                    color: EngineController.externalInsertState >= 2 ? "#00E676" : "#5B6B7A"
+                                                }
+                                                Label {
+                                                    text: EngineController.externalInsertStateText.toUpperCase()
+                                                    font.family: "Monospace"
+                                                    font.pixelSize: 17
+                                                    font.bold: true
+                                                    color: EngineController.externalInsertState >= 2 ? "#00E676" : "#D2E0EC"
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Right 1/3: BIT-PERFECT EXCLUDED Box
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.preferredWidth: 260
+                                        Layout.fillHeight: true
+                                        radius: 4
+                                        color: "#291215"
+                                        border.color: "#94333B"
+                                        border.width: 1
+
+                                        Column {
+                                            anchors.centerIn: parent
+                                            spacing: 3
+                                            Label {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: qsTr("BIT-PERFECT")
+                                                font.family: "Monospace"
+                                                font.pixelSize: 10
+                                                color: "#D4888E"
+                                            }
+                                            Label {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                text: qsTr("EXCLUDED")
+                                                font.family: "Monospace"
+                                                font.pixelSize: 15
+                                                font.bold: true
+                                                color: "#FFA6AC"
+                                            }
                                         }
                                     }
                                 }
 
-                                Rectangle {
-                                    Layout.fillWidth: true; height: 24; radius: 3; color: "#0B1914"; border.color: "#1F573F"
-                                    Label {
-                                        anchors.centerIn: parent
-                                        text: qsTr("STATUS: %1").arg(EngineController.externalInsertStateText.toUpperCase())
-                                        font.family: "Monospace"; font.pixelSize: 10; font.bold: true
-                                        color: EngineController.externalInsertState >= 2 ? "#00E676" : "#8FA0B0"
-                                    }
-                                }
-
-                                // Real Master Chain Slot Selector (Slot 0..6 around PEQ -> GEQ -> HPF/LPF -> COMP -> REV -> LIM)
+                                // Row 2: Master Chain & Clickable Insert Slot 0..6 Buttons
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 54
+                                    Layout.fillHeight: false
+                                    Layout.preferredHeight: 74
+                                    Layout.maximumHeight: 78
                                     radius: 4; color: "#06090D"; border.color: "#222B35"
 
                                     ColumnLayout {
                                         anchors.fill: parent
-                                        anchors.margins: 6
-                                        spacing: 4
+                                        anchors.margins: 8
+                                        spacing: 6
                                         Label {
                                             Layout.alignment: Qt.AlignHCenter
-                                            text: qsTr("PEQ → GEQ → HPF/LPF → COMP → REV → LIM  (Insert @ Slot %1)").arg(EngineController.externalInsertPosition)
-                                            font.family: "Monospace"; font.pixelSize: 9; color: "#9AA9B8"
+                                            text: qsTr("PEQ → GEQ → HPF/LPF → COMP → REV → LIM   [INSERT @ SLOT %1]").arg(EngineController.externalInsertPosition)
+                                            font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#B8C8D8"
                                         }
                                         RowLayout {
                                             Layout.fillWidth: true
-                                            spacing: 3
+                                            spacing: 4
                                             Repeater {
-                                                model: ["S0", "S1", "S2", "S3", "S4", "S5", "S6"]
+                                                model: ["Slot 0", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6"]
                                                 ConsoleButton {
                                                     Layout.fillWidth: true
-                                                    implicitHeight: 20
+                                                    implicitHeight: 28
                                                     text: modelData
-                                                    fontSize: 8
+                                                    fontSize: 9
+                                                    leftPadding: 3; rightPadding: 3
                                                     accentColor: "#00E5FF"
                                                     highlighted: EngineController.externalInsertPosition === index
                                                     enabled: !consoleRoot.isDirect
@@ -2925,38 +3005,87 @@ Item {
                                     }
                                 }
 
-                                // Send & Return LED Meters
-                                ColumnLayout {
+                                // Row 3: Prominent Send & Return LED Level Meters directly under Insert Slot buttons
+                                Rectangle {
                                     Layout.fillWidth: true
-                                    spacing: 4
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        Label { text: qsTr("SEND LEVEL"); font.family: "Monospace"; font.pixelSize: 9; color: "#9AA9B8"; Layout.preferredWidth: 88 }
-                                        ConsoleLedMeter { Layout.fillWidth: true; Layout.preferredHeight: 10; horizontal: true; segmentCount: 24; peakValue: EngineController.masterPeakL }
-                                    }
-                                    RowLayout {
-                                        Layout.fillWidth: true
-                                        Label { text: qsTr("RETURN LEVEL"); font.family: "Monospace"; font.pixelSize: 9; color: "#9AA9B8"; Layout.preferredWidth: 88 }
-                                        ConsoleLedMeter { Layout.fillWidth: true; Layout.preferredHeight: 10; horizontal: true; segmentCount: 24; peakValue: EngineController.masterPeakR }
+                                    Layout.fillHeight: true
+                                    Layout.minimumHeight: 80
+                                    Layout.preferredHeight: 112
+                                    implicitHeight: 96
+                                    radius: 4
+                                    color: "#070A0F"
+                                    border.color: "#232C37"
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 10
+                                        spacing: 8
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 10
+                                            Label {
+                                                text: qsTr("SEND LEVEL")
+                                                font.family: "Monospace"
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#8ECAE6"
+                                                Layout.preferredWidth: 104
+                                            }
+                                            ConsoleLedMeter {
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 20
+                                                horizontal: true
+                                                segmentCount: 32
+                                                peakValue: EngineController.masterPeakL
+                                                rmsValue: EngineController.masterRmsL
+                                            }
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 10
+                                            Label {
+                                                text: qsTr("RETURN LEVEL")
+                                                font.family: "Monospace"
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#00E676"
+                                                Layout.preferredWidth: 104
+                                            }
+                                            ConsoleLedMeter {
+                                                Layout.fillWidth: true
+                                                Layout.preferredHeight: 20
+                                                horizontal: true
+                                                segmentCount: 32
+                                                peakValue: EngineController.masterPeakR
+                                                rmsValue: EngineController.masterRmsR
+                                            }
+                                        }
                                     }
                                 }
 
+                                // Row 4: Action Buttons
                                 RowLayout {
                                     Layout.fillWidth: true
+                                    Layout.fillHeight: false
+                                    Layout.preferredHeight: 38
                                     spacing: 8
                                     ConsoleButton {
                                         Layout.fillWidth: true
-                                        implicitHeight: 34
+                                        implicitHeight: 38
                                         text: qsTr("CONNECT / RECONNECT")
-                                        fontSize: 10
+                                        fontSize: 11
                                         accentColor: "#00E676"
                                         onClicked: consoleRoot.portDiscoveryList = EngineController.discoverExternalInsertPorts()
                                     }
                                     ConsoleButton {
                                         Layout.fillWidth: true
-                                        implicitHeight: 34
+                                        implicitHeight: 38
                                         text: EngineController.externalInsertBypassed ? qsTr("INSERT BYPASS: ON") : qsTr("INSERT BYPASS (DRY)")
-                                        fontSize: 10
+                                        fontSize: 11
                                         accentColor: "#F5B841"
                                         highlighted: EngineController.externalInsertBypassed
                                         enabled: !consoleRoot.isDirect
@@ -2970,10 +3099,11 @@ Item {
                         BrushedMetalPanel {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            baseTint: "#161B22"
-                            borderColor: "#333D4A"
+                            baseTint: "#13171d"
+                            borderColor: "#2f3743"
                             showScrews: true
                             cornerRadius: 5
+                            brushedOpacity: 0.32
 
                             ColumnLayout {
                                 anchors.fill: parent

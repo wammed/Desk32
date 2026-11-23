@@ -105,17 +105,17 @@ BrushedMetalPanel {
     // Compact 2-Column Hardware Deck Card matching Reference Mockups (NO artwork, NO 0-10 knob, NO Level Match)
     RowLayout {
         anchors.fill: parent
-        anchors.margins: 9
-        spacing: 9
+        anchors.margins: 7
+        spacing: 8
         z: 1
 
         // -----------------------------------------------------------------
         // Left Column: DECK Header + State + Folder Steppers / Transport Keys
         // -----------------------------------------------------------------
         ColumnLayout {
-            Layout.preferredWidth: 136
+            Layout.preferredWidth: 134
             Layout.fillHeight: true
-            spacing: 5
+            spacing: 4
 
             RowLayout {
                 Layout.fillWidth: true
@@ -213,7 +213,7 @@ BrushedMetalPanel {
 
                 ConsoleButton {
                     Layout.fillWidth: true
-                    implicitHeight: 34
+                    implicitHeight: 30
                     text: "▶"
                     fontSize: 13
                     anodizedFill: true
@@ -234,7 +234,7 @@ BrushedMetalPanel {
 
                 ConsoleButton {
                     Layout.fillWidth: true
-                    implicitHeight: 34
+                    implicitHeight: 30
                     text: "⏸"
                     fontSize: 12
                     anodizedFill: true
@@ -250,7 +250,7 @@ BrushedMetalPanel {
 
                 ConsoleButton {
                     Layout.fillWidth: true
-                    implicitHeight: 34
+                    implicitHeight: 30
                     text: "⏹"
                     fontSize: 12
                     anodizedFill: true

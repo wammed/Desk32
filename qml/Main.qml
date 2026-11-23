@@ -164,7 +164,7 @@ ApplicationWindow {
     // Export Path Render Modal (hosts verified RenderPanel inside ScrollableModalPopup)
     ScrollableModalPopup {
         id: renderPopup
-        titleText: qsTr("OFFLINE EXPORT RENDER ENGINE (RenderPanel)")
+        titleText: qsTr("OFFLINE EXPORT RENDER ENGINE")
         preferredWidth: 760
         preferredHeight: 620
         accentColor: "#F5B841"

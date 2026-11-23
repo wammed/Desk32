@@ -49,7 +49,7 @@ Item {
                 }
 
                 Label {
-                    text: qsTr("2-Pane Workspace & Checkpoint View (Full refinement in Gate G5)")
+                    text: qsTr("Dedicated Workspace & Checkpoint Browser")
                     font.pixelSize: 10
                     color: "#6B7886"
                 }
