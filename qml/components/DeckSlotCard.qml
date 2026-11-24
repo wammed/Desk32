@@ -19,6 +19,12 @@ BrushedMetalPanel {
     readonly property bool isLocked: !!(deckState && deckState.isLocked)
     readonly property bool isErrorStopped: !!(deckState && deckState.hasError)
     readonly property bool folderActive: !!(deckState && deckState.folderActive)
+    readonly property string folderDisplayName: {
+        var fp = (deckState && deckState.folderPath) ? deckState.folderPath : ""
+        if (!fp || fp.length === 0) return ""
+        var parts = fp.replace(/\/+$/, "").split("/")
+        return parts.length > 0 ? parts[parts.length - 1] : fp
+    }
     readonly property int trackOrigin: (deckState && deckState.trackOrigin !== undefined) ? deckState.trackOrigin : 0
     property string endedSessionLabel: ""
     readonly property bool canCopyToWorkspace: WorkspaceManager.hasOpenWorkspace
@@ -76,8 +82,8 @@ BrushedMetalPanel {
     Layout.fillWidth: true
     Layout.fillHeight: true
     baseTint: isActive ? "#172029" : "#12161c"
-    borderColor: isErrorStopped ? "#FF5252" : (isActive ? "#2CD6F2" : "#2c3440")
-    accentColor: isActive ? "#402CD6F2" : "transparent"
+    borderColor: isErrorStopped ? "#FF5252" : (isActive ? "#2CD6F2" : (folderActive ? "#C88D22" : "#2c3440"))
+    accentColor: isActive ? "#402CD6F2" : (folderActive ? "#30F5B841" : "transparent")
     cornerRadius: 6
     brushedOpacity: 0.30
 
@@ -242,6 +248,35 @@ BrushedMetalPanel {
                 }
             }
 
+            // Prominent Folder Session Status Pill in Left Column
+            Rectangle {
+                visible: cardRoot.folderActive
+                Layout.fillWidth: true
+                Layout.preferredHeight: 18
+                height: 18
+                radius: 3
+                color: "#241908"
+                border.color: "#F5B841"
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 5; anchors.rightMargin: 5
+                    spacing: 4
+                    Rectangle {
+                        width: 6; height: 6; radius: 3
+                        color: "#F5B841"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        text: qsTr("FOLDER SESSION")
+                        font.family: "Monospace"
+                        font.pixelSize: 8
+                        font.bold: true
+                        color: "#FFD573"
+                    }
+                }
+            }
+
             Item { Layout.fillHeight: true }
 
             // Iconic Hardware Green / Amber / Burnt-Orange Transport Buttons
@@ -352,6 +387,63 @@ BrushedMetalPanel {
                             font.family: "Monospace"
                             font.pixelSize: 9
                             color: "#52CFEA"
+                        }
+                    }
+
+                    // Active Folder Session Banner inside OLED (Folder position + folder name + read-ahead tooltip)
+                    Rectangle {
+                        id: oledFolderBanner
+                        visible: cardRoot.folderActive
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 18
+                        height: 18
+                        radius: 3
+                        color: "#241908"
+                        border.color: "#F5B841"
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 6; anchors.rightMargin: 6
+                            spacing: 5
+                            Rectangle {
+                                width: 6; height: 6; radius: 3
+                                color: "#F5B841"
+                            }
+                            Label {
+                                text: qsTr("FOLDER %1/%2")
+                                      .arg((cardRoot.deckState ? (cardRoot.deckState.folderCurrentIndex || 0) : 0) + 1)
+                                      .arg(cardRoot.deckState ? (cardRoot.deckState.folderTotalTracks || 0) : 0)
+                                font.family: "Monospace"
+                                font.pixelSize: 8
+                                font.bold: true
+                                color: "#FFD573"
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                elide: Text.ElideMiddle
+                                text: cardRoot.folderDisplayName
+                                font.family: "Monospace"
+                                font.pixelSize: 8
+                                color: "#F0D699"
+                            }
+                        }
+                        MouseArea {
+                            id: oledFolderHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            acceptedButtons: Qt.NoButton
+                        }
+                        ToolTip.visible: oledFolderHover.containsMouse
+                        ToolTip.text: {
+                            var cur = (cardRoot.deckState ? (cardRoot.deckState.folderCurrentIndex || 0) : 0) + 1
+                            var tot = cardRoot.deckState ? (cardRoot.deckState.folderTotalTracks || 0) : 0
+                            var fp = (cardRoot.deckState && cardRoot.deckState.folderPath) ? cardRoot.deckState.folderPath : ""
+                            var next = (cardRoot.deckState && cardRoot.deckState.readAheadFile) ? cardRoot.deckState.readAheadFile : ""
+                            var msg = qsTr("Folder Session active: %1 (%2/%3)").arg(fp).arg(cur).arg(tot)
+                            if (next.length > 0) {
+                                msg += "\n" + qsTr("Next: %1").arg(next)
+                            }
+                            return msg
                         }
                     }
 
@@ -495,7 +587,13 @@ BrushedMetalPanel {
                     leftPadding: 4; rightPadding: 4
                     implicitWidth: 42; implicitHeight: 22
                     enabled: !cardRoot.isLocked
-                    toolTipText: qsTr("Start Folder Session from first track")
+                    highlighted: cardRoot.folderActive
+                    accentColor: "#F5B841"
+                    toolTipText: cardRoot.folderActive
+                                 ? qsTr("Folder Session active (%1/%2) — click to restart from track 1 (re-scans folder)")
+                                   .arg((cardRoot.deckState ? (cardRoot.deckState.folderCurrentIndex || 0) : 0) + 1)
+                                   .arg(cardRoot.deckState ? (cardRoot.deckState.folderTotalTracks || 0) : 0)
+                                 : qsTr("Start Folder Session from first track")
                     onClicked: cardRoot.startFolderRequested(cardRoot.deckId)
                 }
 

@@ -769,5 +769,25 @@
         <source>Outside Workspace: Located outside the open workspace directory (Read-Only)</source>
         <translation>ワークスペース外: 専用ディレクトリ外の音源（読み取り専用）</translation>
     </message>
+    <message>
+        <source>FOLDER SESSION</source>
+        <translation>フォルダ連続再生中</translation>
+    </message>
+    <message>
+        <source>FOLDER %1/%2</source>
+        <translation>フォルダ再生 %1/%2</translation>
+    </message>
+    <message>
+        <source>Folder Session active: %1 (%2/%3)</source>
+        <translation>フォルダ連続再生中: %1 (%2/%3)</translation>
+    </message>
+    <message>
+        <source>Next: %1</source>
+        <translation>次曲先読み: %1</translation>
+    </message>
+    <message>
+        <source>Folder Session active (%1/%2) — click to restart from track 1 (re-scans folder)</source>
+        <translation>フォルダ連続再生中 (%1/%2) — クリックでフォルダを再取得して1曲目から再開</translation>
+    </message>
 </context>
 </TS>
