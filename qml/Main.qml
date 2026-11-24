@@ -46,9 +46,13 @@ ApplicationWindow {
     property string pendingDeckIdForFile: "A"
     property string pendingDeckIdForFolder: "A"
     property var bitPerfectReport: ({})
+    property string bitPerfectExportFeedback: ""
+    property bool bitPerfectExportOk: true
 
     function openBitPerfectReport() {
         bitPerfectReport = EngineController.getBitPerfectVerificationReport()
+        bitPerfectExportFeedback = ""
+        bitPerfectExportOk = true
         bitPerfectPopup.open()
     }
 
@@ -222,6 +226,40 @@ ApplicationWindow {
             wrapMode: Text.WordWrap
         }
 
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            ConsoleButton {
+                text: qsTr("REFRESH")
+                implicitWidth: 96; implicitHeight: 30; fontSize: 10
+                accentColor: "#00E5FF"
+                onClicked: {
+                    mainWindow.bitPerfectReport = EngineController.getBitPerfectVerificationReport()
+                    mainWindow.bitPerfectExportFeedback = ""
+                    mainWindow.bitPerfectExportOk = true
+                }
+            }
+
+            ConsoleButton {
+                text: qsTr("EXPORT JSON...")
+                implicitWidth: 132; implicitHeight: 30; fontSize: 10
+                accentColor: "#00E676"
+                onClicked: bitPerfectExportDialog.open()
+            }
+
+            Label {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                visible: mainWindow.bitPerfectExportFeedback.length > 0
+                text: mainWindow.bitPerfectExportFeedback
+                font.family: "Monospace"
+                font.pixelSize: 10
+                color: mainWindow.bitPerfectExportOk ? "#00E676" : "#FF5252"
+                elide: Text.ElideMiddle
+            }
+        }
+
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#222933" }
 
         Label {
@@ -231,6 +269,25 @@ ApplicationWindow {
             font.pixelSize: 11
             color: "#9AA9B8"
             wrapMode: Text.WrapAnywhere
+        }
+    }
+
+    FileDialog {
+        id: bitPerfectExportDialog
+        title: qsTr("Export Bit-Perfect Verification Report (.json)")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [qsTr("JSON Files (*.json)"), qsTr("All Files (*)")]
+        defaultSuffix: "json"
+        onAccepted: {
+            var localPath = selectedFile.toString()
+            if (localPath.indexOf("file://") === 0) {
+                localPath = decodeURIComponent(localPath.substring(7))
+            }
+            var ok = EngineController.exportBitPerfectReportToJson(localPath, mainWindow.bitPerfectReport)
+            mainWindow.bitPerfectExportOk = ok
+            mainWindow.bitPerfectExportFeedback = ok
+                ? qsTr("Exported JSON: %1").arg(localPath)
+                : qsTr("Failed to export JSON report")
         }
     }
 

@@ -197,6 +197,9 @@ public:
     [[nodiscard]] int bitPerfectModeState() const;
     [[nodiscard]] QString bitPerfectModeStateText() const;
     Q_INVOKABLE QVariantMap getBitPerfectVerificationReport() const;
+    Q_INVOKABLE bool exportBitPerfectReportToJson(
+        const QString& filePath,
+        const QVariantMap& reportSnapshot = QVariantMap()) const;
     void checkBitPerfectVerificationTransition();
     Q_INVOKABLE QVariantMap getAudioCapabilities() const;
     Q_INVOKABLE QStringList availableAudioBackends() const;

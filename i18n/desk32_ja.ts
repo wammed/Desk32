@@ -390,6 +390,30 @@
         <source>Workspace Import Notice</source>
         <translation>ワークスペース取り込み通知</translation>
     </message>
+    <message>
+        <source>REFRESH</source>
+        <translation>再取得</translation>
+    </message>
+    <message>
+        <source>EXPORT JSON...</source>
+        <translation>JSON エクスポート...</translation>
+    </message>
+    <message>
+        <source>Export Bit-Perfect Verification Report (.json)</source>
+        <translation>Bit-Perfect 検証レポートを JSON エクスポート (.json)</translation>
+    </message>
+    <message>
+        <source>JSON Files (*.json)</source>
+        <translation>JSON ファイル (*.json)</translation>
+    </message>
+    <message>
+        <source>Exported JSON: %1</source>
+        <translation>JSON をエクスポートしました: %1</translation>
+    </message>
+    <message>
+        <source>Failed to export JSON report</source>
+        <translation>JSON レポートのエクスポートに失敗しました</translation>
+    </message>
 </context>
 <context>
     <name>WorkspacePanel</name>

@@ -4,6 +4,7 @@
 #include "engine/workspace/WorkspaceManager.hpp"
 #include "git_version.hpp"
 #include <QClipboard>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -14,6 +15,7 @@
 #include <QStandardPaths>
 #include <QSysInfo>
 #include <QTimer>
+#include <QUrl>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -2419,6 +2421,113 @@ QVariantMap EngineController::getBitPerfectVerificationReport() const {
   report["level3"] = level3;
 
   return report;
+}
+
+bool EngineController::exportBitPerfectReportToJson(
+    const QString &filePath, const QVariantMap &reportSnapshot) const {
+  QString targetPath = filePath.trimmed();
+  if (targetPath.startsWith(QStringLiteral("file://"))) {
+    const QString decoded = QUrl(targetPath).toLocalFile();
+    if (!decoded.isEmpty()) {
+      targetPath = decoded;
+    } else {
+      targetPath = QUrl::fromPercentEncoding(targetPath.mid(7).toUtf8());
+    }
+  }
+  if (targetPath.isEmpty()) {
+    log::LogService::instance().log(
+        QStringLiteral("AudioEngine"),
+        QStringLiteral("ExportBitPerfectReport"), QStringLiteral("Failed"),
+        QStringLiteral("Export aborted: target file path is empty."),
+        QStringLiteral("File"), QString());
+    return false;
+  }
+
+  const QVariantMap baseReport = reportSnapshot.isEmpty()
+                                     ? getBitPerfectVerificationReport()
+                                     : reportSnapshot;
+  QJsonObject root = QJsonObject::fromVariantMap(baseReport);
+
+  const QDateTime utcNow = QDateTime::currentDateTimeUtc();
+  const QDateTime localNow = QDateTime::currentDateTime();
+  const int offsetSecs = localNow.offsetFromUtc();
+  const char sign = (offsetSecs >= 0) ? '+' : '-';
+  const int absSecs = std::abs(offsetSecs);
+  const QString offsetStr = QStringLiteral("%1%2:%3")
+                                .arg(sign)
+                                .arg(absSecs / 3600, 2, 10, QLatin1Char('0'))
+                                .arg((absSecs % 3600) / 60, 2, 10, QLatin1Char('0'));
+
+  root.insert(QStringLiteral("schemaVersion"), 1);
+  root.insert(QStringLiteral("appName"), QStringLiteral("Desk32"));
+#ifdef DESK32_APP_VERSION
+  root.insert(QStringLiteral("appVersion"), QStringLiteral(DESK32_APP_VERSION));
+#else
+  root.insert(QStringLiteral("appVersion"), QStringLiteral("0.1.0"));
+#endif
+#ifdef DESK32_GIT_COMMIT
+  root.insert(QStringLiteral("gitCommit"), QStringLiteral(DESK32_GIT_COMMIT));
+#endif
+#ifdef DESK32_GIT_DIRTY
+  root.insert(QStringLiteral("gitDirty"), DESK32_GIT_DIRTY != 0);
+#endif
+  root.insert(QStringLiteral("exportedUtc"), utcNow.toString(Qt::ISODateWithMs));
+  root.insert(QStringLiteral("exportedLocal"),
+              localNow.toString(Qt::ISODateWithMs));
+  root.insert(QStringLiteral("exportedLocalOffset"), offsetStr);
+  root.insert(QStringLiteral("audioBackend"), audioBackend());
+  root.insert(QStringLiteral("outputDevice"), currentOutputDevice());
+  root.insert(QStringLiteral("activeDeckId"), activeDeckId());
+  if (m_deckManager) {
+    if (const auto *active = m_deckManager->activeDeck()) {
+      if (active->isOpen() && !active->trackInfo().path.empty()) {
+        root.insert(QStringLiteral("activeTrackPath"),
+                    QString::fromStdString(active->trackInfo().path));
+      }
+    }
+  }
+
+  const QFileInfo fi(targetPath);
+  if (!QDir().mkpath(fi.absolutePath())) {
+    log::LogService::instance().log(
+        QStringLiteral("AudioEngine"),
+        QStringLiteral("ExportBitPerfectReport"), QStringLiteral("Failed"),
+        QStringLiteral("Failed to create directory for Bit-Perfect report: %1")
+            .arg(targetPath),
+        QStringLiteral("File"), targetPath);
+    return false;
+  }
+
+  QSaveFile save(targetPath);
+  if (!save.open(QIODevice::WriteOnly)) {
+    log::LogService::instance().log(
+        QStringLiteral("AudioEngine"),
+        QStringLiteral("ExportBitPerfectReport"), QStringLiteral("Failed"),
+        QStringLiteral("Failed to open file for Bit-Perfect JSON export: %1 (%2)")
+            .arg(targetPath, save.errorString()),
+        QStringLiteral("File"), targetPath);
+    return false;
+  }
+
+  const QByteArray jsonBytes =
+      QJsonDocument(root).toJson(QJsonDocument::Indented);
+  if (save.write(jsonBytes) != jsonBytes.size() || !save.commit()) {
+    log::LogService::instance().log(
+        QStringLiteral("AudioEngine"),
+        QStringLiteral("ExportBitPerfectReport"), QStringLiteral("Failed"),
+        QStringLiteral("Failed to write Bit-Perfect JSON report: %1 (%2)")
+            .arg(targetPath, save.errorString()),
+        QStringLiteral("File"), targetPath);
+    return false;
+  }
+
+  log::LogService::instance().log(
+      QStringLiteral("AudioEngine"),
+      QStringLiteral("ExportBitPerfectReport"), QStringLiteral("Success"),
+      QStringLiteral("Exported Bit-Perfect verification report JSON (%1)")
+          .arg(targetPath),
+      QStringLiteral("File"), targetPath);
+  return true;
 }
 
 void EngineController::checkBitPerfectVerificationTransition() {

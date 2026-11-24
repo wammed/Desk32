@@ -261,6 +261,7 @@ private slots:
   void testPhase4AuditDspReverbContractsOverflowAndSmoothing();
   void testReverbGainStagingCombCountAndStability();
   void testDspInputOutputTrimsPresetRulesAndPreamp();
+  void testBitPerfectReportJsonExport();
   void cleanupTestCase();
 
 private:
@@ -4823,6 +4824,56 @@ void TestPhase2Dsp::testDspInputOutputTrimsPresetRulesAndPreamp() {
   ctrl.setDspNodeBypass("PEQ", true);
   ctrl.resetAllDspTrims();
   ctrl.stop("A");
+}
+
+void TestPhase2Dsp::testBitPerfectReportJsonExport() {
+  auto &ctrl = desk32::core::EngineController::instance();
+  QVERIFY(ctrl.initialize(true));
+
+  const QString outPath = m_tempDir->path() + "/bp_exports/bitperfect_report.json";
+  const QVariantMap snapshot = ctrl.getBitPerfectVerificationReport();
+
+  // 1. Empty path must fail gracefully
+  QVERIFY(!ctrl.exportBitPerfectReportToJson(QString()));
+
+  // 2. Valid snapshot export writes indented, parseable JSON with metadata + L1/L2/L3
+  QVERIFY(ctrl.exportBitPerfectReportToJson(outPath, snapshot));
+  QVERIFY(QFile::exists(outPath));
+
+  QFile f(outPath);
+  QVERIFY(f.open(QIODevice::ReadOnly));
+  QJsonParseError err{};
+  const QJsonDocument doc = QJsonDocument::fromJson(f.readAll(), &err);
+  QCOMPARE(err.error, QJsonParseError::NoError);
+  QVERIFY(doc.isObject());
+
+  const QJsonObject obj = doc.object();
+  QCOMPARE(obj.value("schemaVersion").toInt(), 1);
+  QCOMPARE(obj.value("appName").toString(), QStringLiteral("Desk32"));
+  QVERIFY(!obj.value("exportedUtc").toString().isEmpty());
+  QVERIFY(!obj.value("exportedLocal").toString().isEmpty());
+  QVERIFY(!obj.value("exportedLocalOffset").toString().isEmpty());
+  QVERIFY(obj.contains("modeState"));
+  QVERIFY(obj.contains("modeStateText"));
+  QVERIFY(obj.value("level1").isObject());
+  QVERIFY(obj.value("level2").isObject());
+  QVERIFY(obj.value("level3").isObject());
+
+  // 3. file:// URI form with live default report works too
+  const QString uriOutPath = m_tempDir->path() + "/bp_exports/live_report.json";
+  QVERIFY(ctrl.exportBitPerfectReportToJson(QStringLiteral("file://") + uriOutPath));
+  QVERIFY(QFile::exists(uriOutPath));
+
+  // 4. Audit log records ExportBitPerfectReport Success
+  desk32::core::log::LogService::instance().flush();
+  desk32::core::log::LogFilter lf;
+  lf.category = "AudioEngine";
+  lf.target = outPath.toStdString();
+  const auto logs = desk32::core::log::LogService::instance().queryLogs(lf);
+  QVERIFY(!logs.empty());
+  QCOMPARE(QString::fromStdString(logs.front().operation),
+           QStringLiteral("ExportBitPerfectReport"));
+  QCOMPARE(QString::fromStdString(logs.front().status), QStringLiteral("Success"));
 }
 
 QTEST_GUILESS_MAIN(TestPhase2Dsp)
