@@ -2,7 +2,6 @@
 #include "engine/decoder/FFmpegAudioDecoder.hpp"
 
 #include <QCryptographicHash>
-#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -12,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <sys/stat.h>
 #include <vector>
 
 namespace desk32::engine::audio {
@@ -61,11 +61,18 @@ std::string WaveformExtractor::cacheDirectoryPath() {
 }
 
 std::string WaveformExtractor::computeCacheFilePath(const std::string& canonPath) {
-    const QFileInfo fi(QString::fromStdString(canonPath));
+    qint64 fileSize = 0;
+    qint64 mtimeMs = 0;
+    struct stat st{};
+    if (::stat(canonPath.c_str(), &st) == 0) {
+        fileSize = static_cast<qint64>(st.st_size);
+        mtimeMs = static_cast<qint64>(st.st_mtim.tv_sec) * 1000LL +
+                  static_cast<qint64>(st.st_mtim.tv_nsec) / 1000000LL;
+    }
     const QString key = QStringLiteral("%1|%2|%3|v1")
                             .arg(QString::fromStdString(canonPath))
-                            .arg(fi.size())
-                            .arg(fi.lastModified().toMSecsSinceEpoch());
+                            .arg(fileSize)
+                            .arg(mtimeMs);
     const QByteArray digest = QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha256).toHex();
     return cacheDirectoryPath() + "/" + digest.toStdString() + ".wfm";
 }

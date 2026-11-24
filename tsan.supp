@@ -28,8 +28,9 @@ race:QObject::event
 
 # 6. Target: Qt6 QMetaObject::invokeMethod cross-thread queued functor event lifecycle
 #    Reason: Precompiled distribution libQt6Core lacks TSan annotations for cross-thread queued functor delivery.
-#    Scope : Strictly scoped to Qt internal QFunctorSlotObject, QMetaCallEvent, and QMetaObject::invokeMethodImpl.
+#    Scope : Strictly scoped to Qt internal QFunctorSlotObject, QCallableObject, QMetaCallEvent, and QMetaObject::invokeMethodImpl.
 race:QFunctorSlotObject
+race:QCallableObject
 race:QMetaCallEvent
 race:QMetaObject::invokeMethodImpl
 
@@ -60,3 +61,10 @@ race:libdbus-1
 #     Scope : Strictly scoped to g_main_context_wakeup and g_main_context_unref symbols.
 race:g_main_context_wakeup
 race:g_main_context_unref
+
+# 11. Target: Qt6 qMkTime / glibc tzset internal timezone cache in precompiled libQt6Core / libc
+#     Reason: Precompiled libQt6Core qMkTime(tm*) invokes glibc mktime/tzset, which synchronizes via glibc's
+#             internal futex (tzset_lock) invisible to TSan, causing false-positive strdup(malloc)/free races
+#             when Qt local-time helpers run across worker threads (e.g. RenderEngine, WorkspaceManager, QQmlThread).
+#     Scope : Strictly scoped to qMkTime symbol.
+race:qMkTime
