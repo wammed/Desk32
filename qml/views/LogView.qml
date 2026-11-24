@@ -8,6 +8,9 @@ import "../components"
 Item {
     id: logViewRoot
 
+    implicitWidth: 1600
+    implicitHeight: 900
+
     property var rawLogs: []
     property var treeRows: []
     property var expandedOps: ({})
@@ -144,13 +147,24 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#0e1116"
+        color: "#080a0e"
     }
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 10
-        spacing: 8
+    Rectangle {
+        id: logFrame
+        anchors.centerIn: parent
+        width: parent && parent.width > 0 ? Math.min(parent.width, 1600) : 1600
+        height: parent && parent.height > 0 ? Math.min(parent.height, 900) : 900
+        color: "#0e1116"
+        border.color: "#252e3a"
+        border.width: 1
+        radius: 6
+        clip: true
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 8
 
         // =====================================================================
         // TOP FILTER & AUDIT TOOLBAR
@@ -258,7 +272,7 @@ Item {
             BrushedMetalPanel {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
-                Layout.preferredWidth: 1620
+                Layout.preferredWidth: 1050
                 Layout.fillHeight: true
                 clip: true
                 baseTint: "#13171d"
@@ -285,12 +299,12 @@ Item {
                             anchors.fill: parent
                             anchors.leftMargin: 10; anchors.rightMargin: 20
                             spacing: 8
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176; text: qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 112; Layout.minimumWidth: 112; Layout.maximumWidth: 112; text: qsTr("CATEGORY"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148; text: qsTr("OPERATION"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 76;  Layout.minimumWidth: 76;  Layout.maximumWidth: 76;  text: qsTr("STATUS"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176; text: qsTr("TARGET"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 68;  Layout.minimumWidth: 68;  Layout.maximumWidth: 68;  text: qsTr("DUR(ms)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; horizontalAlignment: Text.AlignRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 160; Layout.minimumWidth: 160; Layout.maximumWidth: 160; text: qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 104; Layout.minimumWidth: 104; Layout.maximumWidth: 104; text: qsTr("CATEGORY"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 136; Layout.minimumWidth: 136; Layout.maximumWidth: 136; text: qsTr("OPERATION"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 72;  Layout.minimumWidth: 72;  Layout.maximumWidth: 72;  text: qsTr("STATUS"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148; text: qsTr("TARGET"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 60;  Layout.minimumWidth: 60;  Layout.maximumWidth: 60;  text: qsTr("DUR(ms)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; horizontalAlignment: Text.AlignRight }
                             Label { Layout.fillWidth: true;  Layout.minimumWidth: 0;   leftPadding: 8; text: qsTr("MESSAGE"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
                         }
                     }
@@ -337,7 +351,7 @@ Item {
 
                                     // Tree Expand Chevron + Timestamp
                                     RowLayout {
-                                        readonly property int colW: Math.max(80, 176 - modelData.depth * 18)
+                                        readonly property int colW: Math.max(80, 160 - modelData.depth * 18)
                                         Layout.fillWidth: false
                                         Layout.preferredWidth: colW
                                         Layout.minimumWidth: colW
@@ -372,21 +386,21 @@ Item {
                                     }
 
                                     Label {
-                                        Layout.fillWidth: false; Layout.preferredWidth: 112; Layout.minimumWidth: 112; Layout.maximumWidth: 112
+                                        Layout.fillWidth: false; Layout.preferredWidth: 104; Layout.minimumWidth: 104; Layout.maximumWidth: 104
                                         text: ev.category || ""
                                         font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7ED9F0"
                                         elide: Text.ElideRight
                                     }
 
                                     Label {
-                                        Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148
+                                        Layout.fillWidth: false; Layout.preferredWidth: 136; Layout.minimumWidth: 136; Layout.maximumWidth: 136
                                         text: ev.operation || ""
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#DCE6F0"
                                         elide: Text.ElideRight
                                     }
 
                                     Rectangle {
-                                        Layout.fillWidth: false; Layout.preferredWidth: 76; Layout.minimumWidth: 76; Layout.maximumWidth: 76
+                                        Layout.fillWidth: false; Layout.preferredWidth: 72; Layout.minimumWidth: 72; Layout.maximumWidth: 72
                                         Layout.preferredHeight: 18
                                         Layout.alignment: Qt.AlignVCenter
                                         height: 18; radius: 3
@@ -401,14 +415,14 @@ Item {
                                     }
 
                                     Label {
-                                        Layout.fillWidth: false; Layout.preferredWidth: 176; Layout.minimumWidth: 176; Layout.maximumWidth: 176
+                                        Layout.fillWidth: false; Layout.preferredWidth: 148; Layout.minimumWidth: 148; Layout.maximumWidth: 148
                                         text: ev.target || "-"
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#B8C7D6"
                                         elide: Text.ElideMiddle
                                     }
 
                                     Label {
-                                        Layout.fillWidth: false; Layout.preferredWidth: 68; Layout.minimumWidth: 68; Layout.maximumWidth: 68
+                                        Layout.fillWidth: false; Layout.preferredWidth: 60; Layout.minimumWidth: 60; Layout.maximumWidth: 60
                                         text: ev.durationMs > 0 ? ev.durationMs.toFixed(1) : "-"
                                         font.family: "Monospace"; font.pixelSize: 10; color: "#8C9EAE"
                                         horizontalAlignment: Text.AlignRight
@@ -440,7 +454,7 @@ Item {
             BrushedMetalPanel {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
-                Layout.preferredWidth: 900
+                Layout.preferredWidth: 520
                 Layout.fillHeight: true
                 clip: true
                 baseTint: "#13171d"
@@ -579,7 +593,7 @@ Item {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 14
                 Label {
-                    text: qsTr("DISPLAYED: %1 EVENTS (%2 TREE ROWS)   |   RETENTION POLICY: 180 DAYS / 300,000 EVENTS   |   SESSION: %3")
+                    text: qsTr("DISPLAYED: %1 EVENTS (%2 TREE ROWS)   |   RETENTION POLICY: 180 DAYS / 300,000 ROOT OPERATIONS   |   SESSION: %3")
                           .arg(logViewRoot.rawLogs.length)
                           .arg(logViewRoot.treeRows.length)
                           .arg(LogService.sessionId())
@@ -592,6 +606,7 @@ Item {
                     font.family: "Monospace"; font.pixelSize: 10; color: "#00E676"
                 }
             }
+        }
         }
     }
 

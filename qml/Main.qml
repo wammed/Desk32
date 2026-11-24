@@ -52,6 +52,12 @@ ApplicationWindow {
         bitPerfectPopup.open()
     }
 
+    Component.onCompleted: {
+        if (Qt.application.arguments.indexOf("--open-render") >= 0) {
+            renderPopup.open()
+        }
+    }
+
     // F11 Fullscreen / Windowed Toggle
     Shortcut {
         sequence: "F11"
@@ -169,13 +175,14 @@ ApplicationWindow {
     ScrollableModalPopup {
         id: renderPopup
         titleText: qsTr("OFFLINE EXPORT RENDER ENGINE")
-        preferredWidth: 760
-        preferredHeight: 620
+        preferredWidth: 1600
+        preferredHeight: 900
         accentColor: "#F5B841"
 
         RenderPanel {
             Layout.fillWidth: true
-            Layout.preferredHeight: 520
+            Layout.preferredHeight: Math.max(520, renderPopup.height - 88)
+            showHeader: false
             visible: true
             onCloseRequested: renderPopup.close()
             onOpenLogRequested: {

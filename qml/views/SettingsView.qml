@@ -7,6 +7,9 @@ import "../components"
 Item {
     id: settingsRoot
 
+    implicitWidth: 1600
+    implicitHeight: 900
+
     property double selectedUiScale: 1.0
     signal uiScaleChangedRequested(double newScale)
 
@@ -61,13 +64,24 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#0e1116"
+        color: "#080a0e"
     }
 
-    RowLayout {
-        anchors.fill: parent
-        anchors.margins: 10
-        spacing: 10
+    Rectangle {
+        id: settingsFrame
+        anchors.centerIn: parent
+        width: parent && parent.width > 0 ? Math.min(parent.width, 1600) : 1600
+        height: parent && parent.height > 0 ? Math.min(parent.height, 900) : 900
+        color: "#0e1116"
+        border.color: "#252e3a"
+        border.width: 1
+        radius: 6
+        clip: true
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 10
 
         // =====================================================================
         // LEFT CATEGORY NAVIGATION PANEL (260px)
@@ -638,6 +652,7 @@ Item {
                     }
                 }
             }
+        }
         }
     }
 }

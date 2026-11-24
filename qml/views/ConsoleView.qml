@@ -1805,20 +1805,23 @@ Item {
                                 }
                             }
 
-                            // 4. Deep Crimson-Red GLOBAL BYPASS Button
+                            // 4. GLOBAL BYPASS Toggle Button (Dark gunmetal when OFF, Vivid Crimson-Red when ON)
                             ConsoleButton {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 Layout.preferredHeight: 84
-                                text: qsTr("GLOBAL BYPASS")
+                                text: EngineController.globalDspBypass ? qsTr("GLOBAL BYPASS\nON") : qsTr("GLOBAL BYPASS\nOFF")
                                 fontSize: 12
-                                anodizedFill: true
-                                anodizedTop: EngineController.globalDspBypass ? "#DF4349" : "#AC2F35"
-                                anodizedBottom: EngineController.globalDspBypass ? "#7C1C21" : "#511317"
-                                anodizedText: EngineController.globalDspBypass ? "#FFFFFF" : "#F6D6D8"
+                                showLed: true
+                                ledColor: EngineController.globalDspBypass ? "#FF8A80" : "#444E5C"
+                                anodizedFill: EngineController.globalDspBypass
+                                anodizedTop: "#E8434A"
+                                anodizedBottom: "#8A191F"
+                                anodizedText: "#FFFFFF"
                                 accentColor: "#FF5252"
                                 highlighted: EngineController.globalDspBypass
                                 enabled: !consoleRoot.isDirect
+                                toolTipText: qsTr("Bypass all Master DSP nodes (Toggle ON/OFF)")
                                 onClicked: EngineController.setGlobalDspBypass(!EngineController.globalDspBypass)
                             }
                         }

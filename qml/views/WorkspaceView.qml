@@ -8,6 +8,9 @@ import "../components"
 Item {
     id: wsRoot
 
+    implicitWidth: 1600
+    implicitHeight: 900
+
     property var workspacesList: []
     property var allFilesList: []
     property var folderTreeList: []
@@ -294,13 +297,24 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#0e1116"
+        color: "#080a0e"
     }
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 10
-        spacing: 8
+    Rectangle {
+        id: wsFrame
+        anchors.centerIn: parent
+        width: parent && parent.width > 0 ? Math.min(parent.width, 1600) : 1600
+        height: parent && parent.height > 0 ? Math.min(parent.height, 900) : 900
+        color: "#0e1116"
+        border.color: "#252e3a"
+        border.width: 1
+        radius: 6
+        clip: true
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 8
 
         // =====================================================================
         // TOP WORKSPACE CONTROL & INTEGRITY STRIP
@@ -321,28 +335,40 @@ Item {
 
                 // Workspace Status Badge
                 Rectangle {
-                    implicitWidth: wsBadgeCol.implicitWidth + 22
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 260
+                    Layout.maximumWidth: Math.max(260, Math.min(640, Math.max(wsTitleLbl.implicitWidth, wsSubLbl.implicitWidth) + 24))
                     Layout.preferredHeight: 40
                     height: 40
                     radius: 4
                     color: WorkspaceManager.hasOpenWorkspace ? "#091E16" : "#22180C"
                     border.color: WorkspaceManager.hasOpenWorkspace ? "#247A56" : "#7C5B21"
-                    Column {
-                        id: wsBadgeCol
-                        anchors.centerIn: parent
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 11
+                        anchors.rightMargin: 11
+                        anchors.topMargin: 4
+                        anchors.bottomMargin: 4
+                        spacing: 1
                         Label {
+                            id: wsTitleLbl
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            elide: Text.ElideRight
                             text: WorkspaceManager.hasOpenWorkspace ? qsTr("WORKSPACE OPEN (LOCKED TO SESSION)") : qsTr("NO WORKSPACE — READ-ONLY MODE")
                             font.family: "Monospace"; font.pixelSize: 10; font.bold: true
                             color: WorkspaceManager.hasOpenWorkspace ? "#00E676" : "#F5B841"
                         }
                         Label {
+                            id: wsSubLbl
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: WorkspaceManager.hasOpenWorkspace
                                   ? WorkspaceManager.openWorkspacePath
                                   : qsTr("Select or register a workspace folder to enable COW import, tagging & checkpoints")
                             font.family: "Monospace"; font.pixelSize: 10
                             color: "#AFC0D0"
                             elide: Text.ElideMiddle
-                            width: Math.min(760, implicitWidth)
                         }
                     }
                 }
@@ -461,12 +487,12 @@ Item {
             spacing: 10
 
             // -----------------------------------------------------------------
-            // LEFT PANE (42%): FOLDER TREE SIDEBAR + WORKSPACE TRACK LIST
+            // LEFT PANE (43%): FOLDER TREE SIDEBAR + WORKSPACE TRACK LIST
             // -----------------------------------------------------------------
             BrushedMetalPanel {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
-                Layout.preferredWidth: 1040
+                Layout.preferredWidth: 670
                 Layout.fillHeight: true
                 clip: true
                 baseTint: "#13171d"
@@ -488,7 +514,7 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         DarkField {
-                            Layout.preferredWidth: 260
+                            Layout.preferredWidth: 220
                             placeholderText: qsTr("Filter filename, title, artist...")
                             onTextChanged: {
                                 wsRoot.searchFilter = text
@@ -525,7 +551,7 @@ Item {
 
                                 Label {
                                     text: qsTr("TARGET DECK")
-                                    font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#8FA4B8"
+                                    font.family: "Monospace"; font.pixelSize: 9; font.bold: true; color: "#8FA4B8"
                                 }
 
                                 Repeater {
@@ -599,7 +625,7 @@ Item {
                                     id: primaryLoadBtn
                                     readonly property bool activeOk: targetDeckPanel.canLoadNow
                                     readonly property bool tgtLockedNow: targetDeckPanel.tgtLocked
-                                    Layout.preferredWidth: 276
+                                    Layout.preferredWidth: 210
                                     Layout.preferredHeight: 46
                                     height: 46
                                     radius: 5
@@ -766,7 +792,7 @@ Item {
 
                         // Sub-column 1: Folder Tree Panel
                         Rectangle {
-                            Layout.preferredWidth: 210
+                            Layout.preferredWidth: 185
                             Layout.fillHeight: true
                             radius: 4
                             color: "#080B10"
@@ -861,7 +887,7 @@ Item {
                                                 Layout.fillWidth: true
                                                 spacing: 6
                                                 Label {
-                                                    Layout.maximumWidth: 520
+                                                    Layout.maximumWidth: 260
                                                     Layout.minimumWidth: 0
                                                     text: modelData.fileName || modelData.relativePath
                                                     font.pixelSize: 12; font.bold: true; color: "#E6EEF6"
@@ -933,12 +959,12 @@ Item {
             }
 
             // -----------------------------------------------------------------
-            // RIGHT PANE (58%): PROVENANCE/TAGLIB COW | CHECKPOINTS & DIFF | REGISTRY
+            // RIGHT PANE (57%): PROVENANCE/TAGLIB COW | CHECKPOINTS & DIFF | REGISTRY
             // -----------------------------------------------------------------
             BrushedMetalPanel {
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
-                Layout.preferredWidth: 1460
+                Layout.preferredWidth: 900
                 Layout.fillHeight: true
                 clip: true
                 baseTint: "#13171d"
@@ -1136,7 +1162,7 @@ Item {
                                             }
                                         }
 
-                                        DarkField { id: moveFileDirField; Layout.preferredWidth: 140; placeholderText: qsTr("Target subdir...") }
+                                        DarkField { id: moveFileDirField; Layout.preferredWidth: 120; placeholderText: qsTr("Target subdir...") }
                                         ConsoleButton {
                                             text: qsTr("MOVE")
                                             implicitWidth: 68; implicitHeight: 34; fontSize: 10
@@ -1439,6 +1465,7 @@ Item {
                     }
                 }
             }
+        }
         }
     }
 
