@@ -676,6 +676,18 @@ target_include_directories(test_output_device_ui SYSTEM PRIVATE
 target_compile_options(test_output_device_ui PRIVATE ${TAGLIB_CFLAGS_OTHER})
 
 add_dependencies(test_output_device_ui desk32_git_version)
+qt_add_resources(test_output_device_ui "desk32_ui_resources"
+    PREFIX "/Desk32"
+    BASE "${CMAKE_SOURCE_DIR}"
+    FILES
+        "${CMAKE_SOURCE_DIR}/images/Desk32-Icon.svg"
+        "${CMAKE_SOURCE_DIR}/resources/ui/brushed_metal_tile.png"
+        "${CMAKE_SOURCE_DIR}/resources/ui/fader_cap_console.png"
+        "${CMAKE_SOURCE_DIR}/resources/ui/knob_metal_base.png"
+        "${CMAKE_SOURCE_DIR}/resources/ui/knob_metal_cap.png"
+        "${CMAKE_SOURCE_DIR}/resources/ui/knob_pointer.png"
+        "${CMAKE_SOURCE_DIR}/resources/ui/screw_hex_dark.png"
+)
 add_test(NAME test_output_device_ui COMMAND test_output_device_ui)
 set_tests_properties(test_output_device_ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

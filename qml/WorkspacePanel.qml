@@ -175,7 +175,7 @@ Rectangle {
         function onWorkspaceStateChanged() { wsRoot.refreshAll() }
         function onWorkspaceContentsChanged() { wsRoot.refreshAll() }
         function onExternalModificationDetected(path, detail) {
-            wsRoot.setNotice(qsTr("External modification: %1 (%2)").arg(path, detail), "warning")
+            wsRoot.setNotice(qsTr("External modification: %1 (%2)").arg(path).arg(detail), "warning")
             wsRoot.refreshAll()
         }
         function onWorkspaceErrorOccurred(op, msg) {
@@ -836,7 +836,7 @@ Rectangle {
                                 onClicked: {
                                     var r = WorkspaceManager.adoptSaveFromUi(modelData.saveId)
                                     if (r.success) {
-                                        wsRoot.setNotice(qsTr("Rolled back to %1 (auto-save: %2)").arg(modelData.saveId, r.autoSaveId || "-"), "success")
+                                        wsRoot.setNotice(qsTr("Rolled back to %1 (auto-save: %2)").arg(modelData.saveId).arg(r.autoSaveId || "-"), "success")
                                     } else {
                                         wsRoot.setNotice(r.errorMessage || qsTr("Rollback failed"), "error")
                                     }

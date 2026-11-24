@@ -88,10 +88,10 @@ Item {
                     loadedFile: relPath
                 }
                 setNotice(qsTr("Loaded '%1' into Deck %2 — Active Folder Session (%3/%4) ended & discarded (§2.7.5).")
-                          .arg(relPath, id).arg(prevIdx).arg(prevTotal), "warning")
+                          .arg(relPath).arg(id).arg(prevIdx).arg(prevTotal), "warning")
             } else {
                 sessionDiscardedInfo = null
-                setNotice(qsTr("Loaded '%1' into Deck %2").arg(relPath, id), "success")
+                setNotice(qsTr("Loaded '%1' into Deck %2").arg(relPath).arg(id), "success")
             }
         } else {
             var stAfter = deckStates[id]
@@ -99,7 +99,7 @@ Item {
                 lockRejectedMsg = qsTr("Load rejected: Deck %1 is LOCKED (audio context protected).").arg(id)
                 setNotice(lockRejectedMsg, "error")
             } else {
-                setNotice(qsTr("Failed to load '%1' into Deck %2").arg(relPath, id), "error")
+                setNotice(qsTr("Failed to load '%1' into Deck %2").arg(relPath).arg(id), "error")
             }
         }
         return ok
@@ -130,13 +130,13 @@ Item {
                     loadedFile: displayName
                 }
                 setNotice(qsTr("Loaded snapshot '%1' into Deck %2 — Active Folder Session (%3/%4) ended & discarded (§2.7.5).")
-                          .arg(displayName, id).arg(prevIdx).arg(prevTotal), "warning")
+                          .arg(displayName).arg(id).arg(prevIdx).arg(prevTotal), "warning")
             } else {
                 sessionDiscardedInfo = null
-                setNotice(qsTr("Loaded snapshot '%1' into Deck %2").arg(displayName, id), "info")
+                setNotice(qsTr("Loaded snapshot '%1' into Deck %2").arg(displayName).arg(id), "info")
             }
         } else {
-            setNotice(qsTr("Failed to load '%1' into Deck %2").arg(displayName, id), "error")
+            setNotice(qsTr("Failed to load '%1' into Deck %2").arg(displayName).arg(id), "error")
         }
         return ok
     }
@@ -776,7 +776,7 @@ Item {
                                             }
                                             var curP = (targetDeckPanel.tgtSt && targetDeckPanel.tgtSt.path) ? targetDeckPanel.tgtSt.path : ""
                                             return curP.length > 0
-                                                   ? qsTr("Current Deck %1 track: %2").arg(wsRoot.targetDeckId, curP.split('/').pop())
+                                                   ? qsTr("Current Deck %1 track: %2").arg(wsRoot.targetDeckId).arg(curP.split('/').pop())
                                                    : qsTr("Deck %1 is empty — double-click a file or press LOAD TO DECK %1").arg(wsRoot.targetDeckId)
                                         }
                                     }
@@ -1228,7 +1228,7 @@ Item {
                                             onClicked: {
                                                 var dir = moveFileDirField.text.trim()
                                                 if (WorkspaceManager.moveFileFromUi(wsRoot.selectedFileRel, dir)) {
-                                                    wsRoot.setNotice(qsTr("Moved '%1' to '%2'").arg(wsRoot.selectedFileRel, dir), "success")
+                                                    wsRoot.setNotice(qsTr("Moved '%1' to '%2'").arg(wsRoot.selectedFileRel).arg(dir), "success")
                                                     moveFileDirField.text = ""
                                                     wsRoot.selectedFileRel = ""
                                                 } else {
@@ -1372,7 +1372,7 @@ Item {
                                                 onClicked: {
                                                     var r = WorkspaceManager.adoptSaveFromUi(modelData.saveId)
                                                     if (r.success) {
-                                                        wsRoot.setNotice(qsTr("Rolled back workspace to %1 (auto-save backup: %2)").arg(modelData.saveId, r.autoSaveId || "-"), "success")
+                                                        wsRoot.setNotice(qsTr("Rolled back workspace to %1 (auto-save backup: %2)").arg(modelData.saveId).arg(r.autoSaveId || "-"), "success")
                                                     } else {
                                                         wsRoot.setNotice(r.errorMessage || qsTr("Rollback failed"), "error")
                                                     }
