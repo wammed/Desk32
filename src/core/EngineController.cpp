@@ -175,7 +175,11 @@ EngineController::EngineController(QObject *parent)
             m_renderEngine.setWorkspacePath(
                 engine::workspace::WorkspaceManager::instance()
                     .openWorkspacePath());
+            emit deckStateChanged(QStringLiteral("ALL"));
           });
+  connect(&wsMgr,
+          &engine::workspace::WorkspaceManager::workspaceContentsChanged, this,
+          [this]() { emit deckStateChanged(QStringLiteral("ALL")); });
 }
 
 EngineController::~EngineController() {
@@ -5046,8 +5050,13 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
   const bool wsOpen = wsMgr.hasOpenWorkspace();
   const bool insideOpenWs = wsOpen && !trackQPath.isEmpty() &&
                             wsMgr.isPathInsideOpenWorkspace(trackQPath, false);
+  const auto origin =
+      trackQPath.isEmpty()
+          ? engine::workspace::TrackOrigin::OutsideWorkspace
+          : wsMgr.classifyTrackOrigin(trackQPath, meta ? meta.get() : nullptr);
   map["isInsideOpenWorkspace"] = insideOpenWs;
   map["canCopyToWorkspace"] = wsOpen && !trackQPath.isEmpty() && !insideOpenWs;
+  map["trackOrigin"] = static_cast<int>(origin);
 
   return map;
 }

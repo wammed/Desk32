@@ -904,14 +904,38 @@ Item {
                                                     elide: Text.ElideRight
                                                 }
                                                 Rectangle {
+                                                    id: wsItemOriginBadge
+                                                    readonly property bool isAppCopied: modelData.trackOrigin === 1
+                                                    implicitWidth: originLbl.implicitWidth + 8; Layout.preferredHeight: 16; height: 16; radius: 2
+                                                    color: wsItemOriginBadge.isAppCopied ? "#092418" : "#2A1F0A"
+                                                    border.color: wsItemOriginBadge.isAppCopied ? "#00E676" : "#F5B841"
+                                                    Label {
+                                                        id: originLbl; anchors.centerIn: parent
+                                                        text: wsItemOriginBadge.isAppCopied ? qsTr("WS: APP") : qsTr("WS: EXT")
+                                                        font.family: "Monospace"; font.pixelSize: 8; font.bold: true
+                                                        color: wsItemOriginBadge.isAppCopied ? "#69F0AE" : "#FFD573"
+                                                    }
+                                                    MouseArea {
+                                                        id: wsItemOriginHover
+                                                        anchors.fill: parent
+                                                        hoverEnabled: true
+                                                        acceptedButtons: Qt.NoButton
+                                                    }
+                                                    ToolTip.visible: wsItemOriginHover.containsMouse
+                                                    ToolTip.text: wsItemOriginBadge.isAppCopied
+                                                                  ? qsTr("Workspace (App-Copied): Copied into the open workspace by Desk32")
+                                                                  : qsTr("Workspace (External): Copied or moved into the workspace externally")
+                                                }
+                                                Rectangle {
+                                                    visible: modelData.trackOrigin === 1 && !!modelData.logOnlyProvenance
                                                     implicitWidth: provLbl.implicitWidth + 8; Layout.preferredHeight: 16; height: 16; radius: 2
-                                                    color: modelData.logOnlyProvenance ? "#2A200C" : "#0A2218"
-                                                    border.color: modelData.logOnlyProvenance ? "#A67C23" : "#1F7A52"
+                                                    color: "#1B212A"
+                                                    border.color: "#5C7691"
                                                     Label {
                                                         id: provLbl; anchors.centerIn: parent
-                                                        text: modelData.logOnlyProvenance ? qsTr("LOG-ONLY") : qsTr("TAGLIB")
+                                                        text: qsTr("LOG-ONLY")
                                                         font.family: "Monospace"; font.pixelSize: 8; font.bold: true
-                                                        color: modelData.logOnlyProvenance ? "#F5B841" : "#00E676"
+                                                        color: "#A8C0D8"
                                                     }
                                                 }
                                                 Rectangle {
@@ -1032,11 +1056,33 @@ Item {
                                     anchors.fill: parent
                                     anchors.margins: 10
                                     spacing: 4
-                                    Label {
-                                        text: wsRoot.selectedFileRel.length > 0
-                                              ? qsTr("PROVENANCE & INTEGRITY — %1").arg(wsRoot.selectedFileRel)
-                                              : qsTr("SELECT A TRACK TO INSPECT PROVENANCE & TAGS")
-                                        font.family: "Monospace"; font.pixelSize: 11; font.bold: true; color: "#78D8F0"
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+                                        Label {
+                                            Layout.fillWidth: true
+                                            Layout.minimumWidth: 0
+                                            elide: Text.ElideMiddle
+                                            text: wsRoot.selectedFileRel.length > 0
+                                                  ? qsTr("PROVENANCE & INTEGRITY — %1").arg(wsRoot.selectedFileRel)
+                                                  : qsTr("SELECT A TRACK TO INSPECT PROVENANCE & TAGS")
+                                            font.family: "Monospace"; font.pixelSize: 11; font.bold: true; color: "#78D8F0"
+                                        }
+                                        Rectangle {
+                                            id: cardOriginBadge
+                                            visible: wsRoot.selectedFileRel.length > 0
+                                            readonly property bool isAppCopied: wsRoot.selectedFileDetails.trackOrigin === 1
+                                            implicitWidth: cardOriginLbl.implicitWidth + 10
+                                            Layout.preferredHeight: 18; height: 18; radius: 2
+                                            color: cardOriginBadge.isAppCopied ? "#092418" : "#2A1F0A"
+                                            border.color: cardOriginBadge.isAppCopied ? "#00E676" : "#F5B841"
+                                            Label {
+                                                id: cardOriginLbl; anchors.centerIn: parent
+                                                text: cardOriginBadge.isAppCopied ? qsTr("WS: APP") : qsTr("WS: EXT")
+                                                font.family: "Monospace"; font.pixelSize: 9; font.bold: true
+                                                color: cardOriginBadge.isAppCopied ? "#69F0AE" : "#FFD573"
+                                            }
+                                        }
                                     }
                                     Label {
                                         Layout.fillWidth: true

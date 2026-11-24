@@ -1065,16 +1065,20 @@ void TestWorkspaceV381::
   const QVariantMap wsDeckState = ctrl.getDeckState("A");
   QCOMPARE(wsDeckState["isInsideOpenWorkspace"].toBool(), true);
   QCOMPARE(wsDeckState["canCopyToWorkspace"].toBool(), false);
+  QCOMPARE(wsDeckState["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceAppCopied));
   QVERIFY(!ctrl.copyDeckTrackToWorkspace("A"));
 
   QVERIFY(ctrl.loadTrack("B", stereoWav));
   const QVariantMap extDeckState = ctrl.getDeckState("B");
   QCOMPARE(extDeckState["isInsideOpenWorkspace"].toBool(), false);
   QCOMPARE(extDeckState["canCopyToWorkspace"].toBool(), true);
+  QCOMPARE(extDeckState["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::OutsideWorkspace));
   ctrl.stop("A");
   ctrl.stop("B");
 
-  // 3. External file addition detection against state_index.json
+  // 3. External file addition detection against state_index.json & TrackOrigin::WorkspaceExternal
   const QString intruderPath = wsDir + "/externally_dropped.wav";
   QVERIFY(createTestWav(intruderPath, 48000.0, 2400));
   const QStringList extChanges = ws.verifyWorkspaceIntegrity();
@@ -1086,6 +1090,14 @@ void TestWorkspaceV381::
     }
   }
   QVERIFY(sawExternalAdd);
+
+  QVERIFY(ctrl.loadTrack("C", intruderPath));
+  QCOMPARE(ctrl.getDeckState("C")["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceExternal));
+  QCOMPARE(ws.getFileDetails("externally_dropped.wav")["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceExternal));
+  ctrl.stop("C");
+
   ws.acknowledgeExternalModifications();
   QVERIFY(ws.deleteWorkspaceFile("externally_dropped.wav", err));
 
@@ -1112,6 +1124,28 @@ void TestWorkspaceV381::
 
   const QVariantMap aacDetails = ws.getFileDetails("raw_stereo.aac");
   QCOMPARE(aacDetails["logOnlyProvenance"].toBool(), true);
+  QCOMPARE(aacDetails["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceAppCopied));
+
+  // Externally placed .aac without Desk32 import must be classified WorkspaceExternal
+  const QString extAac = wsDir + "/external_raw.aac";
+  QVERIFY(QFile::copy(adtsAac, extAac));
+  QVERIFY(!ws.verifyWorkspaceIntegrity().isEmpty());
+  QCOMPARE(ws.getFileDetails("external_raw.aac")["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceExternal));
+  QVERIFY(ctrl.loadTrack("D", extAac));
+  QCOMPARE(ctrl.getDeckState("D")["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceExternal));
+  ctrl.stop("D");
+  QVERIFY(ws.deleteWorkspaceFile("external_raw.aac", err));
+
+  // Also verify externally copying a provenance-tagged file from outside still detects externally_added -> WorkspaceExternal
+  const QString spoofedCopy = wsDir + "/externally_copied_tagged.wav";
+  QVERIFY(QFile::copy(stereoImp.destPath, spoofedCopy));
+  QVERIFY(!ws.verifyWorkspaceIntegrity().isEmpty());
+  QCOMPARE(ws.getFileDetails("externally_copied_tagged.wav")["trackOrigin"].toInt(),
+           static_cast<int>(TrackOrigin::WorkspaceExternal));
+  QVERIFY(ws.deleteWorkspaceFile("externally_copied_tagged.wav", err));
 
   QFile idxFile(wsDir + "/.desk32/state_index.json");
   QVERIFY(idxFile.open(QIODevice::ReadOnly));

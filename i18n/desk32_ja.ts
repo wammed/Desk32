@@ -726,5 +726,48 @@
         <source>Register &amp; Open Dedicated Workspace Folder</source>
         <translation>専用ワークスペースフォルダを新規登録して開く</translation>
     </message>
+    <message>
+        <source>WS: APP</source>
+        <translation>WS:アプリ</translation>
+    </message>
+    <message>
+        <source>WS: EXT</source>
+        <translation>WS:外部</translation>
+    </message>
+    <message>
+        <source>Workspace (App-Copied): Copied into the open workspace by Desk32</source>
+        <translation>ワークスペース内（アプリコピー）: Desk32 により来歴付きでコピーされた音源</translation>
+    </message>
+    <message>
+        <source>Workspace (External): Copied or moved into the workspace externally</source>
+        <translation>ワークスペース内（外部配置）: 外部操作によりコピーまたは移動された音源（来歴なし）</translation>
+    </message>
+</context>
+<context>
+    <name>DeckSlotCard</name>
+    <message>
+        <source>WS: APP</source>
+        <translation>WS:アプリ</translation>
+    </message>
+    <message>
+        <source>WS: EXT</source>
+        <translation>WS:外部</translation>
+    </message>
+    <message>
+        <source>OUTSIDE WS</source>
+        <translation>WS外</translation>
+    </message>
+    <message>
+        <source>Workspace (App-Copied): Copied into the open workspace by Desk32</source>
+        <translation>ワークスペース内（アプリコピー）: Desk32 により来歴付きでコピーされた音源</translation>
+    </message>
+    <message>
+        <source>Workspace (External): Copied or moved into the workspace externally</source>
+        <translation>ワークスペース内（外部配置）: 外部操作によりコピーまたは移動された音源（来歴なし）</translation>
+    </message>
+    <message>
+        <source>Outside Workspace: Located outside the open workspace directory (Read-Only)</source>
+        <translation>ワークスペース外: 専用ディレクトリ外の音源（読み取り専用）</translation>
+    </message>
 </context>
 </TS>

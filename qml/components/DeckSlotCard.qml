@@ -19,6 +19,7 @@ BrushedMetalPanel {
     readonly property bool isLocked: !!(deckState && deckState.isLocked)
     readonly property bool isErrorStopped: !!(deckState && deckState.hasError)
     readonly property bool folderActive: !!(deckState && deckState.folderActive)
+    readonly property int trackOrigin: (deckState && deckState.trackOrigin !== undefined) ? deckState.trackOrigin : 0
     property string endedSessionLabel: ""
     readonly property bool canCopyToWorkspace: WorkspaceManager.hasOpenWorkspace
                                                && hasTrack
@@ -102,6 +103,12 @@ BrushedMetalPanel {
                 endedSessionTimer.restart()
             }
         }
+    }
+
+    Connections {
+        target: WorkspaceManager
+        function onWorkspaceStateChanged() { cardRoot.refreshState() }
+        function onWorkspaceContentsChanged() { cardRoot.refreshState() }
     }
 
     Timer {
@@ -406,7 +413,7 @@ BrushedMetalPanel {
 
                     RowLayout {
                         Layout.fillWidth: true
-                        spacing: 6
+                        spacing: 4
                         Label {
                             text: cardRoot.hasTrack
                                   ? cardRoot.formatMsTime(
@@ -419,6 +426,42 @@ BrushedMetalPanel {
                             color: cardRoot.isActive ? "#3CD8F5" : "#8090A0"
                         }
                         Item { Layout.fillWidth: true }
+                        Rectangle {
+                            id: originBadge
+                            visible: cardRoot.hasTrack
+                            implicitWidth: originBadgeLbl.implicitWidth + 8
+                            Layout.preferredHeight: 15
+                            height: 15
+                            radius: 2
+                            color: cardRoot.trackOrigin === 1 ? "#092418"
+                                   : (cardRoot.trackOrigin === 2 ? "#2A1F0A" : "#141A24")
+                            border.color: cardRoot.trackOrigin === 1 ? "#00E676"
+                                          : (cardRoot.trackOrigin === 2 ? "#F5B841" : "#6C8299")
+                            border.width: 1
+                            Label {
+                                id: originBadgeLbl
+                                anchors.centerIn: parent
+                                text: cardRoot.trackOrigin === 1 ? qsTr("WS: APP")
+                                      : (cardRoot.trackOrigin === 2 ? qsTr("WS: EXT") : qsTr("OUTSIDE WS"))
+                                font.family: "Monospace"
+                                font.pixelSize: 8
+                                font.bold: true
+                                color: cardRoot.trackOrigin === 1 ? "#69F0AE"
+                                       : (cardRoot.trackOrigin === 2 ? "#FFD573" : "#B6C7D9")
+                            }
+                            MouseArea {
+                                id: originBadgeHover
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.NoButton
+                            }
+                            ToolTip.visible: originBadgeHover.containsMouse
+                            ToolTip.text: cardRoot.trackOrigin === 1
+                                          ? qsTr("Workspace (App-Copied): Copied into the open workspace by Desk32")
+                                          : (cardRoot.trackOrigin === 2
+                                             ? qsTr("Workspace (External): Copied or moved into the workspace externally")
+                                             : qsTr("Outside Workspace: Located outside the open workspace directory (Read-Only)"))
+                        }
                         Label {
                             visible: cardRoot.isErrorStopped
                             text: qsTr("ERROR")

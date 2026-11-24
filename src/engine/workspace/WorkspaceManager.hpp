@@ -34,6 +34,12 @@ enum class ImportResultStatus {
     Failed = 3
 };
 
+enum class TrackOrigin {
+    OutsideWorkspace = 0,    ///< Located outside the currently open workspace (or Read-Only mode)
+    WorkspaceAppCopied = 1,  ///< Inside open workspace and copied/imported via Desk32
+    WorkspaceExternal = 2    ///< Inside open workspace and placed/moved externally without Desk32 import provenance
+};
+
 enum class WorkspaceFaultPoint {
     None = 0,
     DuringImportBeforeCommit,
@@ -61,12 +67,15 @@ struct WorkspaceFileEntry {
     bool externallyModified = false;
     QString externalChangeDetail;
     bool logOnlyProvenance = false;
+    bool externallyAdded = false;
+    TrackOrigin origin = TrackOrigin::WorkspaceExternal;
 };
 
 struct StateIndexEntry {
     QString sha256;
     qint64 size = 0;
     bool logOnlyProvenance = false;
+    bool externallyAdded = false;
 };
 
 struct SaveManifestFile {
@@ -217,6 +226,10 @@ public:
     /// Returns true if targetPath is safely contained inside the currently open workspace (non-symlink, non-.desk32).
     [[nodiscard]] bool isPathInsideOpenWorkspace(const QString& targetPath, bool allowNonExistentLeaf = false, QString* outError = nullptr) const;
 
+    /// Classify a file path relative to the open workspace (OutsideWorkspace / WorkspaceAppCopied / WorkspaceExternal).
+    [[nodiscard]] TrackOrigin classifyTrackOrigin(const QString& filePath,
+                                                  const metadata::TrackMetadata* parsedMeta = nullptr) const;
+
     // QML-invokable workspace lifecycle APIs
     Q_INVOKABLE QVariantList getRegisteredWorkspaces() const;
     Q_INVOKABLE bool openRegisteredWorkspace(const QString& dirPath);
@@ -364,6 +377,7 @@ private:
     MetadataReloadCallback m_metadataReloadCallback;
     std::map<QString, QString> m_externalChangeDetails;
     std::set<QString> m_logOnlyProvenanceRelPaths;
+    std::set<QString> m_externallyAddedRelPaths;
 
     // Dedicated Workspace Worker Thread (Specification §9.5)
     mutable std::mutex m_workerQueueMutex;
