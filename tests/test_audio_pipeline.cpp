@@ -1193,6 +1193,13 @@ void TestAudioPipeline::testEpochReclaimerShutdownConcurrentSafety()
     // swapChain on closed reclaimer is a safe no-op
     reclaimer->swapChain(std::make_unique<std::string>("ShouldBeIgnored"));
 
+    // Wait until readers observe closed state and record at least one rejected read
+    const auto rejectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rejectedReads.load(std::memory_order_relaxed) == 0) {
+        if (std::chrono::steady_clock::now() >= rejectDeadline) break;
+        std::this_thread::yield();
+    }
+
     // Signal readers to stop and join all threads BEFORE assertions
     stopReaders.store(true, std::memory_order_relaxed);
     for (auto& t : readers) {
@@ -1274,6 +1281,13 @@ void TestAudioPipeline::testEpochReclaimerWriterShutdownSerialization()
     // Subsequent enterRead() MUST return nullptr
     auto postGuard = reclaimer->enterRead();
     bool postGuardInvalid = (!postGuard.isValid() && postGuard.chain == nullptr);
+
+    // Wait until writers observe closed state and record at least one rejected swap
+    const auto rejectDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rejectedSwaps.load(std::memory_order_relaxed) == 0) {
+        if (std::chrono::steady_clock::now() >= rejectDeadline) break;
+        std::this_thread::yield();
+    }
 
     // Stop workers and join ALL threads BEFORE assertions
     stopWorkers.store(true, std::memory_order_relaxed);
