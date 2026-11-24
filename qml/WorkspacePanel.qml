@@ -525,11 +525,13 @@ Rectangle {
                         text: qsTr("Register & Open Folder…")
                         font.pixelSize: 10
                         highlighted: true
+                        enabled: WorkspaceManager.canOpenWorkspaceInSession
                         onClicked: registerWsFolderDialog.open()
                     }
                     Button {
                         text: qsTr("Continue Read-Only")
                         font.pixelSize: 10
+                        enabled: WorkspaceManager.canOpenWorkspaceInSession
                         onClicked: {
                             WorkspaceManager.continueInReadOnlyMode()
                             wsRoot.setNotice(qsTr("Switched to Read-Only mode"), "info")
@@ -571,9 +573,9 @@ Rectangle {
                             Button {
                                 text: modelData.lockState === 1 ? qsTr("Active") : qsTr("Open")
                                 font.pixelSize: 9
-                                enabled: modelData.lockState === 0
+                                enabled: WorkspaceManager.canOpenWorkspaceInSession && modelData.lockState === 0
                                 onClicked: {
-                                    if (!WorkspaceManager.selectWorkspaceAtStartup(modelData.path)) {
+                                    if (!WorkspaceManager.openRegisteredWorkspace(modelData.path)) {
                                         wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                     }
                                     wsRoot.refreshAll()

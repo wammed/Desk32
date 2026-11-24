@@ -355,7 +355,11 @@ Item {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
                             elide: Text.ElideRight
-                            text: WorkspaceManager.hasOpenWorkspace ? qsTr("WORKSPACE OPEN (LOCKED TO SESSION)") : qsTr("NO WORKSPACE — READ-ONLY MODE")
+                            text: WorkspaceManager.hasOpenWorkspace
+                                  ? qsTr("WORKSPACE OPEN (LOCKED TO SESSION)")
+                                  : (WorkspaceManager.selectionFinalized
+                                     ? qsTr("READ-ONLY MODE (RESTART REQUIRED)")
+                                     : qsTr("READ-ONLY MODE (UNSELECTED)"))
                             font.family: "Monospace"; font.pixelSize: 10; font.bold: true
                             color: WorkspaceManager.hasOpenWorkspace ? "#00E676" : "#F5B841"
                         }
@@ -365,7 +369,9 @@ Item {
                             Layout.minimumWidth: 0
                             text: WorkspaceManager.hasOpenWorkspace
                                   ? WorkspaceManager.openWorkspacePath
-                                  : qsTr("Select or register a workspace folder to enable COW import, tagging & checkpoints")
+                                  : (WorkspaceManager.selectionFinalized
+                                     ? qsTr("Session workspace selection finalized — restart Desk32 to open or switch workspaces")
+                                     : qsTr("Register or open 1 workspace during this session to enable COW import, tagging & checkpoints"))
                             font.family: "Monospace"; font.pixelSize: 10
                             color: "#AFC0D0"
                             elide: Text.ElideMiddle
@@ -428,8 +434,12 @@ Item {
                 }
 
                 ConsoleButton {
-                    text: qsTr("OPEN / REGISTER...")
-                    implicitWidth: 138; implicitHeight: 34; fontSize: 10; accentColor: "#E8BA6B"
+                    text: qsTr("REGISTER & OPEN...")
+                    implicitWidth: 146; implicitHeight: 34; fontSize: 10; accentColor: "#E8BA6B"
+                    enabled: WorkspaceManager.canOpenWorkspaceInSession
+                    toolTipText: WorkspaceManager.canOpenWorkspaceInSession
+                                 ? qsTr("Register and open a workspace folder (allowed once per session)")
+                                 : qsTr("Session workspace already finalized — restart Desk32 to switch workspaces")
                     onClicked: openWorkspaceFolderDlg.open()
                 }
 
@@ -949,7 +959,9 @@ Item {
                                     visible: wsRoot.filteredFilesList.length === 0
                                     text: WorkspaceManager.hasOpenWorkspace
                                           ? qsTr("No matching tracks in workspace folder")
-                                          : qsTr("Open or register a workspace folder to view managed project files")
+                                          : (WorkspaceManager.selectionFinalized
+                                             ? qsTr("Session is in finalized Read-Only mode — restart Desk32 to open a workspace")
+                                             : qsTr("Register or open a workspace folder (once per session) to view managed project files"))
                                     font.family: "Monospace"; font.pixelSize: 11; color: "#5C6B7C"
                                 }
                             }
@@ -1402,12 +1414,21 @@ Item {
                                 Layout.fillWidth: true; spacing: 8
                                 Label { text: qsTr("REGISTERED WORKSPACES & POSIX FLOCK LOCK STATE"); font.family: "Monospace"; font.pixelSize: 11; font.bold: true; color: "#E8BA6B" }
                                 Item { Layout.fillWidth: true }
-                                ConsoleButton {
-                                    text: qsTr("READ-ONLY MODE")
-                                    implicitWidth: 126; implicitHeight: 30; fontSize: 10
-                                    onClicked: {
-                                        WorkspaceManager.continueInReadOnlyMode()
-                                        wsRoot.refresh()
+                                Rectangle {
+                                    implicitWidth: sessionRuleLbl.implicitWidth + 16
+                                    Layout.preferredHeight: 28
+                                    height: 28
+                                    radius: 4
+                                    color: WorkspaceManager.canOpenWorkspaceInSession ? "#1A160B" : "#111821"
+                                    border.color: WorkspaceManager.canOpenWorkspaceInSession ? "#7C5B21" : "#2D4257"
+                                    Label {
+                                        id: sessionRuleLbl
+                                        anchors.centerIn: parent
+                                        font.family: "Monospace"; font.pixelSize: 9; font.bold: true
+                                        color: WorkspaceManager.canOpenWorkspaceInSession ? "#F5B841" : "#78D8F0"
+                                        text: WorkspaceManager.canOpenWorkspaceInSession
+                                              ? qsTr("1 WORKSPACE OPEN ALLOWED IN SESSION")
+                                              : qsTr("RESTART REQUIRED TO SWITCH WORKSPACE")
                                     }
                                 }
                             }
@@ -1436,14 +1457,21 @@ Item {
                                                 }
                                             }
                                             ConsoleButton {
-                                                text: qsTr("SWITCH / OPEN")
-                                                implicitWidth: 112; implicitHeight: 30; fontSize: 9; accentColor: "#00E5FF"
-                                                enabled: modelData.lockState !== 1 && modelData.lockState !== 2
+                                                text: modelData.lockState === 1
+                                                      ? qsTr("ACTIVE")
+                                                      : (modelData.lockState === 2 ? qsTr("IN USE") : qsTr("OPEN"))
+                                                implicitWidth: 96; implicitHeight: 30; fontSize: 9; accentColor: "#00E5FF"
+                                                enabled: WorkspaceManager.canOpenWorkspaceInSession && modelData.lockState === 0
+                                                toolTipText: modelData.lockState === 2
+                                                             ? qsTr("In use by another Desk32 process")
+                                                             : (!WorkspaceManager.canOpenWorkspaceInSession && modelData.lockState !== 1
+                                                                ? qsTr("Restart Desk32 to switch or open another workspace")
+                                                                : qsTr("Open this workspace for the remainder of the session"))
                                                 onClicked: {
-                                                    if (!WorkspaceManager.selectWorkspaceAtStartup(modelData.path)) {
+                                                    if (!WorkspaceManager.openRegisteredWorkspace(modelData.path)) {
                                                         wsRoot.setNotice(WorkspaceManager.lastError(), "error")
                                                     } else {
-                                                        wsRoot.setNotice(qsTr("Switched active workspace to %1").arg(modelData.path), "success")
+                                                        wsRoot.setNotice(qsTr("Opened workspace %1 for this session").arg(modelData.path), "success")
                                                     }
                                                     wsRoot.refresh()
                                                 }
@@ -1451,10 +1479,11 @@ Item {
                                             ConsoleButton {
                                                 text: qsTr("UNREGISTER")
                                                 implicitWidth: 92; implicitHeight: 30; fontSize: 9; accentColor: "#FF5252"
-                                                enabled: modelData.lockState !== 1
+                                                enabled: modelData.lockState !== 2
                                                 onClicked: {
-                                                    WorkspaceManager.unregisterWorkspaceFromUi(modelData.path)
-                                                    wsRoot.refresh()
+                                                    unregisterConfirmPopup.targetPath = modelData.path
+                                                    unregisterConfirmPopup.isCurrentlyOpen = (modelData.lockState === 1)
+                                                    unregisterConfirmPopup.open()
                                                 }
                                             }
                                         }
@@ -1469,13 +1498,86 @@ Item {
         }
     }
 
+    ScrollableModalPopup {
+        id: unregisterConfirmPopup
+        property string targetPath: ""
+        property bool isCurrentlyOpen: false
+        titleText: qsTr("UNREGISTER WORKSPACE?")
+        preferredWidth: 500
+        preferredHeight: 280
+        accentColor: "#FF5252"
+
+        Label {
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.pixelSize: 12
+            color: "#DCE6F0"
+            text: qsTr("Remove this folder from Desk32's Registered Workspaces list? Audio files and the .desk32 folder on disk will NOT be deleted.")
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: unregTargetLbl.implicitHeight + 14
+            radius: 4
+            color: "#090C11"
+            border.color: "#2B3543"
+            Label {
+                id: unregTargetLbl
+                anchors.fill: parent
+                anchors.margins: 7
+                wrapMode: Text.WrapAnywhere
+                font.family: "Monospace"
+                font.pixelSize: 10
+                color: "#00E5FF"
+                text: unregisterConfirmPopup.targetPath
+            }
+        }
+
+        Label {
+            visible: unregisterConfirmPopup.isCurrentlyOpen
+            Layout.fillWidth: true
+            wrapMode: Text.WordWrap
+            font.pixelSize: 11
+            font.bold: true
+            color: "#F5B841"
+            text: qsTr("Warning: This workspace is currently open. Unregistering will stop playback from it, switch this session to Read-Only mode, and require restarting Desk32 to open another workspace.")
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            Item { Layout.fillWidth: true }
+            ConsoleButton {
+                text: qsTr("CANCEL")
+                implicitWidth: 96; implicitHeight: 32; fontSize: 10
+                onClicked: unregisterConfirmPopup.close()
+            }
+            ConsoleButton {
+                text: qsTr("CONFIRM UNREGISTER")
+                implicitWidth: 160; implicitHeight: 32; fontSize: 10
+                accentColor: "#FF5252"
+                anodizedFill: true; anodizedTop: "#B33339"; anodizedBottom: "#61171B"; anodizedText: "#FFE8EA"
+                onClicked: {
+                    var p = unregisterConfirmPopup.targetPath
+                    unregisterConfirmPopup.close()
+                    if (WorkspaceManager.unregisterWorkspaceFromUi(p)) {
+                        wsRoot.setNotice(qsTr("Unregistered workspace: %1").arg(p), "success")
+                    } else {
+                        wsRoot.setNotice(WorkspaceManager.lastError(), "error")
+                    }
+                    wsRoot.refresh()
+                }
+            }
+        }
+    }
+
     FolderDialog {
         id: openWorkspaceFolderDlg
-        title: qsTr("Select or Register Desk32 Project Workspace Folder")
+        title: qsTr("Register & Open Dedicated Workspace Folder")
         onAccepted: {
             var p = decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
-                if (WorkspaceManager.registerAndSelectWorkspaceAtStartup(p)) {
+                if (WorkspaceManager.registerAndOpenWorkspaceFromUi(p)) {
                     wsRoot.setNotice(qsTr("Opened workspace: %1").arg(p), "success")
                 } else {
                     wsRoot.setNotice(WorkspaceManager.lastError(), "error")

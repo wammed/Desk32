@@ -191,21 +191,29 @@ void TestWorkspaceV381::testStartupSingleWorkspaceAndReadOnlyMode()
     auto& ws = WorkspaceManager::instance();
     const QString wsA = m_tempDir->filePath("single_ws_a");
     const QString wsB = m_tempDir->filePath("single_ws_b");
+    const QString wsC = m_tempDir->filePath("single_ws_c");
     QDir().mkpath(wsA);
     QDir().mkpath(wsB);
+    QDir().mkpath(wsC);
 
     QString err;
     QVERIFY(ws.registerWorkspace(wsA, err));
     QVERIFY(ws.registerWorkspace(wsB, err));
 
-    // Before startup selection -> Read-Only, no workspace open
+    // Startup default: unselected Read-Only, eligible for 1 open in session
     QVERIFY(!ws.hasOpenWorkspace());
     QVERIFY(ws.isReadOnlyMode());
+    QVERIFY(!ws.isSelectionFinalized());
+    QVERIFY(ws.canOpenWorkspaceInSession());
+    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsA + "/track.wav"));
+    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsB + "/track.wav"));
 
-    // Open A -> A is Open, B is Locked
+    // Mid-session 1st open -> A is Open, B is Locked, session is now finalized
     QVERIFY2(ws.openWorkspace(wsA, err), qPrintable(err));
     QVERIFY(ws.hasOpenWorkspace());
     QVERIFY(!ws.isReadOnlyMode());
+    QVERIFY(ws.isSelectionFinalized());
+    QVERIFY(!ws.canOpenWorkspaceInSession());
     QCOMPARE(QDir::cleanPath(ws.openWorkspacePath()), QDir::cleanPath(wsA));
 
     auto list = ws.listRegisteredWorkspaces();
@@ -218,23 +226,45 @@ void TestWorkspaceV381::testStartupSingleWorkspaceAndReadOnlyMode()
         }
     }
 
-    // Mid-session switching without restart must be refused (Spec §2.5)
+    // Mid-session switching or registering-and-opening another workspace without restart must be refused
+    QVERIFY(!ws.openWorkspace(wsB, err));
+    QVERIFY(!ws.registerAndOpenWorkspace(wsC, err));
+    QVERIFY(!QDir(wsC + "/.desk32").exists());
+
+    // Unregistering open workspace A transitions to Read-Only, but session stays finalized (cannot open B without restart)
+    QVERIFY2(ws.unregisterWorkspace(wsA, err), qPrintable(err));
+    QVERIFY(!ws.hasOpenWorkspace());
+    QVERIFY(ws.isReadOnlyMode());
+    QVERIFY(ws.isSelectionFinalized());
+    QVERIFY(!ws.canOpenWorkspaceInSession());
     QVERIFY(!ws.openWorkspace(wsB, err));
 
-    // Simulate restart -> open B (now A is Locked, B is Open)
+    // Simulate restart -> eligible again -> registerAndOpen C mid-session succeeds once
+    ws.simulateAppRestartForTesting();
+    QVERIFY(!ws.isSelectionFinalized());
+    QVERIFY(ws.canOpenWorkspaceInSession());
+    QVERIFY2(ws.registerAndOpenWorkspace(wsC, err), qPrintable(err));
+    QCOMPARE(QDir::cleanPath(ws.openWorkspacePath()), QDir::cleanPath(wsC));
+    QVERIFY(!ws.canOpenWorkspaceInSession());
+    QVERIFY(!ws.openWorkspace(wsB, err));
+
+    // Simulate restart -> open B (now C is Locked, B is Open)
     ws.simulateAppRestartForTesting();
     QVERIFY2(ws.openWorkspace(wsB, err), qPrintable(err));
     QCOMPARE(QDir::cleanPath(ws.openWorkspacePath()), QDir::cleanPath(wsB));
     QVERIFY(!ws.isPathBlockedByLockedWorkspace(wsB + "/track.wav"));
-    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsA + "/track.wav"));
+    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsC + "/track.wav"));
 
-    // Simulate restart -> Read-Only fallback closes open workspace cleanly
+    // Simulate restart -> explicit Read-Only lock finalizes session and prevents subsequent open without restart
     ws.simulateAppRestartForTesting();
     ws.enterReadOnlyMode();
     QVERIFY(!ws.hasOpenWorkspace());
     QVERIFY(ws.isReadOnlyMode());
-    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsA + "/track.wav"));
+    QVERIFY(ws.isSelectionFinalized());
+    QVERIFY(!ws.canOpenWorkspaceInSession());
+    QVERIFY(!ws.openWorkspace(wsB, err));
     QVERIFY(ws.isPathBlockedByLockedWorkspace(wsB + "/track.wav"));
+    QVERIFY(ws.isPathBlockedByLockedWorkspace(wsC + "/track.wav"));
 }
 
 void TestWorkspaceV381::testCrossProcessFlockAndLockedAccessBlock()
@@ -1105,6 +1135,8 @@ void TestWorkspaceV381::testMissingOpenWorkspaceRootFailSafe()
     disconnect(conn);
 
     QVERIFY(ws.isReadOnlyMode());
+    QVERIFY(ws.isSelectionFinalized());
+    QVERIFY(!ws.canOpenWorkspaceInSession());
     QVERIFY(ws.openWorkspacePath().isEmpty());
     QCOMPARE(receivedOp, QStringLiteral("WorkspaceRootMissing"));
     QVERIFY(receivedMsg.contains(wsRoot));

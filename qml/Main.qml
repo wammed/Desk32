@@ -141,7 +141,7 @@ ApplicationWindow {
     }
 
     // -------------------------------------------------------------------------
-    // Native File / Folder Dialogs & Startup Workspace Dialogs
+    // Native File / Folder Dialogs
     // -------------------------------------------------------------------------
     FileDialog {
         id: deckFileDialog

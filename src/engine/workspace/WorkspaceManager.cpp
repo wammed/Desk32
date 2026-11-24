@@ -363,6 +363,11 @@ bool WorkspaceManager::isSelectionFinalized() const {
   return m_selectionFinalized;
 }
 
+bool WorkspaceManager::canOpenWorkspaceInSession() const {
+  std::lock_guard<std::mutex> lock(m_stateMutex);
+  return !m_selectionFinalized;
+}
+
 QString WorkspaceManager::openWorkspacePath() const {
   std::lock_guard<std::mutex> lock(m_stateMutex);
   return m_openWorkspacePath;
@@ -967,6 +972,10 @@ bool WorkspaceManager::openWorkspace(const QString &dirPath,
           QStringLiteral("Workspace selection is already finalized for this "
                          "session; restart Desk32 to switch workspaces.");
       m_lastError = outError;
+      core::log::LogService::instance().log(
+          "Workspace", "OpenWorkspace", "Failed", outError, "Workspace",
+          canonical, "{}", "", "",
+          core::log::ErrorCode::WorkspaceSwitchRequiresRestart, 0.0);
       return false;
     }
 
@@ -1092,6 +1101,10 @@ bool WorkspaceManager::registerAndOpenWorkspace(const QString &dirPath,
           QStringLiteral("Workspace selection is already finalized for this "
                          "session; restart Desk32 to switch workspaces.");
       m_lastError = outError;
+      core::log::LogService::instance().log(
+          "Workspace", "RegisterAndOpenWorkspace", "Failed", outError,
+          "Workspace", QDir::cleanPath(dirPath), "{}", "", "",
+          core::log::ErrorCode::WorkspaceSwitchRequiresRestart, 0.0);
       return false;
     }
   }
@@ -1130,8 +1143,8 @@ void WorkspaceManager::enterReadOnlyMode() {
   }
   core::log::LogService::instance().log(
       "Workspace", "EnterReadOnlyMode", "Info",
-      QStringLiteral("Started Desk32 without opening a workspace (fail-closed "
-                     "read-only mode)."),
+      QStringLiteral("Finalized Read-Only session mode (no workspace opened; "
+                     "restart required to open a workspace)."),
       "Workspace", "ReadOnly");
   emit workspaceStateChanged();
 }
@@ -1426,15 +1439,23 @@ bool WorkspaceManager::isPathInsideOpenWorkspace(const QString &targetPath,
   return ok;
 }
 
-bool WorkspaceManager::selectWorkspaceAtStartup(const QString &dirPath) {
+bool WorkspaceManager::openRegisteredWorkspace(const QString &dirPath) {
   QString err;
   return openWorkspace(dirPath, err);
 }
 
-bool WorkspaceManager::registerAndSelectWorkspaceAtStartup(
-    const QString &dirPath) {
+bool WorkspaceManager::registerAndOpenWorkspaceFromUi(const QString &dirPath) {
   QString err;
   return registerAndOpenWorkspace(dirPath, err);
+}
+
+bool WorkspaceManager::selectWorkspaceAtStartup(const QString &dirPath) {
+  return openRegisteredWorkspace(dirPath);
+}
+
+bool WorkspaceManager::registerAndSelectWorkspaceAtStartup(
+    const QString &dirPath) {
+  return registerAndOpenWorkspaceFromUi(dirPath);
 }
 
 bool WorkspaceManager::unregisterWorkspaceFromUi(const QString &dirPath) {

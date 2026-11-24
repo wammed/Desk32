@@ -624,4 +624,107 @@
         <translation>全トリムをリセット (0 dB)</translation>
     </message>
 </context>
+<context>
+    <name>WorkspaceView</name>
+    <message>
+        <source>WORKSPACE OPEN (LOCKED TO SESSION)</source>
+        <translation>ワークスペースを開いています（セッション固定）</translation>
+    </message>
+    <message>
+        <source>READ-ONLY MODE (RESTART REQUIRED)</source>
+        <translation>読み取り専用モード（要再起動）</translation>
+    </message>
+    <message>
+        <source>READ-ONLY MODE (UNSELECTED)</source>
+        <translation>読み取り専用モード（未選択）</translation>
+    </message>
+    <message>
+        <source>Session workspace selection finalized — restart Desk32 to open or switch workspaces</source>
+        <translation>このセッションのワークスペース選択は確定済みです — 開く／切り替えるには Desk32 を再起動してください</translation>
+    </message>
+    <message>
+        <source>Register or open 1 workspace during this session to enable COW import, tagging &amp; checkpoints</source>
+        <translation>COW取り込み・タグ編集・チェックポイントを有効にするには、セッション中に1回だけワークスペースを登録または開いてください</translation>
+    </message>
+    <message>
+        <source>REGISTER &amp; OPEN...</source>
+        <translation>新規登録＆開く...</translation>
+    </message>
+    <message>
+        <source>Register and open a workspace folder (allowed once per session)</source>
+        <translation>ワークスペースフォルダを新規登録して開きます（1セッションにつき1回のみ可能）</translation>
+    </message>
+    <message>
+        <source>Session workspace already finalized — restart Desk32 to switch workspaces</source>
+        <translation>このセッションのワークスペース選択は確定済みです — 切り替えるには Desk32 を再起動してください</translation>
+    </message>
+    <message>
+        <source>Session is in finalized Read-Only mode — restart Desk32 to open a workspace</source>
+        <translation>セッションは読み取り専用モードで確定しています — ワークスペースを開くには Desk32 を再起動してください</translation>
+    </message>
+    <message>
+        <source>Register or open a workspace folder (once per session) to view managed project files</source>
+        <translation>管理対象ファイルを表示するには、ワークスペースフォルダを登録または開いてください（1セッション1回のみ）</translation>
+    </message>
+    <message>
+        <source>1 WORKSPACE OPEN ALLOWED IN SESSION</source>
+        <translation>セッション中1回のみオープン可能</translation>
+    </message>
+    <message>
+        <source>RESTART REQUIRED TO SWITCH WORKSPACE</source>
+        <translation>ワークスペース切替は要再起動</translation>
+    </message>
+    <message>
+        <source>ACTIVE</source>
+        <translation>使用中(現在)</translation>
+    </message>
+    <message>
+        <source>IN USE</source>
+        <translation>他プロセス使用中</translation>
+    </message>
+    <message>
+        <source>OPEN</source>
+        <translation>開く</translation>
+    </message>
+    <message>
+        <source>In use by another Desk32 process</source>
+        <translation>他の Desk32 プロセスが使用中です</translation>
+    </message>
+    <message>
+        <source>Restart Desk32 to switch or open another workspace</source>
+        <translation>別のワークスペースを開く／切り替えるには Desk32 を再起動してください</translation>
+    </message>
+    <message>
+        <source>Open this workspace for the remainder of the session</source>
+        <translation>このセッション中このワークスペースを開きます</translation>
+    </message>
+    <message>
+        <source>Opened workspace %1 for this session</source>
+        <translation>このセッションでワークスペースを開きました: %1</translation>
+    </message>
+    <message>
+        <source>UNREGISTER WORKSPACE?</source>
+        <translation>ワークスペースの登録を解除しますか？</translation>
+    </message>
+    <message>
+        <source>Remove this folder from Desk32&apos;s Registered Workspaces list? Audio files and the .desk32 folder on disk will NOT be deleted.</source>
+        <translation>このフォルダを Desk32 の登録済みワークスペース一覧から外しますか？ディスク上の音源ファイルおよび .desk32 フォルダは削除されません。</translation>
+    </message>
+    <message>
+        <source>Warning: This workspace is currently open. Unregistering will stop playback from it, switch this session to Read-Only mode, and require restarting Desk32 to open another workspace.</source>
+        <translation>警告: このワークスペースは現在開いています。登録解除すると再生を停止して読み取り専用モードへ移行し、別のワークスペースを開くには Desk32 の再起動が必要になります。</translation>
+    </message>
+    <message>
+        <source>CANCEL</source>
+        <translation>キャンセル</translation>
+    </message>
+    <message>
+        <source>CONFIRM UNREGISTER</source>
+        <translation>登録解除を実行</translation>
+    </message>
+    <message>
+        <source>Register &amp; Open Dedicated Workspace Folder</source>
+        <translation>専用ワークスペースフォルダを新規登録して開く</translation>
+    </message>
+</context>
 </TS>

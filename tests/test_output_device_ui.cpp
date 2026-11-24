@@ -445,7 +445,9 @@ void TestOutputDeviceUi::testWorkspaceViewDeckSelectionLockAndFolderDiscard()
     }
 
     QString wsErr;
+    QVERIFY(ws.canOpenWorkspaceInSession());
     QVERIFY2(ws.registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
+    QVERIFY(!ws.canOpenWorkspaceInSession());
     const QVariantMap impRes = ws.importFileFromUi(wsWavSrc, QString());
     QCOMPARE(impRes.value(QStringLiteral("status")).toInt(), 0);
 

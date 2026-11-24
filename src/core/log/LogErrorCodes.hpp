@@ -72,6 +72,7 @@ constexpr int32_t WorkspaceSaveAbortedOnChange = 7011;
 constexpr int32_t WorkspaceRollbackFailed = 7012;
 constexpr int32_t WorkspacePartialRecovery = 7013;
 constexpr int32_t WorkspaceNonStereoRejected = 7014;
+constexpr int32_t WorkspaceSwitchRequiresRestart = 7015;
 
 // 9000-9999: Logging / Diagnostics Subsystem
 constexpr int32_t LogQueueOverflow = 9001;

@@ -133,8 +133,9 @@ struct RollbackResult {
     QStringList failedPaths;
 };
 
-/// Dedicated Workspace Manager implementing Desk32 v3.8.1 §2.5, §9.5, §10.6, §17.6, and Completion Criterion #35:
-/// - Exclusive single-workspace model with startup selection & app-internal locking (no chmod/ACL mutation)
+/// Dedicated Workspace Manager implementing Desk32 v3.8.2 §2.5, §9.5, §10.6, §17.6, and Completion Criterion #35:
+/// - Exclusive single-workspace model: starts in Read-Only mode (unselected), allows at most one workspace open/register-and-open per session,
+///   and enforces app-internal locking (no chmod/ACL mutation); switching workspaces requires restarting Desk32
 /// - Cross-process mutual exclusion via POSIX flock(2) on .desk32/workspace.lock
 /// - Dedicated Workspace Worker Thread isolated from GUI Thread and RT Audio Thread
 /// - Transactional file import with SHA-256 verification and TagLib provenance embedding
@@ -149,6 +150,7 @@ class WorkspaceManager : public QObject {
     Q_PROPERTY(bool hasOpenWorkspace READ hasOpenWorkspace NOTIFY workspaceStateChanged)
     Q_PROPERTY(bool isReadOnlyMode READ isReadOnlyMode NOTIFY workspaceStateChanged)
     Q_PROPERTY(bool selectionFinalized READ isSelectionFinalized NOTIFY workspaceStateChanged)
+    Q_PROPERTY(bool canOpenWorkspaceInSession READ canOpenWorkspaceInSession NOTIFY workspaceStateChanged)
     Q_PROPERTY(QString openWorkspacePath READ openWorkspacePath NOTIFY workspaceStateChanged)
     Q_PROPERTY(qint64 saveStoreTotalBytes READ saveStoreTotalBytes NOTIFY workspaceContentsChanged)
     Q_PROPERTY(int externalModificationCount READ externalModificationCount NOTIFY externalModificationDetected)
@@ -193,6 +195,7 @@ public:
     [[nodiscard]] bool hasOpenWorkspace() const;
     [[nodiscard]] bool isReadOnlyMode() const;
     [[nodiscard]] bool isSelectionFinalized() const;
+    [[nodiscard]] bool canOpenWorkspaceInSession() const;
     [[nodiscard]] QString openWorkspacePath() const;
     [[nodiscard]] qint64 saveStoreTotalBytes() const;
     [[nodiscard]] int externalModificationCount() const;
@@ -216,6 +219,8 @@ public:
 
     // QML-invokable workspace lifecycle APIs
     Q_INVOKABLE QVariantList getRegisteredWorkspaces() const;
+    Q_INVOKABLE bool openRegisteredWorkspace(const QString& dirPath);
+    Q_INVOKABLE bool registerAndOpenWorkspaceFromUi(const QString& dirPath);
     Q_INVOKABLE bool selectWorkspaceAtStartup(const QString& dirPath);
     Q_INVOKABLE bool registerAndSelectWorkspaceAtStartup(const QString& dirPath);
     Q_INVOKABLE bool unregisterWorkspaceFromUi(const QString& dirPath);
