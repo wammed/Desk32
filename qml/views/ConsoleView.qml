@@ -471,6 +471,9 @@ Item {
                 showScrews: true
                 cornerRadius: 6
                 brushedOpacity: 0.32
+                surfaceShaderEnabled: true
+                surfaceNoiseStrength: 0.038
+                surfaceInnerShadowStrength: 0.32
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -573,6 +576,9 @@ Item {
                 cornerRadius: 8
                 showScrews: true
                 brushedOpacity: 0.32
+                surfaceShaderEnabled: true
+                surfaceNoiseStrength: 0.035
+                surfaceInnerShadowStrength: 0.30
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -1346,6 +1352,9 @@ Item {
                 showScrews: true
                 cornerRadius: 6
                 brushedOpacity: 0.32
+                surfaceShaderEnabled: true
+                surfaceNoiseStrength: 0.038
+                surfaceInnerShadowStrength: 0.32
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -1487,6 +1496,9 @@ Item {
                             isRecessedWell: true
                             brushedOpacity: 0.24
                             cornerRadius: 5
+                            surfaceShaderEnabled: true
+                            surfaceNoiseStrength: 0.030
+                            surfaceInnerShadowStrength: 0.40
 
                             ColumnLayout {
                                 anchors.fill: parent
@@ -2136,7 +2148,7 @@ Item {
                     RowLayout {
                         spacing: 12
 
-                        // LEFT CHANNEL 4x4 Symmetrical Grid (L-01 .. L-16, Cyan)
+                        // LEFT CHANNEL 4x4 Symmetrical Grid (Unified Recessed Glass Display Window)
                         ColumnLayout {
                             Layout.fillWidth: false
                             Layout.preferredWidth: 560
@@ -2153,138 +2165,200 @@ Item {
                                 color: "#9AA9B8"
                             }
 
-                            GridLayout {
+                            // Unified Recessed Display Window for 4x4 Grid
+                            Rectangle {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                columns: 4
-                                rowSpacing: 5
-                                columnSpacing: 5
+                                radius: 4
+                                color: "#06090d"
+                                border.color: "#151d26"
+                                border.width: 1
+                                clip: true
 
-                                Repeater {
-                                    model: 16
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        Layout.fillHeight: true
-                                        radius: 4
-                                        property var bandData: {
-                                            var _t = consoleRoot.peqGridTick
-                                            return consoleRoot.peqEditListening
-                                                   ? EngineController.getListeningBand(false, index)
-                                                   : EngineController.getPeqBand(false, index)
-                                        }
-                                        property bool isOn: !!(bandData && bandData.enabled)
-                                        property bool isSelected: !consoleRoot.peqRightChannel && consoleRoot.selectedPeqBand === index
+                                RecessedScreenOverlay {
+                                    cornerRadius: 4
+                                    topShadowSize: 8
+                                    sideShadowSize: 6
+                                    bottomShadowSize: 5
+                                    glassSheenOpacity: 0.06
+                                }
 
-                                        color: isOn ? (isSelected ? "#164A5B" : "#10323F") : "#11151B"
-                                        border.color: isSelected ? "#52F0FF" : (isOn ? "#26A4BD" : "#28303B")
-                                        border.width: isSelected ? 2 : 1
+                                GridLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 4
+                                    columns: 4
+                                    rowSpacing: 1
+                                    columnSpacing: 1
 
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                consoleRoot.peqRightChannel = false
-                                                consoleRoot.selectedPeqBand = index
-                                                consoleRoot.refreshPeqInspector()
+                                    Repeater {
+                                        model: 16
+                                        Item {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+
+                                            property var bandData: {
+                                                var _t = consoleRoot.peqGridTick
+                                                return consoleRoot.peqEditListening
+                                                       ? EngineController.getListeningBand(false, index)
+                                                       : EngineController.getPeqBand(false, index)
                                             }
-                                            onDoubleClicked: {
-                                                if (!consoleRoot.isDirect && bandData && bandData.frequency !== undefined) {
-                                                    var nextOn = !isOn
-                                                    if (consoleRoot.peqEditListening) {
-                                                        EngineController.setListeningBand(false, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
-                                                    } else {
-                                                        EngineController.setPeqBand(false, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
-                                                    }
-                                                    consoleRoot.peqGridTick++
+                                            property bool isOn: !!(bandData && bandData.enabled)
+                                            property bool isSelected: !consoleRoot.peqRightChannel && consoleRoot.selectedPeqBand === index
+
+                                            // Cell background: very subtle darkening or active tint only for selected band
+                                            Rectangle {
+                                                anchors.fill: parent
+                                                radius: 2
+                                                color: isSelected ? "#143a49" : (isOn ? "#090d12" : "transparent")
+                                                border.color: isSelected ? "#00E5FF" : "transparent"
+                                                border.width: isSelected ? 1 : 0
+                                            }
+
+                                            // Engraved Grooves between cells: Dark 1px line + 1px subtle bottom/right highlight
+                                            Rectangle {
+                                                visible: (index % 4) < 3
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.bottom: parent.bottom
+                                                width: 1
+                                                color: "#05070a"
+                                            }
+                                            Rectangle {
+                                                visible: (index % 4) < 3
+                                                anchors.right: parent.right
+                                                anchors.rightMargin: -1
+                                                anchors.top: parent.top
+                                                anchors.bottom: parent.bottom
+                                                width: 1
+                                                color: "#12ffffff"
+                                            }
+                                            Rectangle {
+                                                visible: Math.floor(index / 4) < 3
+                                                anchors.bottom: parent.bottom
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                height: 1
+                                                color: "#05070a"
+                                            }
+                                            Rectangle {
+                                                visible: Math.floor(index / 4) < 3
+                                                anchors.bottom: parent.bottom
+                                                anchors.bottomMargin: -1
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                height: 1
+                                                color: "#12ffffff"
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    consoleRoot.peqRightChannel = false
+                                                    consoleRoot.selectedPeqBand = index
                                                     consoleRoot.refreshPeqInspector()
                                                 }
-                                            }
-                                        }
-
-                                        ColumnLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 6
-                                            spacing: 4
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 5
-                                                Rectangle {
-                                                    Layout.preferredWidth: 7; Layout.preferredHeight: 7
-                                                    width: 7; height: 7; radius: 3.5
-                                                    color: isOn ? "#00E676" : "#2F3743"
-                                                    border.color: isOn ? "#99ffffff" : "#161A20"
-                                                }
-                                                Label {
-                                                    text: "L-" + (index < 9 ? "0" : "") + (index + 1)
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 13
-                                                    font.bold: true
-                                                    color: isOn ? "#E8FAFF" : "#96A4B2"
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                                Label {
-                                                    text: bandData && bandData.q !== undefined ? ("Q " + bandData.q.toFixed(1)) : ""
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 11
-                                                    font.bold: isOn
-                                                    color: isOn ? "#82EAFC" : "#6B7886"
-                                                }
-                                            }
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                Layout.fillHeight: true
-                                                spacing: 4
-                                                Rectangle {
-                                                    Layout.fillWidth: true
-                                                    Layout.fillHeight: true
-                                                    radius: 3
-                                                    color: isOn ? "#091F28" : "#0A0D11"
-                                                    border.color: isOn ? "#267287" : "#1E2530"
-                                                    Column {
-                                                        anchors.centerIn: parent
-                                                        spacing: 1
-                                                        Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: "FREQ"
-                                                            font.family: "Monospace"
-                                                            font.pixelSize: 8
-                                                            color: isOn ? "#5FB8CE" : "#4E5966"
+                                                onDoubleClicked: {
+                                                    if (!consoleRoot.isDirect && bandData && bandData.frequency !== undefined) {
+                                                        var nextOn = !isOn
+                                                        if (consoleRoot.peqEditListening) {
+                                                            EngineController.setListeningBand(false, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
+                                                        } else {
+                                                            EngineController.setPeqBand(false, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
                                                         }
-                                                        Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: bandData && bandData.frequency ? (bandData.frequency >= 1000 ? (bandData.frequency / 1000).toFixed(1) + "k" : Math.round(bandData.frequency) + "Hz") : "--"
-                                                            font.family: "Monospace"
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                            color: isOn ? "#F0FCFF" : "#8794A2"
-                                                        }
+                                                        consoleRoot.peqGridTick++
+                                                        consoleRoot.refreshPeqInspector()
                                                     }
                                                 }
-                                                Rectangle {
+                                            }
+
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 4
+                                                spacing: 2
+
+                                                // Top row: Amber LED indicator + Band Name + Q factor
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 4
+
+                                                    // Small Amber LED (glows amber when band is enabled)
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 6; Layout.preferredHeight: 6
+                                                        width: 6; height: 6; radius: 3
+                                                        color: isOn ? "#F5B841" : "#222830"
+                                                        border.color: isOn ? "#FFE6A3" : "#14171d"
+                                                        border.width: 1
+
+                                                        // Subtle LED halo
+                                                        Rectangle {
+                                                            visible: isOn
+                                                            anchors.centerIn: parent
+                                                            width: 10; height: 10; radius: 5
+                                                            color: "#30F5B841"
+                                                            z: -1
+                                                        }
+                                                    }
+
+                                                    Label {
+                                                        text: "L-" + (index < 9 ? "0" : "") + (index + 1)
+                                                        font.family: "Monospace"
+                                                        font.pixelSize: 11
+                                                        font.bold: isSelected
+                                                        color: isSelected ? "#00E5FF" : (isOn ? "#8896A4" : "#4A5460")
+                                                    }
+
+                                                    Item { Layout.fillWidth: true }
+
+                                                    Label {
+                                                        text: bandData && bandData.q !== undefined ? ("Q" + bandData.q.toFixed(1)) : ""
+                                                        font.family: "Monospace"
+                                                        font.pixelSize: 10
+                                                        color: isSelected ? "#70DDF0" : (isOn ? "#687684" : "#38414B")
+                                                    }
+                                                }
+
+                                                // Data Row: FREQ and GAIN in muted gray (cyan only when selected)
+                                                RowLayout {
                                                     Layout.fillWidth: true
                                                     Layout.fillHeight: true
-                                                    radius: 3
-                                                    color: isOn ? "#091F28" : "#0A0D11"
-                                                    border.color: isOn ? "#267287" : "#1E2530"
+                                                    spacing: 3
+
                                                     Column {
-                                                        anchors.centerIn: parent
+                                                        Layout.fillWidth: true
                                                         spacing: 1
                                                         Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: "GAIN"
+                                                            text: "FREQ"
                                                             font.family: "Monospace"
-                                                            font.pixelSize: 8
-                                                            color: isOn ? "#5FB8CE" : "#4E5966"
+                                                            font.pixelSize: 7
+                                                            color: isSelected ? "#4A9AB0" : "#3E4752"
                                                         }
                                                         Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
+                                                            text: bandData && bandData.frequency ? (bandData.frequency >= 1000 ? (bandData.frequency / 1000).toFixed(1) + "k" : Math.round(bandData.frequency) + "Hz") : "--"
+                                                            font.family: "Monospace"
+                                                            font.pixelSize: 11
+                                                            font.bold: isSelected
+                                                            color: isSelected ? "#00E5FF" : (isOn ? "#7E8C9A" : "#454E57")
+                                                        }
+                                                    }
+
+                                                    Column {
+                                                        Layout.fillWidth: true
+                                                        spacing: 1
+                                                        Label {
+                                                            text: "GAIN"
+                                                            font.family: "Monospace"
+                                                            font.pixelSize: 7
+                                                            color: isSelected ? "#4A9AB0" : "#3E4752"
+                                                        }
+                                                        Label {
                                                             text: bandData && bandData.gainDb !== undefined
                                                                   ? ((bandData.gainDb > 0 ? "+" : "") + bandData.gainDb.toFixed(1))
                                                                   : "--"
                                                             font.family: "Monospace"
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                            color: isOn ? "#F0FCFF" : "#8794A2"
+                                                            font.pixelSize: 11
+                                                            font.bold: isSelected
+                                                            color: isSelected ? "#00E5FF" : (isOn ? "#7E8C9A" : "#454E57")
                                                         }
                                                     }
                                                 }
@@ -2324,6 +2398,18 @@ Item {
                                         radius: 4
                                         color: "#06090e"
                                         border.color: "#223442"
+                                        clip: true
+
+                                        RecessedScreenOverlay {
+                                            cornerRadius: 4
+                                            topShadowSize: 9
+                                            sideShadowSize: 6
+                                            bottomShadowSize: 4
+                                            topShadowOpacity: 0.68
+                                            sideShadowOpacity: 0.42
+                                            bottomShadowOpacity: 0.30
+                                            glassSheenOpacity: 0.065
+                                        }
                                         Canvas {
                                             id: peqMiniCanvas
                                             anchors.fill: parent
@@ -2452,9 +2538,21 @@ Item {
                                         Layout.fillWidth: true
                                         Layout.preferredHeight: 74
                                         radius: 5
-                                        color: "#0A0E14"
+                                        color: "#06090e"
                                         border.color: "#294658"
                                         border.width: 1
+                                        clip: true
+
+                                        RecessedScreenOverlay {
+                                            cornerRadius: 5
+                                            topShadowSize: 8
+                                            sideShadowSize: 5
+                                            bottomShadowSize: 4
+                                            topShadowOpacity: 0.68
+                                            sideShadowOpacity: 0.42
+                                            bottomShadowOpacity: 0.30
+                                            glassSheenOpacity: 0.065
+                                        }
 
                                         ColumnLayout {
                                             anchors.fill: parent
@@ -2636,7 +2734,7 @@ Item {
                             }
                         }
 
-                        // RIGHT CHANNEL 4x4 Symmetrical Grid (R-01 .. R-16, Champagne Gold)
+                        // RIGHT CHANNEL 4x4 Symmetrical Grid (Unified Recessed Glass Display Window)
                         ColumnLayout {
                             Layout.fillWidth: false
                             Layout.preferredWidth: 560
@@ -2653,138 +2751,200 @@ Item {
                                 color: "#9AA9B8"
                             }
 
-                            GridLayout {
+                            // Unified Recessed Display Window for 4x4 Grid
+                            Rectangle {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                columns: 4
-                                rowSpacing: 5
-                                columnSpacing: 5
+                                radius: 4
+                                color: "#06090d"
+                                border.color: "#151d26"
+                                border.width: 1
+                                clip: true
 
-                                Repeater {
-                                    model: 16
-                                    Rectangle {
-                                        Layout.fillWidth: true
-                                        Layout.fillHeight: true
-                                        radius: 4
-                                        property var bandData: {
-                                            var _t = consoleRoot.peqGridTick
-                                            return consoleRoot.peqEditListening
-                                                   ? EngineController.getListeningBand(true, index)
-                                                   : EngineController.getPeqBand(true, index)
-                                        }
-                                        property bool isOn: !!(bandData && bandData.enabled)
-                                        property bool isSelected: consoleRoot.peqRightChannel && consoleRoot.selectedPeqBand === index
+                                RecessedScreenOverlay {
+                                    cornerRadius: 4
+                                    topShadowSize: 8
+                                    sideShadowSize: 6
+                                    bottomShadowSize: 5
+                                    glassSheenOpacity: 0.06
+                                }
 
-                                        color: isOn ? (isSelected ? "#4E3C19" : "#382A12") : "#11151B"
-                                        border.color: isSelected ? "#FFE099" : (isOn ? "#C99D4A" : "#28303B")
-                                        border.width: isSelected ? 2 : 1
+                                GridLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 4
+                                    columns: 4
+                                    rowSpacing: 1
+                                    columnSpacing: 1
 
-                                        MouseArea {
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                consoleRoot.peqRightChannel = true
-                                                consoleRoot.selectedPeqBand = index
-                                                consoleRoot.refreshPeqInspector()
+                                    Repeater {
+                                        model: 16
+                                        Item {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+
+                                            property var bandData: {
+                                                var _t = consoleRoot.peqGridTick
+                                                return consoleRoot.peqEditListening
+                                                       ? EngineController.getListeningBand(true, index)
+                                                       : EngineController.getPeqBand(true, index)
                                             }
-                                            onDoubleClicked: {
-                                                if (!consoleRoot.isDirect && bandData && bandData.frequency !== undefined) {
-                                                    var nextOn = !isOn
-                                                    if (consoleRoot.peqEditListening) {
-                                                        EngineController.setListeningBand(true, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
-                                                    } else {
-                                                        EngineController.setPeqBand(true, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
-                                                    }
-                                                    consoleRoot.peqGridTick++
+                                            property bool isOn: !!(bandData && bandData.enabled)
+                                            property bool isSelected: consoleRoot.peqRightChannel && consoleRoot.selectedPeqBand === index
+
+                                            // Cell background: very subtle darkening or active tint only for selected band
+                                            Rectangle {
+                                                anchors.fill: parent
+                                                radius: 2
+                                                color: isSelected ? "#382c16" : (isOn ? "#090d12" : "transparent")
+                                                border.color: isSelected ? "#F5B841" : "transparent"
+                                                border.width: isSelected ? 1 : 0
+                                            }
+
+                                            // Engraved Grooves between cells: Dark 1px line + 1px subtle bottom/right highlight
+                                            Rectangle {
+                                                visible: (index % 4) < 3
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.bottom: parent.bottom
+                                                width: 1
+                                                color: "#05070a"
+                                            }
+                                            Rectangle {
+                                                visible: (index % 4) < 3
+                                                anchors.right: parent.right
+                                                anchors.rightMargin: -1
+                                                anchors.top: parent.top
+                                                anchors.bottom: parent.bottom
+                                                width: 1
+                                                color: "#12ffffff"
+                                            }
+                                            Rectangle {
+                                                visible: Math.floor(index / 4) < 3
+                                                anchors.bottom: parent.bottom
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                height: 1
+                                                color: "#05070a"
+                                            }
+                                            Rectangle {
+                                                visible: Math.floor(index / 4) < 3
+                                                anchors.bottom: parent.bottom
+                                                anchors.bottomMargin: -1
+                                                anchors.left: parent.left
+                                                anchors.right: parent.right
+                                                height: 1
+                                                color: "#12ffffff"
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    consoleRoot.peqRightChannel = true
+                                                    consoleRoot.selectedPeqBand = index
                                                     consoleRoot.refreshPeqInspector()
                                                 }
-                                            }
-                                        }
-
-                                        ColumnLayout {
-                                            anchors.fill: parent
-                                            anchors.margins: 6
-                                            spacing: 4
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 5
-                                                Rectangle {
-                                                    Layout.preferredWidth: 7; Layout.preferredHeight: 7
-                                                    width: 7; height: 7; radius: 3.5
-                                                    color: isOn ? "#00E676" : "#2F3743"
-                                                    border.color: isOn ? "#99ffffff" : "#161A20"
-                                                }
-                                                Label {
-                                                    text: "R-" + (index < 9 ? "0" : "") + (index + 1)
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 13
-                                                    font.bold: true
-                                                    color: isOn ? "#FFF2D4" : "#96A4B2"
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                                Label {
-                                                    text: bandData && bandData.q !== undefined ? ("Q " + bandData.q.toFixed(1)) : ""
-                                                    font.family: "Monospace"
-                                                    font.pixelSize: 11
-                                                    font.bold: isOn
-                                                    color: isOn ? "#E8BA6B" : "#6B7886"
-                                                }
-                                            }
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                Layout.fillHeight: true
-                                                spacing: 4
-                                                Rectangle {
-                                                    Layout.fillWidth: true
-                                                    Layout.fillHeight: true
-                                                    radius: 3
-                                                    color: isOn ? "#251C0C" : "#0A0D11"
-                                                    border.color: isOn ? "#8F6E33" : "#1E2530"
-                                                    Column {
-                                                        anchors.centerIn: parent
-                                                        spacing: 1
-                                                        Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: "FREQ"
-                                                            font.family: "Monospace"
-                                                            font.pixelSize: 8
-                                                            color: isOn ? "#D4AA61" : "#4E5966"
+                                                onDoubleClicked: {
+                                                    if (!consoleRoot.isDirect && bandData && bandData.frequency !== undefined) {
+                                                        var nextOn = !isOn
+                                                        if (consoleRoot.peqEditListening) {
+                                                            EngineController.setListeningBand(true, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
+                                                        } else {
+                                                            EngineController.setPeqBand(true, index, bandData.frequency, bandData.gainDb, bandData.q, bandData.type, nextOn)
                                                         }
-                                                        Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: bandData && bandData.frequency ? (bandData.frequency >= 1000 ? (bandData.frequency / 1000).toFixed(1) + "k" : Math.round(bandData.frequency) + "Hz") : "--"
-                                                            font.family: "Monospace"
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                            color: isOn ? "#FFF6E3" : "#8794A2"
-                                                        }
+                                                        consoleRoot.peqGridTick++
+                                                        consoleRoot.refreshPeqInspector()
                                                     }
                                                 }
-                                                Rectangle {
+                                            }
+
+                                            ColumnLayout {
+                                                anchors.fill: parent
+                                                anchors.margins: 4
+                                                spacing: 2
+
+                                                // Top row: Amber LED indicator + Band Name + Q factor
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 4
+
+                                                    // Small Amber LED (glows amber when band is enabled)
+                                                    Rectangle {
+                                                        Layout.preferredWidth: 6; Layout.preferredHeight: 6
+                                                        width: 6; height: 6; radius: 3
+                                                        color: isOn ? "#F5B841" : "#222830"
+                                                        border.color: isOn ? "#FFE6A3" : "#14171d"
+                                                        border.width: 1
+
+                                                        // Subtle LED halo
+                                                        Rectangle {
+                                                            visible: isOn
+                                                            anchors.centerIn: parent
+                                                            width: 10; height: 10; radius: 5
+                                                            color: "#30F5B841"
+                                                            z: -1
+                                                        }
+                                                    }
+
+                                                    Label {
+                                                        text: "R-" + (index < 9 ? "0" : "") + (index + 1)
+                                                        font.family: "Monospace"
+                                                        font.pixelSize: 11
+                                                        font.bold: isSelected
+                                                        color: isSelected ? "#F5B841" : (isOn ? "#8896A4" : "#4A5460")
+                                                    }
+
+                                                    Item { Layout.fillWidth: true }
+
+                                                    Label {
+                                                        text: bandData && bandData.q !== undefined ? ("Q" + bandData.q.toFixed(1)) : ""
+                                                        font.family: "Monospace"
+                                                        font.pixelSize: 10
+                                                        color: isSelected ? "#FFDF8A" : (isOn ? "#687684" : "#38414B")
+                                                    }
+                                                }
+
+                                                // Data Row: FREQ and GAIN in muted gray (champagne gold only when selected)
+                                                RowLayout {
                                                     Layout.fillWidth: true
                                                     Layout.fillHeight: true
-                                                    radius: 3
-                                                    color: isOn ? "#251C0C" : "#0A0D11"
-                                                    border.color: isOn ? "#8F6E33" : "#1E2530"
+                                                    spacing: 3
+
                                                     Column {
-                                                        anchors.centerIn: parent
+                                                        Layout.fillWidth: true
                                                         spacing: 1
                                                         Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
-                                                            text: "GAIN"
+                                                            text: "FREQ"
                                                             font.family: "Monospace"
-                                                            font.pixelSize: 8
-                                                            color: isOn ? "#D4AA61" : "#4E5966"
+                                                            font.pixelSize: 7
+                                                            color: isSelected ? "#AD8C47" : "#3E4752"
                                                         }
                                                         Label {
-                                                            anchors.horizontalCenter: parent.horizontalCenter
+                                                            text: bandData && bandData.frequency ? (bandData.frequency >= 1000 ? (bandData.frequency / 1000).toFixed(1) + "k" : Math.round(bandData.frequency) + "Hz") : "--"
+                                                            font.family: "Monospace"
+                                                            font.pixelSize: 11
+                                                            font.bold: isSelected
+                                                            color: isSelected ? "#F5B841" : (isOn ? "#7E8C9A" : "#454E57")
+                                                        }
+                                                    }
+
+                                                    Column {
+                                                        Layout.fillWidth: true
+                                                        spacing: 1
+                                                        Label {
+                                                            text: "GAIN"
+                                                            font.family: "Monospace"
+                                                            font.pixelSize: 7
+                                                            color: isSelected ? "#AD8C47" : "#3E4752"
+                                                        }
+                                                        Label {
                                                             text: bandData && bandData.gainDb !== undefined
                                                                   ? ((bandData.gainDb > 0 ? "+" : "") + bandData.gainDb.toFixed(1))
                                                                   : "--"
                                                             font.family: "Monospace"
-                                                            font.pixelSize: 13
-                                                            font.bold: true
-                                                            color: isOn ? "#FFF6E3" : "#8794A2"
+                                                            font.pixelSize: 11
+                                                            font.bold: isSelected
+                                                            color: isSelected ? "#F5B841" : (isOn ? "#7E8C9A" : "#454E57")
                                                         }
                                                     }
                                                 }
@@ -2849,6 +3009,18 @@ Item {
                                     color: "#060B10"
                                     border.color: "#2C4D66"
                                     border.width: 1
+                                    clip: true
+
+                                    RecessedScreenOverlay {
+                                        cornerRadius: 4
+                                        topShadowSize: 8
+                                        sideShadowSize: 5
+                                        bottomShadowSize: 4
+                                        topShadowOpacity: 0.68
+                                        sideShadowOpacity: 0.42
+                                        bottomShadowOpacity: 0.30
+                                        glassSheenOpacity: 0.065
+                                    }
 
                                     Canvas {
                                         id: filterMiniCanvas
@@ -3089,6 +3261,18 @@ Item {
                                     color: "#090C11"
                                     border.color: "#38414E"
                                     border.width: 1
+                                    clip: true
+
+                                    RecessedScreenOverlay {
+                                        cornerRadius: 4
+                                        topShadowSize: 8
+                                        sideShadowSize: 5
+                                        bottomShadowSize: 4
+                                        topShadowOpacity: 0.68
+                                        sideShadowOpacity: 0.42
+                                        bottomShadowOpacity: 0.30
+                                        glassSheenOpacity: 0.065
+                                    }
 
                                     ColumnLayout {
                                         anchors.fill: parent
@@ -3291,6 +3475,18 @@ Item {
                                     color: "#110E06"
                                     border.color: "#6B541B"
                                     border.width: 1
+                                    clip: true
+
+                                    RecessedScreenOverlay {
+                                        cornerRadius: 4
+                                        topShadowSize: 8
+                                        sideShadowSize: 5
+                                        bottomShadowSize: 4
+                                        topShadowOpacity: 0.68
+                                        sideShadowOpacity: 0.42
+                                        bottomShadowOpacity: 0.30
+                                        glassSheenOpacity: 0.065
+                                    }
 
                                     ColumnLayout {
                                         anchors.fill: parent
@@ -3446,6 +3642,18 @@ Item {
                                     color: "#050B0E"
                                     border.color: "#224E5B"
                                     border.width: 1
+                                    clip: true
+
+                                    RecessedScreenOverlay {
+                                        cornerRadius: 4
+                                        topShadowSize: 8
+                                        sideShadowSize: 5
+                                        bottomShadowSize: 4
+                                        topShadowOpacity: 0.68
+                                        sideShadowOpacity: 0.42
+                                        bottomShadowOpacity: 0.30
+                                        glassSheenOpacity: 0.065
+                                    }
 
                                     Canvas {
                                         id: reverbMiniCanvas

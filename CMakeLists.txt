@@ -173,6 +173,7 @@ qt_add_qml_module(desk32
         qml/views/SettingsView.qml
     RESOURCES
         images/Desk32-Icon.svg
+        images/Desk32-Blur.png
         resources/ui/brushed_metal_tile.png
         resources/ui/fader_cap_console.png
         resources/ui/fader_cap_shadow.png
@@ -182,6 +183,7 @@ qt_add_qml_module(desk32
         resources/ui/knob_pointer.png
         resources/ui/panel_shadow_9slice.png
         resources/ui/screw_hex_dark.png
+        resources/shaders/panel_surface.frag.qsb
 )
 
 # Translations (Full Bilingual Support)

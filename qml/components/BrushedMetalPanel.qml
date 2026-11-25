@@ -16,6 +16,11 @@ Item {
     property real shadowOpacity: 0.72
     property real brushedOpacity: 0.32
 
+    // Shader-based fine grain noise and SDF rounded-box inner shadow
+    property bool surfaceShaderEnabled: false
+    property real surfaceNoiseStrength: 0.035
+    property real surfaceInnerShadowStrength: 0.35
+
     implicitWidth: 200
     implicitHeight: 200
 
@@ -126,6 +131,22 @@ Item {
             border.color: panelRoot.accentColor
             border.width: panelRoot.accentColor !== "transparent" ? panelRoot.accentWidth : 0
             visible: panelRoot.accentColor !== "transparent"
+        }
+
+        // Hardware Surface Texture & Corner-aware Inner Shadow Shader
+        ShaderEffect {
+            id: surfaceShader
+            visible: panelRoot.surfaceShaderEnabled
+            anchors.fill: parent
+            anchors.margins: 1
+
+            readonly property vector2d u_panelSize: Qt.vector2d(width, height)
+            readonly property real u_cornerRadius: Math.max(0.0, panelRoot.cornerRadius - 1)
+            readonly property real u_noiseStrength: panelRoot.surfaceNoiseStrength
+            readonly property real u_innerShadowStrength: panelRoot.isRecessedWell ? (panelRoot.surfaceInnerShadowStrength * 1.3) : panelRoot.surfaceInnerShadowStrength
+            readonly property real u_isRecessed: panelRoot.isRecessedWell ? 1.0 : 0.0
+
+            fragmentShader: "qrc:/Desk32/resources/shaders/panel_surface.frag.qsb"
         }
 
         // Optional corner machine screws with countersunk socket well

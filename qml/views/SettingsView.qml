@@ -65,6 +65,37 @@ Item {
     Rectangle {
         anchors.fill: parent
         color: "#080a0e"
+        clip: true
+
+        Image {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.topMargin: -56
+            anchors.bottom: parent.bottom
+            source: "qrc:/Desk32/images/Desk32-Blur.png"
+            fillMode: Image.PreserveAspectCrop
+            smooth: true
+            mipmap: true
+        }
+
+        // Subtle dark scrim so foreground Settings panel reads cleanly over blurred console
+        Rectangle {
+            anchors.fill: parent
+            color: "#4805070b"
+        }
+    }
+
+    // Soft cast drop shadow beneath floating Settings frame
+    BorderImage {
+        anchors.fill: settingsFrame
+        anchors.leftMargin: -22
+        anchors.rightMargin: -22
+        anchors.topMargin: -18
+        anchors.bottomMargin: -26
+        source: "qrc:/Desk32/resources/ui/panel_shadow_9slice.png"
+        border { left: 22; top: 22; right: 22; bottom: 22 }
+        opacity: 0.92
     }
 
     Rectangle {

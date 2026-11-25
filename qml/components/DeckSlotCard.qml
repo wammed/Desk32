@@ -87,6 +87,9 @@ BrushedMetalPanel {
     cornerRadius: 6
     brushedOpacity: 0.30
     shadowOpacity: isActive ? 0.90 : 0.65
+    surfaceShaderEnabled: true
+    surfaceNoiseStrength: 0.035
+    surfaceInnerShadowStrength: 0.28
 
     Connections {
         target: EngineController
@@ -352,15 +355,19 @@ BrushedMetalPanel {
                 Layout.fillHeight: true
                 radius: 4
                 color: "#06090d"
-                border.color: cardRoot.isActive && cardRoot.hasTrack ? "#1F6E80" : "#272e39"
+                border.color: cardRoot.isActive && cardRoot.hasTrack ? "#1F6E80" : "#18202a"
                 border.width: 1
+                clip: true
 
                 RecessedScreenOverlay {
                     cornerRadius: 4
-                    topShadowSize: 6
-                    sideShadowSize: 4
-                    bottomShadowSize: 3
-                    glassSheenOpacity: 0.04
+                    topShadowSize: 9
+                    sideShadowSize: 6
+                    bottomShadowSize: 4
+                    topShadowOpacity: 0.70
+                    sideShadowOpacity: 0.45
+                    bottomShadowOpacity: 0.32
+                    glassSheenOpacity: 0.075
                 }
 
                 ColumnLayout {

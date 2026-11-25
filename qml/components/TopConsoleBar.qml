@@ -17,6 +17,9 @@ BrushedMetalPanel {
     cornerRadius: 0
     dropShadowEnabled: false
     brushedOpacity: 0.32
+    surfaceShaderEnabled: true
+    surfaceNoiseStrength: 0.030
+    surfaceInnerShadowStrength: 0.25
 
     // Full-width bottom cast shadow onto chassis below top bar
     Rectangle {
