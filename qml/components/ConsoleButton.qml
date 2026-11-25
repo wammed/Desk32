@@ -61,6 +61,17 @@ Button {
                 color: btnRoot.isActiveState ? btnRoot.ledColor : "#363E4A"
                 border.color: btnRoot.isActiveState ? "#CCffffff" : "#15191F"
                 border.width: 1
+
+                // Soft outer LED halo when active
+                Rectangle {
+                    visible: btnRoot.isActiveState
+                    anchors.centerIn: parent
+                    width: 15
+                    height: 15
+                    radius: 7.5
+                    z: -1
+                    color: Qt.rgba(btnRoot.ledColor.r, btnRoot.ledColor.g, btnRoot.ledColor.b, 0.28)
+                }
             }
 
             Label {
@@ -84,6 +95,17 @@ Button {
     }
 
     background: Item {
+        // 0. Subtle cast shadow below button bezel
+        Rectangle {
+            anchors.fill: parent
+            anchors.leftMargin: -1
+            anchors.rightMargin: -1
+            anchors.topMargin: 1
+            anchors.bottomMargin: btnRoot.down ? -1 : -3
+            radius: btnRoot.cornerRadius + 1
+            color: "#52000000"
+        }
+
         // 1. Recessed Socket Well & Drop Shadow underneath physical keycap
         Rectangle {
             anchors.fill: parent

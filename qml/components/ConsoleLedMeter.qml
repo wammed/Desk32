@@ -70,25 +70,56 @@ Item {
                     var isPeakLit = (pk >= frac - (0.5 / count)) || (meterRoot.clipped && i === count - 1)
                     var isRmsLit = (rms >= frac - (0.5 / count))
 
-                    if (isPeakLit) {
-                        ctx.fillStyle = segColor
-                    } else if (isRmsLit) {
-                        ctx.fillStyle = Qt.rgba(segColor.r, segColor.g, segColor.b, 0.55)
-                    } else {
-                        ctx.fillStyle = "#14181f"
-                    }
-
                     if (meterRoot.horizontal) {
                         var sw = (w - (count - 1) * gap) / count
                         var sx = i * (sw + gap)
+                        if (isPeakLit) {
+                            ctx.fillStyle = Qt.rgba(segColor.r, segColor.g, segColor.b, 0.25)
+                            ctx.fillRect(sx - 1, -1, Math.max(1, sw) + 2, h + 2)
+                            ctx.fillStyle = segColor
+                        } else if (isRmsLit) {
+                            ctx.fillStyle = Qt.rgba(segColor.r, segColor.g, segColor.b, 0.55)
+                        } else {
+                            ctx.fillStyle = "#14181f"
+                        }
                         ctx.fillRect(sx, 0, Math.max(1, sw), h)
                     } else {
                         var sh = (h - (count - 1) * gap) / count
                         var sy = h - (i + 1) * sh - i * gap
+                        if (isPeakLit) {
+                            ctx.fillStyle = Qt.rgba(segColor.r, segColor.g, segColor.b, 0.25)
+                            ctx.fillRect(-1, sy - 0.5, w + 2, Math.max(1, sh) + 1)
+                            ctx.fillStyle = segColor
+                        } else if (isRmsLit) {
+                            ctx.fillStyle = Qt.rgba(segColor.r, segColor.g, segColor.b, 0.55)
+                        } else {
+                            ctx.fillStyle = "#14181f"
+                        }
                         ctx.fillRect(0, sy, w, Math.max(1, sh))
                     }
                 }
             }
+        }
+
+        // Recessed meter glass top inset shadow & subtle bottom edge
+        Rectangle {
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: 1
+            height: 4
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#75000000" }
+                GradientStop { position: 1.0; color: "transparent" }
+            }
+        }
+        Rectangle {
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.margins: 1
+            height: 1
+            color: "#1effffff"
         }
     }
 }

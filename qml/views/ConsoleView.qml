@@ -434,10 +434,14 @@ Item {
         }
     }
 
-    // Dark recessed steel console chassis background
+    // Dark recessed steel console chassis background (deep valley contrast for mounted modules)
     Rectangle {
         anchors.fill: parent
-        color: "#0e1116"
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#06080b" }
+            GradientStop { position: 0.5; color: "#090c11" }
+            GradientStop { position: 1.0; color: "#05070a" }
+        }
     }
 
     // =========================================================================
@@ -477,16 +481,30 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
+                        Column {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 2
+                            Layout.alignment: Qt.AlignVCenter
+                            Rectangle { width: parent.width; height: 1; color: "#07090c" }
+                            Rectangle { width: parent.width; height: 1; color: "#28ffffff" }
+                        }
                         Label {
                             text: qsTr("REFERENCE DECK")
                             font.family: "Monospace"
                             font.pixelSize: 12
                             font.bold: true
                             font.letterSpacing: 1.4
-                            color: "#BDC9D6"
+                            color: "#C4D0DD"
+                            style: Text.Raised
+                            styleColor: "#cc000000"
                         }
-                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
+                        Column {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 2
+                            Layout.alignment: Qt.AlignVCenter
+                            Rectangle { width: parent.width; height: 1; color: "#07090c" }
+                            Rectangle { width: parent.width; height: 1; color: "#28ffffff" }
+                        }
                     }
 
                     // Switching Mode Bar: Large A<->B Quick Switch + NORMAL | COMPARE
@@ -570,6 +588,16 @@ Item {
                         border.color: "#11151b"
                         border.width: 2
                         clip: true
+
+                        RecessedScreenOverlay {
+                            cornerRadius: 6
+                            topShadowSize: 10
+                            sideShadowSize: 6
+                            bottomShadowSize: 4
+                            topShadowOpacity: 0.60
+                            sideShadowOpacity: 0.35
+                            showGlassSheen: false
+                        }
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -708,6 +736,14 @@ Item {
                                 radius: 3
                                 color: "#06090e"
                                 border.color: "#151d26"
+
+                                RecessedScreenOverlay {
+                                    cornerRadius: 3
+                                    topShadowSize: 10
+                                    sideShadowSize: 6
+                                    bottomShadowSize: 5
+                                    glassSheenOpacity: 0.04
+                                }
 
                                 readonly property var actSt: {
                                     var _t = consoleRoot.activeDeckPollTick
@@ -893,6 +929,14 @@ Item {
                                 radius: 3
                                 color: "#06080d"
                                 border.color: "#151d26"
+
+                                RecessedScreenOverlay {
+                                    cornerRadius: 3
+                                    topShadowSize: 12
+                                    sideShadowSize: 7
+                                    bottomShadowSize: 5
+                                    glassSheenOpacity: 0.035
+                                }
 
                                 Canvas {
                                     id: monitorCanvas
@@ -1312,16 +1356,30 @@ Item {
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
+                        Column {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 2
+                            Layout.alignment: Qt.AlignVCenter
+                            Rectangle { width: parent.width; height: 1; color: "#07090c" }
+                            Rectangle { width: parent.width; height: 1; color: "#28ffffff" }
+                        }
                         Label {
                             text: qsTr("ROUTING")
                             font.family: "Monospace"
                             font.pixelSize: 12
                             font.bold: true
                             font.letterSpacing: 1.4
-                            color: "#BDC9D6"
+                            color: "#C4D0DD"
+                            style: Text.Raised
+                            styleColor: "#cc000000"
                         }
-                        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; height: 1; color: "#323a46" }
+                        Column {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 2
+                            Layout.alignment: Qt.AlignVCenter
+                            Rectangle { width: parent.width; height: 1; color: "#07090c" }
+                            Rectangle { width: parent.width; height: 1; color: "#28ffffff" }
+                        }
                     }
 
                     // Tall Balanced 3-Button Routing Section (Q-05 Monitor Output vs Export Path + Dark Preset Selector)
@@ -1917,6 +1975,24 @@ Item {
                                 anchors.top: parent.top
                                 anchors.bottom: parent.bottom
                                 anchors.left: parent.left
+                                anchors.leftMargin: -3
+                                width: 9
+                                radius: 4
+                                color: "#2232E6FF"
+                            }
+                            Rectangle {
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.right: parent.right
+                                anchors.rightMargin: -3
+                                width: 9
+                                radius: 4
+                                color: "#2232E6FF"
+                            }
+                            Rectangle {
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                anchors.left: parent.left
                                 width: 3
                                 radius: 1.5
                                 color: "#32E6FF"
@@ -1934,7 +2010,10 @@ Item {
                                 anchors.fill: parent
                                 anchors.leftMargin: 3
                                 anchors.rightMargin: 3
-                                color: "#11171f"
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: "#151d27" }
+                                    GradientStop { position: 1.0; color: "#0d1218" }
+                                }
                             }
 
                             ColumnLayout {

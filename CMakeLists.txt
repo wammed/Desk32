@@ -164,6 +164,7 @@ qt_add_qml_module(desk32
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml
         qml/components/DeckSlotCard.qml
+        qml/components/RecessedScreenOverlay.qml
         qml/components/ScrollableModalPopup.qml
         qml/components/TopConsoleBar.qml
         qml/views/ConsoleView.qml
@@ -174,9 +175,12 @@ qt_add_qml_module(desk32
         images/Desk32-Icon.svg
         resources/ui/brushed_metal_tile.png
         resources/ui/fader_cap_console.png
+        resources/ui/fader_cap_shadow.png
+        resources/ui/knob_cast_shadow.png
         resources/ui/knob_metal_base.png
         resources/ui/knob_metal_cap.png
         resources/ui/knob_pointer.png
+        resources/ui/panel_shadow_9slice.png
         resources/ui/screw_hex_dark.png
 )
 
@@ -199,6 +203,7 @@ qt_add_translations(desk32
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml
         qml/components/DeckSlotCard.qml
+        qml/components/RecessedScreenOverlay.qml
         qml/components/ScrollableModalPopup.qml
         qml/components/TopConsoleBar.qml
         qml/views/ConsoleView.qml

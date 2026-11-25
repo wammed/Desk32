@@ -92,14 +92,22 @@ Item {
                 border.color: "#2b323d"
                 border.width: 1
 
-                // Soft outer LED halo
+                // Soft outer LED bloom halo
                 Rectangle {
                     anchors.centerIn: parent
-                    width: 14
-                    height: 14
-                    radius: 2
+                    width: 22
+                    height: 22
+                    radius: 11
                     visible: faderRoot.bandEnabled
-                    color: Qt.rgba(faderRoot.ledColor.r, faderRoot.ledColor.g, faderRoot.ledColor.b, 0.28)
+                    color: Qt.rgba(faderRoot.ledColor.r, faderRoot.ledColor.g, faderRoot.ledColor.b, 0.14)
+                }
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: 15
+                    height: 15
+                    radius: 4
+                    visible: faderRoot.bandEnabled
+                    color: Qt.rgba(faderRoot.ledColor.r, faderRoot.ledColor.g, faderRoot.ledColor.b, 0.34)
                 }
 
                 // Core LED diode
@@ -111,6 +119,17 @@ Item {
                     color: faderRoot.bandEnabled ? faderRoot.ledColor : "#232830"
                     border.color: faderRoot.bandEnabled ? "#FFE2A6" : "#15181d"
                     border.width: 1
+                    // Subtle specular hotspot on LED lens
+                    Rectangle {
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.margins: 1.5
+                        width: 3
+                        height: 2
+                        radius: 1
+                        visible: faderRoot.bandEnabled
+                        color: "#90ffffff"
+                    }
                 }
             }
 
@@ -225,6 +244,18 @@ Item {
                         GradientStop { position: 1.0; color: "#151a22" }
                     }
                 }
+            }
+
+            // Directional cast shadow underneath floating fader cap
+            Image {
+                width: trackArea.capWidth + 20
+                height: trackArea.capHeight + 22
+                source: "qrc:/Desk32/resources/ui/fader_cap_shadow.png"
+                smooth: true
+                mipmap: true
+                x: faderCapImage.x - 8
+                y: faderCapImage.y - 5
+                opacity: faderRoot.bandEnabled ? 0.88 : 0.45
             }
 
             // Bitmap metallic fader cap

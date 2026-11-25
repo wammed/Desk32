@@ -13,9 +13,23 @@ BrushedMetalPanel {
     Layout.fillWidth: true
     baseTint: "#13171d"
     borderColor: "#2c3440"
-    topHighlightColor: "#1cffffff"
+    topHighlightColor: "#28ffffff"
     cornerRadius: 0
+    dropShadowEnabled: false
     brushedOpacity: 0.32
+
+    // Full-width bottom cast shadow onto chassis below top bar
+    Rectangle {
+        anchors.top: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: 7
+        z: 10
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#78000000" }
+            GradientStop { position: 1.0; color: "transparent" }
+        }
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -35,12 +49,16 @@ BrushedMetalPanel {
                     font.pixelSize: 27
                     font.bold: true
                     color: "#F3F6FA"
+                    style: Text.Raised
+                    styleColor: "#bb000000"
                 }
                 Label {
                     text: "32"
                     font.pixelSize: 27
                     font.bold: true
                     color: "#E8BA6B"
+                    style: Text.Raised
+                    styleColor: "#bb000000"
                 }
             }
 

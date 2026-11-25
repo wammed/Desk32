@@ -161,6 +161,19 @@ Item {
                 }
             }
 
+            // Layer 0: Broad directional cast shadow on panel face
+            Image {
+                anchors.centerIn: parent
+                anchors.horizontalCenterOffset: 2
+                anchors.verticalCenterOffset: 5
+                width: knobRoot.knobDiameter + 28
+                height: knobRoot.knobDiameter + 28
+                source: "qrc:/Desk32/resources/ui/knob_cast_shadow.png"
+                smooth: true
+                mipmap: true
+                opacity: knobRoot.enabled ? 0.85 : 0.45
+            }
+
             // Layer 1: Machined well & directional cast shadow
             Image {
                 anchors.centerIn: parent
@@ -244,6 +257,14 @@ Item {
             color: "#090c10"
             border.color: "#2b3440"
             border.width: 1
+
+            RecessedScreenOverlay {
+                cornerRadius: 3
+                topShadowSize: 4
+                sideShadowSize: 3
+                bottomShadowSize: 2
+                showGlassSheen: false
+            }
 
             Label {
                 id: readoutText

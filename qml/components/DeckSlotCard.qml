@@ -86,6 +86,7 @@ BrushedMetalPanel {
     accentColor: isActive ? "#402CD6F2" : (folderActive ? "#30F5B841" : "transparent")
     cornerRadius: 6
     brushedOpacity: 0.30
+    shadowOpacity: isActive ? 0.90 : 0.65
 
     Connections {
         target: EngineController
@@ -353,6 +354,14 @@ BrushedMetalPanel {
                 color: "#06090d"
                 border.color: cardRoot.isActive && cardRoot.hasTrack ? "#1F6E80" : "#272e39"
                 border.width: 1
+
+                RecessedScreenOverlay {
+                    cornerRadius: 4
+                    topShadowSize: 6
+                    sideShadowSize: 4
+                    bottomShadowSize: 3
+                    glassSheenOpacity: 0.04
+                }
 
                 ColumnLayout {
                     anchors.fill: parent
