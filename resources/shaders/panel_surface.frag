@@ -1,4 +1,6 @@
 #version 440
+// Re-bake (Qt 6.4+ compatible):
+//   /usr/lib/qt6/bin/qsb --qsbversion 64 --glsl "100 es,120,150,300 es,330" --hlsl 50 --msl 12 -o resources/shaders/panel_surface.frag.qsb resources/shaders/panel_surface.frag
 
 layout(location = 0) in vec2 qt_TexCoord0;
 layout(location = 0) out vec4 fragColor;
