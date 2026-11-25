@@ -70,3 +70,6 @@ Testing/
 
 # local documentations
 docs/local/
+
+#　workspace rules
+.agents/
