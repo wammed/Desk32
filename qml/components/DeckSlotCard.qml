@@ -105,6 +105,11 @@ BrushedMetalPanel {
         function onActiveDeckChanged() {
             cardRoot.refreshState()
         }
+        function onDeckWaveformReady(id) {
+            if (id === cardRoot.deckId || id === "" || id === "ALL") {
+                cardRoot.refreshState()
+            }
+        }
         function onFolderSessionEnded(id, reason, folderPath, trackIndex, totalTracks) {
             if (id === cardRoot.deckId && reason !== "new_folder_session" && reason !== "app_shutdown") {
                 cardRoot.endedSessionLabel = (reason === "track_replaced" || reason === "deck_locked")
@@ -382,6 +387,7 @@ BrushedMetalPanel {
                         Label {
                             Layout.fillWidth: true
                             Layout.minimumWidth: 0
+                            Layout.alignment: Qt.AlignVCenter
                             text: cardRoot.hasTrack
                                   ? ((cardRoot.deckState.title && cardRoot.deckState.title.length > 0)
                                      ? cardRoot.deckState.title
@@ -393,16 +399,42 @@ BrushedMetalPanel {
                             elide: Text.ElideMiddle
                         }
 
-                        Label {
-                            visible: cardRoot.hasTrack
-                            text: {
-                                var c = (cardRoot.deckState && cardRoot.deckState.codec) ? cardRoot.deckState.codec : "PCM"
-                                var sr = ((cardRoot.deckState && cardRoot.deckState.sampleRate) ? (cardRoot.deckState.sampleRate / 1000.0).toFixed(1).replace(/\.0$/, "") : "48") + "k"
-                                return c + " " + sr
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                            spacing: 1
+
+                            Label {
+                                Layout.alignment: Qt.AlignRight
+                                visible: cardRoot.hasTrack
+                                text: {
+                                    var c = (cardRoot.deckState && cardRoot.deckState.codec) ? cardRoot.deckState.codec : "PCM"
+                                    var sr = ((cardRoot.deckState && cardRoot.deckState.sampleRate) ? (cardRoot.deckState.sampleRate / 1000.0).toFixed(1).replace(/\.0$/, "") : "48") + "k"
+                                    return c + " " + sr
+                                }
+                                font.family: "Monospace"
+                                font.pixelSize: 9
+                                color: "#52CFEA"
                             }
-                            font.family: "Monospace"
-                            font.pixelSize: 9
-                            color: "#52CFEA"
+
+                            Label {
+                                Layout.alignment: Qt.AlignRight
+                                text: {
+                                    if (!cardRoot.hasTrack) return "--.- LUFS"
+                                    if (cardRoot.deckState && cardRoot.deckState.lufsReady) {
+                                        if (cardRoot.deckState.hasLufs) {
+                                            return Number(cardRoot.deckState.integratedLufs).toFixed(1) + " LUFS"
+                                        }
+                                        return "-∞ LUFS"
+                                    }
+                                    return "... LUFS"
+                                }
+                                font.family: "Monospace"
+                                font.pixelSize: 9
+                                color: cardRoot.hasTrack
+                                       ? ((cardRoot.deckState && cardRoot.deckState.lufsReady && cardRoot.deckState.hasLufs)
+                                          ? "#52CFEA" : "#7C97A8")
+                                       : "#4B5966"
+                            }
                         }
                     }
 

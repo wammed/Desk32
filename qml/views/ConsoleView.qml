@@ -118,28 +118,48 @@ Item {
     property var cachedPeqNodes: []
 
     function refreshWaveform() {
-        var w = (typeof waveCanvas !== "undefined" && waveCanvas.width > 64) ? Math.min(512, Math.round(waveCanvas.width)) : 320
+        var w = (typeof waveCanvas !== "undefined" && waveCanvas.width > 64)
+                ? Math.min(1024, Math.max(200, Math.round(waveCanvas.width / 2.0)))
+                : 360
         cachedWaveData = EngineController.getDeckWaveformPeaks(EngineController.activeDeckId, w)
         if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
     }
 
     function pollSpectrum() {
         var bins = EngineController.getSpectrumBins(monitorChannelMode, 160, peqRightChannel)
-        cachedSpectrumBins = bins
+        if (!cachedSpectrumBins || cachedSpectrumBins.length !== bins.length) {
+            cachedSpectrumBins = bins.slice(0)
+        } else {
+            var nextBins = cachedSpectrumBins.slice(0)
+            for (var k = 0; k < bins.length; ++k) {
+                nextBins[k] = (bins[k] >= nextBins[k]) ? bins[k] : Math.max(bins[k], nextBins[k] - 3.0)
+            }
+            cachedSpectrumBins = nextBins
+        }
         if (!spectrumPeakHold || spectrumPeakHold.length !== bins.length) {
             spectrumPeakHold = bins.slice(0)
         } else {
             var nextHold = spectrumPeakHold.slice(0)
             for (var i = 0; i < bins.length; ++i) {
-                nextHold[i] = Math.max(bins[i], nextHold[i] - 0.55)
+                var decayStep = (bins[i] <= -88.0) ? 1.4 : 0.65
+                nextHold[i] = Math.max(bins[i], nextHold[i] - decayStep)
             }
             spectrumPeakHold = nextHold
         }
         var maxV = -90.0
         for (var j = 0; j < spectrumPeakHold.length; ++j) {
             if (spectrumPeakHold[j] > maxV) maxV = spectrumPeakHold[j]
+            if (cachedSpectrumBins[j] > maxV) maxV = cachedSpectrumBins[j]
         }
-        spectrumHasSignal = (maxV > -86.0)
+        if (maxV > -86.0) {
+            spectrumHasSignal = true
+        } else {
+            spectrumHasSignal = false
+            for (var z = 0; z < cachedSpectrumBins.length; ++z) {
+                cachedSpectrumBins[z] = -90.0
+                spectrumPeakHold[z] = -90.0
+            }
+        }
         if (typeof monitorCanvas !== "undefined") monitorCanvas.requestPaint()
     }
 
@@ -346,6 +366,7 @@ Item {
     onMonitorViewModeChanged: refreshEqCurve()
     onMonitorChannelModeChanged: {
         refreshEqCurve()
+        if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
         if (spectrumHasSignal) pollSpectrum()
     }
     onShowGeqOverlayOnPeqChanged: refreshEqCurve()
@@ -357,6 +378,7 @@ Item {
     onPeqRightChannelChanged: {
         refreshPeqInspector()
         refreshEqCurve()
+        if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
     }
 
     Timer {
@@ -382,7 +404,7 @@ Item {
             var _t = consoleRoot.activeDeckPollTick
             return EngineController.getDeckState(EngineController.activeDeckId)
         }
-        running: consoleRoot.visible && consoleRoot.showSpectrum && !EngineController.masterMute && ((actSt && actSt.state === 1) || consoleRoot.spectrumHasSignal)
+        running: consoleRoot.visible && consoleRoot.showSpectrum && (((actSt && actSt.state === 1) && !EngineController.masterMute) || consoleRoot.spectrumHasSignal)
         onTriggered: consoleRoot.pollSpectrum()
     }
 
@@ -800,28 +822,39 @@ Item {
                                     }
                                 }
 
-                                // Zero axis line
-                                Rectangle {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    height: 1
-                                    color: "#192533"
-                                }
-
                                 Canvas {
                                     id: waveCanvas
                                     anchors.fill: parent
                                     anchors.leftMargin: 6
                                     anchors.rightMargin: 6
-                                    anchors.topMargin: 16
-                                    anchors.bottomMargin: 6
+                                    anchors.topMargin: 18
+                                    anchors.bottomMargin: 8
                                     onWidthChanged: consoleRoot.refreshWaveform()
                                     onHeightChanged: requestPaint()
                                     onPaint: {
                                         var ctx = getContext("2d")
                                         if (!ctx || width <= 4 || height <= 4) return
                                         ctx.clearRect(0, 0, width, height)
+
+                                        var midY = height * 0.5
+                                        var halfH = height * 0.34
+
+                                        // Subtle -6 dB reference lines and exact center 0-axis line
+                                        ctx.strokeStyle = "rgba(32, 48, 64, 0.55)"
+                                        ctx.lineWidth = 1
+                                        ctx.beginPath()
+                                        ctx.moveTo(0, midY - halfH * 0.5)
+                                        ctx.lineTo(width, midY - halfH * 0.5)
+                                        ctx.moveTo(0, midY + halfH * 0.5)
+                                        ctx.lineTo(width, midY + halfH * 0.5)
+                                        ctx.stroke()
+
+                                        ctx.strokeStyle = "#1B2836"
+                                        ctx.beginPath()
+                                        ctx.moveTo(0, midY)
+                                        ctx.lineTo(width, midY)
+                                        ctx.stroke()
+
                                         var wd = consoleRoot.cachedWaveData
                                         if (!wd || !wd.ready || !wd.bucketCount || wd.bucketCount <= 0) return
 
@@ -830,27 +863,92 @@ Item {
                                         var maxL = wd.maxL
                                         var minR = wd.minR
                                         var maxR = wd.maxR
-                                        var midY = height * 0.5
-                                        var halfH = height * 0.46
+                                        var rmsL = wd.rmsL
+                                        var rmsR = wd.rmsR
+                                        var hasRms = !!(rmsL && rmsR && rmsL.length === n && rmsR.length === n)
+                                        var chMode = (consoleRoot.monitorChannelMode === 3)
+                                                     ? (consoleRoot.peqRightChannel ? 2 : 0)
+                                                     : consoleRoot.monitorChannelMode
                                         var playX = waveTimelineBox.playRatio * width
 
+                                        var peaksPos = new Array(n)
+                                        var peaksNeg = new Array(n)
+                                        var rmsVals = new Array(n)
                                         for (var i = 0; i < n; ++i) {
-                                            var x0 = (i / n) * width
-                                            var wBar = Math.max(1.0, (width / n) - 0.35)
-                                            var mn = Math.min(minL[i], minR[i])
-                                            var mx = Math.max(maxL[i], maxR[i])
-                                            var yTop = midY - Math.max(0.0, mx) * halfH
-                                            var yBot = midY - Math.min(0.0, mn) * halfH
-                                            var barH = Math.max(1.5, yBot - yTop)
+                                            var mn, mx, rv
+                                            if (chMode === 1) {
+                                                mn = minL[i]
+                                                mx = maxL[i]
+                                                rv = hasRms ? rmsL[i] : (0.35 * Math.max(Math.abs(mn), Math.abs(mx)))
+                                            } else if (chMode === 2) {
+                                                mn = minR[i]
+                                                mx = maxR[i]
+                                                rv = hasRms ? rmsR[i] : (0.35 * Math.max(Math.abs(mn), Math.abs(mx)))
+                                            } else {
+                                                mn = Math.min(minL[i], minR[i])
+                                                mx = Math.max(maxL[i], maxR[i])
+                                                if (hasRms) {
+                                                    rv = Math.sqrt(0.5 * (rmsL[i] * rmsL[i] + rmsR[i] * rmsR[i]))
+                                                } else {
+                                                    rv = 0.35 * Math.max(Math.abs(mn), Math.abs(mx))
+                                                }
+                                            }
+                                            var pos = Math.max(0.0, Math.min(1.0, mx))
+                                            var neg = Math.max(0.0, Math.min(1.0, -mn))
+                                            peaksPos[i] = pos
+                                            peaksNeg[i] = neg
+                                            rmsVals[i] = Math.min(Math.max(pos, neg), Math.max(0.0, Math.min(1.0, rv)))
+                                        }
 
-                                            ctx.fillStyle = (x0 <= playX) ? "#36E3FF" : "#1C6E85"
-                                            ctx.fillRect(x0, yTop, wBar, barH)
+                                        // Layer 1: Translucent outer peak envelope + crisp 1px contour
+                                        function drawPeakEnvelope(fillColor, strokeColor) {
+                                            ctx.beginPath()
+                                            for (var k = 0; k < n; ++k) {
+                                                var x = ((k + 0.5) / n) * width
+                                                var yTop = midY - peaksPos[k] * halfH
+                                                if (k === 0) ctx.moveTo(x, yTop)
+                                                else ctx.lineTo(x, yTop)
+                                            }
+                                            for (var j = n - 1; j >= 0; --j) {
+                                                var xb = ((j + 0.5) / n) * width
+                                                var yBot = midY + peaksNeg[j] * halfH
+                                                ctx.lineTo(xb, yBot)
+                                            }
+                                            ctx.closePath()
+                                            ctx.fillStyle = fillColor
+                                            ctx.fill()
+                                            ctx.strokeStyle = strokeColor
+                                            ctx.lineWidth = 1.0
+                                            ctx.stroke()
+                                        }
 
-                                            // Inner RMS/peak core contrast
-                                            var innerTop = midY - Math.max(0.0, mx * 0.55) * halfH
-                                            var innerBot = midY - Math.min(0.0, mn * 0.55) * halfH
-                                            ctx.fillStyle = (x0 <= playX) ? "#8FF2FF" : "#2D9CB8"
-                                            ctx.fillRect(x0, innerTop, wBar, Math.max(1.0, innerBot - innerTop))
+                                        if (playX > 0.5) {
+                                            ctx.save()
+                                            ctx.beginPath()
+                                            ctx.rect(0, 0, playX, height)
+                                            ctx.clip()
+                                            drawPeakEnvelope("rgba(54, 227, 255, 0.20)", "rgba(64, 224, 255, 0.62)")
+                                            ctx.restore()
+                                        }
+                                        if (playX < width - 0.5) {
+                                            ctx.save()
+                                            ctx.beginPath()
+                                            ctx.rect(playX, 0, width - playX, height)
+                                            ctx.clip()
+                                            drawPeakEnvelope("rgba(28, 110, 133, 0.18)", "rgba(42, 148, 176, 0.46)")
+                                            ctx.restore()
+                                        }
+
+                                        // Layer 2: True RMS energy core (slender spaced bars for clear dynamics)
+                                        var step = width / n
+                                        var barW = Math.max(1.0, step * 0.60)
+                                        for (var m = 0; m < n; ++m) {
+                                            var xc = ((m + 0.5) / n) * width
+                                            var rmsPx = rmsVals[m] * halfH
+                                            if (rmsPx < 0.6 && peaksPos[m] < 0.005 && peaksNeg[m] < 0.005) continue
+                                            var hHalf = Math.max(0.75, rmsPx)
+                                            ctx.fillStyle = (xc <= playX) ? "#32D8F5" : "#1D7E9A"
+                                            ctx.fillRect(xc - barW * 0.5, midY - hHalf, barW, hHalf * 2.0)
                                         }
                                     }
                                 }

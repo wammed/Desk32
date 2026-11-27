@@ -411,6 +411,13 @@ void TestOutputDeviceUi::testDeckStateContractFolderSessionAndSeek()
     QTRY_VERIFY_WITH_TIMEOUT(
         ctrl.getDeckWaveformPeaks(QStringLiteral("A"), 128).value(QStringLiteral("ready")).toBool(),
         5000);
+    const QVariantMap peaks2 = ctrl.getDeckWaveformPeaks(QStringLiteral("A"), 128);
+    QCOMPARE(peaks2.value(QStringLiteral("rmsL")).toList().size(), 128);
+    QCOMPARE(peaks2.value(QStringLiteral("rmsR")).toList().size(), 128);
+    const QVariantMap stLufs = ctrl.getDeckState(QStringLiteral("A"));
+    QVERIFY(stLufs.value(QStringLiteral("lufsReady")).toBool());
+    QVERIFY(stLufs.value(QStringLiteral("hasLufs")).toBool());
+    QVERIFY(stLufs.value(QStringLiteral("integratedLufs")).toDouble() > -40.0);
 
     // Verify PEQ / GEQ response curves update live even while DSP node starts bypassed
     QVERIFY(ctrl.isDspNodeBypassed(QStringLiteral("PEQ")));

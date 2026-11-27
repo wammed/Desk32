@@ -254,11 +254,15 @@ bool EngineController::initialize(bool offlineMode) {
             if (const auto *d = m_deckManager->deck(cid)) {
               if (!d->isOpen() || d->trackInfo().path.empty())
                 continue;
-              const auto cp =
-                  std::filesystem::weakly_canonical(d->trackInfo().path, ec);
-              const QString deckCanon =
-                  ec ? QString::fromStdString(d->trackInfo().path)
-                     : QString::fromStdString(cp.string());
+              const std::string &tp = d->trackInfo().path;
+              QString deckCanon;
+              if (tp.rfind("synthetic://", 0) == 0) {
+                deckCanon = QString::fromStdString(tp);
+              } else {
+                const auto cp = std::filesystem::weakly_canonical(tp, ec);
+                deckCanon = ec ? QString::fromStdString(tp)
+                               : QString::fromStdString(cp.string());
+              }
               if (deckCanon == readyPath) {
                 emit deckWaveformReady(QString(cid));
               }
@@ -5173,6 +5177,19 @@ QVariantMap EngineController::getDeckState(const QString &deckId) {
   map["channels"] = d->trackInfo().channels;
   map["totalFrames"] = QVariant::fromValue(d->trackInfo().totalFrames);
 
+  engine::audio::TrackLufsInfo lufsInfo;
+  if (m_waveformExtractor && d->isOpen() && !d->trackInfo().path.empty()) {
+    lufsInfo = m_waveformExtractor->queryTrackLufs(d->trackInfo().path);
+    if (!lufsInfo.ready && !lufsInfo.measuring) {
+      m_waveformExtractor->requestWaveform(d->trackInfo().path);
+      lufsInfo.measuring = true;
+    }
+  }
+  map["lufsReady"] = lufsInfo.ready;
+  map["hasLufs"] = lufsInfo.hasLufs;
+  map["lufsMeasuring"] = lufsInfo.measuring;
+  map["integratedLufs"] = lufsInfo.lufs;
+
   auto meta = d->metadata();
   if (meta) {
     map["title"] = QString::fromStdString(meta->title);
@@ -7556,29 +7573,47 @@ QVariantMap EngineController::getDeckWaveformPeaks(const QString &deckId,
 
   const int bins =
       std::clamp(targetBins, 32, static_cast<int>(data.bucketCount));
-  QVariantList minL, maxL, minR, maxR;
+  QVariantList minL, maxL, minR, maxR, rmsL, rmsR;
   minL.reserve(bins);
   maxL.reserve(bins);
   minR.reserve(bins);
   maxR.reserve(bins);
+  rmsL.reserve(bins);
+  rmsR.reserve(bins);
 
   const size_t srcN = data.bucketCount;
+  const bool hasRms =
+      (data.rmsL.size() == srcN && data.rmsR.size() == srcN);
   for (int i = 0; i < bins; ++i) {
     const size_t s0 =
         (static_cast<size_t>(i) * srcN) / static_cast<size_t>(bins);
     const size_t s1 = std::max(s0 + 1, (static_cast<size_t>(i + 1) * srcN) /
                                            static_cast<size_t>(bins));
     float mnL = 1.0f, mxL = -1.0f, mnR = 1.0f, mxR = -1.0f;
+    double sqL = 0.0, sqR = 0.0;
+    size_t cnt = 0;
     for (size_t s = s0; s < s1 && s < srcN; ++s) {
       mnL = std::min(mnL, data.minL[s]);
       mxL = std::max(mxL, data.maxL[s]);
       mnR = std::min(mnR, data.minR[s]);
       mxR = std::max(mxR, data.maxR[s]);
+      if (hasRms) {
+        sqL += static_cast<double>(data.rmsL[s]) * static_cast<double>(data.rmsL[s]);
+        sqR += static_cast<double>(data.rmsR[s]) * static_cast<double>(data.rmsR[s]);
+      }
+      ++cnt;
     }
     minL.append(static_cast<double>(mnL));
     maxL.append(static_cast<double>(mxL));
     minR.append(static_cast<double>(mnR));
     maxR.append(static_cast<double>(mxR));
+    if (hasRms && cnt > 0) {
+      rmsL.append(std::sqrt(sqL / static_cast<double>(cnt)));
+      rmsR.append(std::sqrt(sqR / static_cast<double>(cnt)));
+    } else {
+      rmsL.append(0.35 * std::max(std::abs(mnL), std::abs(mxL)));
+      rmsR.append(0.35 * std::max(std::abs(mnR), std::abs(mxR)));
+    }
   }
 
   out["ready"] = true;
@@ -7590,6 +7625,10 @@ QVariantMap EngineController::getDeckWaveformPeaks(const QString &deckId,
   out["maxL"] = maxL;
   out["minR"] = minR;
   out["maxR"] = maxR;
+  out["rmsL"] = rmsL;
+  out["rmsR"] = rmsR;
+  out["hasLufs"] = data.hasLufs;
+  out["integratedLufs"] = data.integratedLufs;
   return out;
 }
 
@@ -7656,6 +7695,30 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
     return result;
   }
 
+  // Channel focus selection: 0 = L+R, 1 = L, 2 = R, 3 = AUTO (tracks active PEQ
+  // edit channel or L+R)
+  const int effectiveCh =
+      (channelMode == 3) ? (autoPreferRight ? 2 : 0) : channelMode;
+
+  if (!m_directModeEnabled.load(std::memory_order_acquire)) {
+    const bool muteAll = m_masterMute.load(std::memory_order_relaxed);
+    const bool muteL = muteAll || m_masterMuteL.load(std::memory_order_relaxed);
+    const bool muteR = muteAll || m_masterMuteR.load(std::memory_order_relaxed);
+    const bool pathMuted =
+        (m_outputRoutingMode.load(std::memory_order_relaxed) == 1)
+            ? m_pipeline->renderMonitorMuted()
+            : m_pipeline->listeningMuted();
+    const bool channelMuted = pathMuted || muteAll ||
+                              (effectiveCh == 1 && muteL) ||
+                              (effectiveCh == 2 && muteR) ||
+                              (effectiveCh == 0 && muteL && muteR);
+    if (channelMuted) {
+      for (int i = 0; i < bins; ++i)
+        result.append(-90.0);
+      return result;
+    }
+  }
+
   std::array<double, FFT_N> ringL{};
   std::array<double, FFT_N> ringR{};
   uint64_t writePos = 0;
@@ -7676,11 +7739,6 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
     m_lastSpectrumWritePos = writePos;
     m_spectrumStaleCount = 0;
   }
-
-  // Channel focus selection: 0 = L+R, 1 = L, 2 = R, 3 = AUTO (tracks active PEQ
-  // edit channel or L+R)
-  const int effectiveCh =
-      (channelMode == 3) ? (autoPreferRight ? 2 : 0) : channelMode;
 
   std::vector<std::complex<double>> fft(FFT_N);
   constexpr double TWO_PI = 6.28318530717958647692;

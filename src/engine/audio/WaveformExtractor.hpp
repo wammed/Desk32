@@ -25,7 +25,18 @@ struct WaveformData {
     std::vector<float> maxL;
     std::vector<float> minR;
     std::vector<float> maxR;
+    std::vector<float> rmsL;
+    std::vector<float> rmsR;
+    double integratedLufs = -70.0;
+    bool hasLufs = false;
     bool valid = false;
+};
+
+struct TrackLufsInfo {
+    bool ready = false;
+    bool hasLufs = false;
+    bool measuring = false;
+    double lufs = -70.0;
 };
 
 /// Asynchronous background waveform peak extractor with $XDG_CACHE_HOME/desk32/waveforms/ persistence.
@@ -48,6 +59,7 @@ public:
     [[nodiscard]] bool isExtracting(const std::string& filePath) const;
     [[nodiscard]] bool hasWaveform(const std::string& filePath) const;
     [[nodiscard]] bool getWaveform(const std::string& filePath, WaveformData& outData) const;
+    [[nodiscard]] TrackLufsInfo queryTrackLufs(const std::string& filePath) const;
 
     /// Disk cache helpers ($XDG_CACHE_HOME/desk32/waveforms/).
     [[nodiscard]] static std::string cacheDirectoryPath();
@@ -58,6 +70,7 @@ public:
 private:
     void workerLoop();
     static std::string canonicalizePath(const std::string& path);
+    std::string canonicalizeCached(const std::string& path) const;
     static std::string computeCacheFilePath(const std::string& canonPath);
     static bool loadFromDiskCache(const std::string& cacheFile, const std::string& canonPath, WaveformData& outData);
     static bool saveToDiskCache(const std::string& cacheFile, const WaveformData& data);
@@ -68,6 +81,7 @@ private:
     std::deque<std::string> m_queue;
     std::unordered_set<std::string> m_queuedOrActive;
     std::unordered_map<std::string, WaveformData> m_memoryCache;
+    mutable std::unordered_map<std::string, std::string> m_rawToCanon;
     ReadyCallback m_readyCallback;
 
     std::atomic<bool> m_stop{false};
