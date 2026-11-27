@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
@@ -111,6 +112,37 @@ public:
             c.a1 = a1 / a0;
             c.a2 = a2 / a0;
         }
+        return c;
+    }
+
+    /// 1st-order bilinear-transform Low-Pass / High-Pass section (6 dB/oct) for 18 dB/oct 3rd-order filters.
+    static BiquadCoefficients calculateFirstOrderLowPass(double sampleRate, double frequency) noexcept
+    {
+        if (sampleRate <= 0.0) return BiquadCoefficients::identity();
+        const double clampedFreq = std::clamp(frequency, 1.0, sampleRate * 0.48);
+        const double K = std::tan(std::numbers::pi * clampedFreq / sampleRate);
+        const double norm = 1.0 / (1.0 + K);
+        BiquadCoefficients c;
+        c.b0 = K * norm;
+        c.b1 = K * norm;
+        c.b2 = 0.0;
+        c.a1 = (K - 1.0) * norm;
+        c.a2 = 0.0;
+        return c;
+    }
+
+    static BiquadCoefficients calculateFirstOrderHighPass(double sampleRate, double frequency) noexcept
+    {
+        if (sampleRate <= 0.0) return BiquadCoefficients::identity();
+        const double clampedFreq = std::clamp(frequency, 1.0, sampleRate * 0.48);
+        const double K = std::tan(std::numbers::pi * clampedFreq / sampleRate);
+        const double norm = 1.0 / (1.0 + K);
+        BiquadCoefficients c;
+        c.b0 = norm;
+        c.b1 = -norm;
+        c.b2 = 0.0;
+        c.a1 = (K - 1.0) * norm;
+        c.a2 = 0.0;
         return c;
     }
 

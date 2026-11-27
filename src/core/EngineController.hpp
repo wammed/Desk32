@@ -22,6 +22,7 @@
 #include "engine/dsp/AlgorithmicReverb.hpp"
 #include "engine/dsp/ParameterSmoother.hpp"
 #include "engine/preset/PresetManager.hpp"
+#include "engine/preset/PresetStateTracker.hpp"
 #include "engine/render/RenderEngine.hpp"
 #include "engine/backend/AudioControlManager.hpp"
 #include "engine/backend/AudioOutput.hpp"
@@ -88,7 +89,14 @@ class EngineController : public QObject {
     Q_PROPERTY(QString listeningPresetName READ listeningPresetName NOTIFY listeningPresetChanged)
     Q_PROPERTY(bool listeningCorrectionActive READ listeningCorrectionActive NOTIFY outputRoutingModeChanged)
     Q_PROPERTY(bool geqBypassed READ isGeqBypassed WRITE setGeqBypassed NOTIFY geqParametersChanged)
+    Q_PROPERTY(bool geqGlobalBypass READ isGeqGlobalBypass WRITE setGeqGlobalBypass NOTIFY geqParametersChanged)
     Q_PROPERTY(bool peqBypassed READ isPeqBypassed WRITE setPeqBypassed NOTIFY peqParametersChanged)
+
+    // Spec v3.8.3 §11.1 / P5: Canonical DSP Preset State (Application Controller owned)
+    Q_PROPERTY(QString activeGlobalPresetId READ activeGlobalPresetId NOTIFY dspPresetStateChanged)
+    Q_PROPERTY(QString activeGlobalPresetName READ activeGlobalPresetName NOTIFY dspPresetStateChanged)
+    Q_PROPERTY(bool globalPresetModified READ isGlobalPresetModified NOTIFY dspPresetStateChanged)
+    Q_PROPERTY(QVariantMap dspPresetIndicators READ dspPresetIndicators NOTIFY dspPresetStateChanged)
 
     // Phase 3: External Insert & Host Bridge Telemetry
     Q_PROPERTY(int externalInsertState READ externalInsertState NOTIFY externalInsertStatusChanged)
@@ -357,7 +365,8 @@ public:
     Q_INVOKABLE void setLimiterParams(double ceilingDb, double releaseMs, double lookaheadMs);
     Q_INVOKABLE QVariantMap getLimiterParams();
 
-    Q_INVOKABLE void setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving);
+    Q_INVOKABLE void setReverbParams(double roomSize, double damping, double wetLevel, double predelayMs, bool tailPreserving,
+                                     double decaySeconds = -1.0);
     Q_INVOKABLE void setReverbLimits(double maxTailRetentionSeconds, double maxProcessingTimeMs);
     Q_INVOKABLE QVariantMap getReverbParams();
     Q_INVOKABLE QVariantMap getLastPresetImportReport() const;
@@ -380,11 +389,37 @@ public:
 
     Q_INVOKABLE void setDspNodeBypass(const QString& nodeName, bool bypass);
     Q_INVOKABLE void setGeqBypassed(bool bypass);
+    Q_INVOKABLE bool isGeqGlobalBypass() const noexcept;
+    Q_INVOKABLE void setGeqGlobalBypass(bool bypass);
     Q_INVOKABLE void setPeqBypassed(bool bypass);
+    Q_INVOKABLE void setHpfNodeEnabled(bool enabled);
+    Q_INVOKABLE void setLpfNodeEnabled(bool enabled);
     Q_INVOKABLE bool resyncDspNodeBypass(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeBypassed(const QString& nodeName);
     Q_INVOKABLE bool isDspNodeAppliedBypassed(const QString& nodeName) const noexcept;
     Q_INVOKABLE QVariantMap getDeckState(const QString& deckId);
+
+    // Spec v3.8.3 §11.1 / Appendix A: Global & Per-DSP Preset Operations (P3 & P5)
+    [[nodiscard]] QString activeGlobalPresetId() const;
+    [[nodiscard]] QString activeGlobalPresetName() const;
+    [[nodiscard]] bool isGlobalPresetModified() const;
+    [[nodiscard]] QVariantMap dspPresetIndicators() const;
+    Q_INVOKABLE bool isDspPresetApplied(const QString& target) const;
+    Q_INVOKABLE QVariantList listGlobalDspPresets() const;
+    Q_INVOKABLE QVariantList listPerDspPresets(const QString& target) const;
+    Q_INVOKABLE bool hasUserDspPresetNamed(const QString& kind, const QString& target, const QString& name) const;
+    Q_INVOKABLE bool isBuiltInDspPreset(const QString& kind, const QString& target, const QString& idOrName) const;
+    Q_INVOKABLE bool applyGlobalDspPreset(const QString& idOrName);
+    Q_INVOKABLE bool applyPerDspPreset(const QString& target, const QString& idOrName);
+    Q_INVOKABLE bool applyDspPresetFromFile(const QString& filePath);
+    Q_INVOKABLE bool saveGlobalDspPreset(const QString& name, bool overwrite = false);
+    Q_INVOKABLE bool savePerDspPreset(const QString& target, const QString& name, bool overwrite = false);
+    Q_INVOKABLE bool renameUserDspPreset(const QString& kind, const QString& target,
+                                         const QString& id, const QString& newName,
+                                         bool overwrite = false);
+    Q_INVOKABLE bool deleteUserDspPreset(const QString& kind, const QString& target,
+                                         const QString& idOrName);
+    Q_INVOKABLE QVariantMap lastDspPresetReport() const;
 
     // Phase 3: External Insert Host Operations (Section 6.0)
     Q_INVOKABLE QVariantList discoverExternalInsertPorts() const;
@@ -496,6 +531,7 @@ signals:
     void externalInsertStatusChanged();
     void dspQueueOverflowWarning(int commandType);
     void presetManagementChanged();
+    void dspPresetStateChanged();
     void renderStateChanged();
     void renderMonitorVolumeChanged(double volume);
     void listeningVolumeChanged(double volume);
@@ -519,6 +555,19 @@ signals:
 
 private:
     void syncMasterDspToRenderEngine();
+    [[nodiscard]] engine::preset::GlobalDspPresetData captureCurrentGlobalDspState() const;
+    void applyPeqPresetData(const engine::preset::PeqPresetData& peq);
+    void applyGeqPresetData(const engine::preset::GeqPresetData& geq);
+    void applyHpfPresetData(const engine::preset::HpfPresetData& hpf, const bool* optEnabled = nullptr);
+    void applyLpfPresetData(const engine::preset::LpfPresetData& lpf, const bool* optEnabled = nullptr);
+    void applyCompressorPresetData(const engine::preset::CompressorPresetData& comp);
+    void applyLimiterPresetData(const engine::preset::LimiterPresetData& lim);
+    void applyReverbPresetData(const engine::preset::ReverbPresetData& rev);
+    void applyGeqEffectiveBypassToPipeline();
+    void notifyManualDspParamChanged();
+    void notifyDspNodeBypassChanged();
+    bool applyValidatedDspPresetDocument(const engine::preset::DspPresetDocument& doc,
+                                         const engine::preset::PresetValidationReport& report);
     bool applyMasterDspJson(const QJsonObject& obj);
     bool applyPeqBandsFromJson(const QJsonObject& peqObj, const QString& presetLabel);
     void recordPresetImportReport(const QString& targetKey, const QString& targetDisplay,
@@ -570,12 +619,19 @@ private:
     // Node bypass state tracking for Control Thread / UI display
     std::atomic<bool> m_peqBypassed{true};
     std::atomic<bool> m_geqBypassed{true};
+    std::atomic<bool> m_geqGlobalBypass{false}; // Spec §11.1 temporary GEQ bypass (excluded from presets)
     std::atomic<bool> m_filterBypassed{true};
     std::atomic<bool> m_compBypassed{true};
     std::atomic<bool> m_insertBypassed{true};
     std::atomic<bool> m_limiterBypassed{true};
     std::atomic<bool> m_reverbBypassed{true};
     std::atomic<bool> m_listeningCorrectionBypassed{false};
+
+    // Spec v3.8.3 §11.1 / P5: Canonical Preset State Tracker
+    engine::preset::PresetStateTracker m_presetStateTracker;
+    engine::preset::PresetValidationReport m_lastDspPresetReport;
+    mutable std::mutex m_dspPresetStateMutex;
+    bool m_applyingDspPreset{false};
 
     // Phase 3: External Insert Node
     std::shared_ptr<engine::insert::ExternalInsertNode> m_insertNode;

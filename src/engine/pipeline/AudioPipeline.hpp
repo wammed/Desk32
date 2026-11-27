@@ -449,7 +449,8 @@ public:
     void updateReverb(double roomSize, double damping, double wetLevel, double predelayMs,
                       bool tailPreserving, bool enabled,
                       double maxTailRetentionSeconds = 5.0,
-                      double maxProcessingTimeMs = 0.0) {
+                      double maxProcessingTimeMs = 0.0,
+                      double decaySeconds = -1.0) {
         auto guard = m_masterReclaimer.enterRead();
         if (guard) {
             for (size_t i = 0; i < guard->nodeCount(); ++i) {
@@ -459,7 +460,8 @@ public:
                     rev->prepareInstance(m_graphSampleRate.load(std::memory_order_relaxed),
                                          roomSize, damping, wetLevel, predelayMs,
                                          tailPreserving, enabled,
-                                         maxTailRetentionSeconds, maxProcessingTimeMs);
+                                         maxTailRetentionSeconds, maxProcessingTimeMs,
+                                         decaySeconds);
                     break;
                 }
             }

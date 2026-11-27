@@ -60,6 +60,7 @@ struct RenderDspSnapshot {
     double reverbWetLevel = 0.2;
     double reverbPredelayMs = 0.0;
     bool reverbTailPreserving = true;
+    double reverbDecaySeconds = -1.0;
 
     // Limiter
     bool limiterEnabled = true;
@@ -206,7 +207,8 @@ public:
         m_comp.setEnabled(comp.isEnabled());
 
         // 5. Reverb
-        m_reverb.configure(m_sampleRate, rev.roomSize(), rev.damping(), rev.wetLevel(), rev.predelayMs(), rev.isTailPreserving());
+        m_reverb.configure(m_sampleRate, rev.roomSize(), rev.damping(), rev.wetLevel(), rev.predelayMs(),
+                           rev.isTailPreserving(), true, rev.usesExplicitDecay() ? rev.decaySeconds() : -1.0);
         m_reverb.setEnabled(rev.isEnabled());
 
         // 6. Peak Limiter
@@ -260,6 +262,7 @@ public:
         s.reverbWetLevel = m_reverb.wetLevel();
         s.reverbPredelayMs = m_reverb.predelayMs();
         s.reverbTailPreserving = m_reverb.isTailPreserving();
+        s.reverbDecaySeconds = m_reverb.usesExplicitDecay() ? m_reverb.decaySeconds() : -1.0;
 
         // 6. Peak Limiter
         s.limiterEnabled = m_limiter.isEnabled();
@@ -324,7 +327,8 @@ public:
         m_comp.setEnabled(s.compEnabled);
 
         // 5. Reverb
-        m_reverb.configure(sampleRate, s.reverbRoomSize, s.reverbDamp, s.reverbWetLevel, s.reverbPredelayMs, s.reverbTailPreserving);
+        m_reverb.configure(sampleRate, s.reverbRoomSize, s.reverbDamp, s.reverbWetLevel, s.reverbPredelayMs,
+                           s.reverbTailPreserving, true, s.reverbDecaySeconds);
         m_reverb.setEnabled(s.reverbEnabled);
 
         // 6. Peak Limiter

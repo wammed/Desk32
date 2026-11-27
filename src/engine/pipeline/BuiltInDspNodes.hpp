@@ -613,6 +613,7 @@ public:
         bool enabled{true};
         double maxTailRetentionSeconds{5.0};
         double maxProcessingTimeMs{0.0};
+        double decaySeconds{-1.0};
     };
 
     struct RingoutSlot {
@@ -664,27 +665,29 @@ public:
         }
         prepareInstance(sampleRate, cfg.roomSize, cfg.damping, cfg.wetLevel,
                         cfg.predelayMs, cfg.tailPreserving, cfg.enabled,
-                        cfg.maxTailRetentionSeconds, cfg.maxProcessingTimeMs);
+                        cfg.maxTailRetentionSeconds, cfg.maxProcessingTimeMs,
+                        cfg.decaySeconds);
     }
 
     // Called on Control Thread (P0-21, P0-22)
     void prepareInstance(double sampleRate, double roomSize, double damping,
                          double wetLevel, double predelayMs, bool tailPreserving,
                          bool enabled, double maxTailRetentionSeconds = 5.0,
-                         double maxProcessingTimeMs = 0.0) {
+                         double maxProcessingTimeMs = 0.0,
+                         double decaySeconds = -1.0) {
         const double clampedRetention = std::clamp(maxTailRetentionSeconds, 0.1, 30.0);
         const double clampedBudgetMs = std::max(0.0, maxProcessingTimeMs);
         m_maxTailRetentionSeconds.store(clampedRetention, std::memory_order_relaxed);
         m_maxProcessingTimeMs.store(clampedBudgetMs, std::memory_order_relaxed);
 
         auto next = std::make_unique<AlgorithmicReverb>();
-        next->configure(sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled);
+        next->configure(sampleRate, roomSize, damping, wetLevel, predelayMs, tailPreserving, enabled, decaySeconds);
         AlgorithmicReverb* raw = next.release();
         AlgorithmicReverb* unconsumed = nullptr;
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
             m_config = {sampleRate, roomSize, damping, wetLevel, predelayMs,
-                        tailPreserving, enabled, clampedRetention, clampedBudgetMs};
+                        tailPreserving, enabled, clampedRetention, clampedBudgetMs, decaySeconds};
             unconsumed = m_prepared.exchange(raw, std::memory_order_acq_rel);
         }
         if (unconsumed) {
@@ -1125,7 +1128,7 @@ public:
         node->prepareInstance(cfg.sampleRate, cfg.roomSize, cfg.damping,
                               cfg.wetLevel, cfg.predelayMs, cfg.tailPreserving,
                               cfg.enabled, cfg.maxTailRetentionSeconds,
-                              cfg.maxProcessingTimeMs);
+                              cfg.maxProcessingTimeMs, cfg.decaySeconds);
         return node;
     }
 

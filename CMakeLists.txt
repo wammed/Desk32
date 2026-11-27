@@ -132,6 +132,11 @@ qt_add_executable(desk32
     src/engine/insert/PipeWireInsertTransport.cpp
     src/engine/insert/JackInsertTransport.hpp
     src/engine/insert/JackInsertTransport.cpp
+    src/engine/preset/DspPresetTypes.hpp
+    src/engine/preset/DspPresetSerializer.hpp
+    src/engine/preset/DspPresetSerializer.cpp
+    src/engine/preset/BuiltInDspPresets.hpp
+    src/engine/preset/BuiltInDspPresets.cpp
     src/engine/preset/PresetManager.hpp
     src/engine/preset/PresetManager.cpp
     src/engine/render/WavFileWriter.hpp
@@ -164,6 +169,7 @@ qt_add_qml_module(desk32
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml
         qml/components/DeckSlotCard.qml
+        qml/components/PresetModalPopup.qml
         qml/components/RecessedScreenOverlay.qml
         qml/components/ScrollableModalPopup.qml
         qml/components/TopConsoleBar.qml
@@ -205,6 +211,7 @@ qt_add_translations(desk32
         qml/components/ConsoleKnob.qml
         qml/components/ConsoleLedMeter.qml
         qml/components/DeckSlotCard.qml
+        qml/components/PresetModalPopup.qml
         qml/components/RecessedScreenOverlay.qml
         qml/components/ScrollableModalPopup.qml
         qml/components/TopConsoleBar.qml

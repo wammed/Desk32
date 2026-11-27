@@ -1,9 +1,12 @@
 #include "PresetManager.hpp"
+#include "BuiltInDspPresets.hpp"
+#include "DspPresetSerializer.hpp"
 #include "engine/dsp/ParametricEQ.hpp"
 #include <QFile>
 #include <QFileInfo>
 #include <QDateTime>
 #include <QSaveFile>
+#include <QUuid>
 #include <QDebug>
 
 namespace desk32::engine::preset {
@@ -40,12 +43,24 @@ QString PresetManager::categoryDirectory(const QString& category) const {
     return presetRootPath() + "/" + sanitizeName(category);
 }
 
+QString PresetManager::dspPresetDirectory(DspPresetKind kind, DspPresetTarget target) const {
+    if (kind == DspPresetKind::Global) {
+        return presetRootPath() + QStringLiteral("/dsp/global");
+    }
+    return presetRootPath() + QStringLiteral("/dsp/") + sanitizeName(dspTargetToString(target));
+}
+
 void PresetManager::ensureCategoryDirectories() const {
     QString root = presetRootPath();
     QDir().mkpath(root + "/" + PresetCategories::ListeningCorrection);
     QDir().mkpath(root + "/" + PresetCategories::MasterDsp);
     QDir().mkpath(root + "/" + PresetCategories::ExternalInsert);
     QDir().mkpath(root + "/" + PresetCategories::AudioDevice);
+    QDir().mkpath(root + QStringLiteral("/dsp/global"));
+    for (size_t i = 0; i < kDspPresetTargetCount; ++i) {
+        QDir().mkpath(root + QStringLiteral("/dsp/") +
+                      dspTargetToString(static_cast<DspPresetTarget>(i)));
+    }
 }
 
 QString PresetManager::sanitizeName(const QString& name) const {
@@ -364,6 +379,330 @@ bool PresetManager::deletePreset(const QString& category, const QString& presetN
         emit presetDeleted(category, presetName);
     }
     return ok;
+}
+
+QString PresetManager::findUserDspPresetFileLocked(DspPresetKind kind,
+                                                   DspPresetTarget target,
+                                                   const QString& idOrName) const {
+    const QDir dir(dspPresetDirectory(kind, target));
+    if (!dir.exists()) return {};
+
+    // Fast path: direct filename match
+    const QString directPath = dir.filePath(sanitizeName(idOrName) + QStringLiteral(".json"));
+    if (QFile::exists(directPath)) {
+        return directPath;
+    }
+
+    // Scan files in directory for matching `id` or `name`
+    const QFileInfoList files = dir.entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const auto& fi : files) {
+        QFile f(fi.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QJsonDocument jdoc = QJsonDocument::fromJson(f.readAll());
+        if (!jdoc.isObject()) continue;
+        const QJsonObject obj = jdoc.object();
+        if (obj.value(QStringLiteral("id")).toString() == idOrName ||
+            obj.value(QStringLiteral("name")).toString() == idOrName ||
+            fi.completeBaseName() == idOrName) {
+            return fi.absoluteFilePath();
+        }
+    }
+
+    // For Global presets, also allow loading legacy v1 master_dsp/*.json user files
+    if (kind == DspPresetKind::Global) {
+        const QDir legacyDir(categoryDirectory(QString::fromLatin1(PresetCategories::MasterDsp)));
+        if (legacyDir.exists()) {
+            const QString legacyPath = legacyDir.filePath(sanitizeName(idOrName) + QStringLiteral(".json"));
+            if (QFile::exists(legacyPath)) {
+                return legacyPath;
+            }
+        }
+    }
+    return {};
+}
+
+std::vector<DspPresetSummary> PresetManager::listDspPresets(DspPresetKind kind,
+                                                            DspPresetTarget target) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    std::vector<DspPresetSummary> result;
+
+    // 1. Read-only built-in presets (Appendix A.12)
+    for (const auto& doc : BuiltInDspPresets::presetsFor(kind, target)) {
+        DspPresetSummary s;
+        s.id = doc.id;
+        s.name = doc.name;
+        s.kind = doc.kind;
+        s.scope = doc.scope;
+        s.target = doc.target;
+        s.isFactory = true;
+        s.createdAt = doc.createdAt;
+        s.modifiedAt = doc.modifiedAt;
+        result.push_back(std::move(s));
+    }
+
+    // 2. User-saved presets in $XDG_CONFIG_HOME/desk32/presets/dsp/...
+    const QDir dir(dspPresetDirectory(kind, target));
+    if (dir.exists()) {
+        const QFileInfoList files = dir.entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+        for (const auto& fi : files) {
+            QFile f(fi.absoluteFilePath());
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            DspPresetDocument doc;
+            PresetValidationReport rep;
+            if (!DspPresetSerializer::fromJsonBytes(f.readAll(), doc, rep)) continue;
+            if (doc.kind != kind) continue;
+            if (kind == DspPresetKind::PerDsp && doc.target != target) continue;
+
+            DspPresetSummary s;
+            s.id = doc.id;
+            s.name = doc.name.isEmpty() ? fi.completeBaseName() : doc.name;
+            s.kind = doc.kind;
+            s.scope = doc.scope;
+            s.target = doc.target;
+            s.isFactory = false;
+            s.createdAt = doc.createdAt;
+            s.modifiedAt = doc.modifiedAt;
+            result.push_back(std::move(s));
+        }
+    }
+
+    return result;
+}
+
+bool PresetManager::hasUserDspPresetNamed(DspPresetKind kind,
+                                          DspPresetTarget target,
+                                          const QString& presetName) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const QString clean = sanitizeName(presetName);
+    const QString filePath = dspPresetDirectory(kind, target) + QLatin1Char('/') + clean + QStringLiteral(".json");
+    if (QFile::exists(filePath)) return true;
+
+    const QDir dir(dspPresetDirectory(kind, target));
+    if (!dir.exists()) return false;
+    const QFileInfoList files = dir.entryInfoList({QStringLiteral("*.json")}, QDir::Files, QDir::Name);
+    for (const auto& fi : files) {
+        QFile f(fi.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QJsonDocument jdoc = QJsonDocument::fromJson(f.readAll());
+        if (jdoc.isObject() && jdoc.object().value(QStringLiteral("name")).toString() == presetName.trimmed()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PresetManager::isBuiltInDspPreset(DspPresetKind kind,
+                                       DspPresetTarget target,
+                                       const QString& idOrName) const {
+    return BuiltInDspPresets::isBuiltIn(kind, target, idOrName);
+}
+
+bool PresetManager::loadDspPresetFromFile(const QString& filePath,
+                                          DspPresetDocument& outDoc,
+                                          PresetValidationReport& outReport) const {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        outReport = PresetValidationReport{};
+        outReport.ok = false;
+        outReport.errorMessage = QStringLiteral("Failed to open preset file '%1': %2")
+                                     .arg(filePath, f.errorString());
+        return false;
+    }
+    return DspPresetSerializer::fromJsonBytes(f.readAll(), outDoc, outReport);
+}
+
+bool PresetManager::loadDspPreset(DspPresetKind kind,
+                                  DspPresetTarget target,
+                                  const QString& idOrName,
+                                  DspPresetDocument& outDoc,
+                                  PresetValidationReport& outReport) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    outReport = PresetValidationReport{};
+
+    // 1. Check built-in read-only presets first
+    if (BuiltInDspPresets::findPreset(kind, target, idOrName, outDoc)) {
+        outReport.ok = true;
+        return true;
+    }
+
+    const QString path = findUserDspPresetFileLocked(kind, target, idOrName);
+    if (path.isEmpty()) {
+        outReport.ok = false;
+        outReport.errorMessage = QStringLiteral("DSP preset '%1' not found").arg(idOrName);
+        return false;
+    }
+
+    if (!loadDspPresetFromFile(path, outDoc, outReport)) {
+        return false;
+    }
+    if (outDoc.kind != kind) {
+        outReport.ok = false;
+        outReport.errorMessage = QStringLiteral("Preset kind mismatch: expected '%1', got '%2'")
+                                     .arg(dspKindToString(kind), dspKindToString(outDoc.kind));
+        return false;
+    }
+    if (kind == DspPresetKind::PerDsp && outDoc.target != target) {
+        outReport.ok = false;
+        outReport.errorMessage = QStringLiteral("Preset target mismatch: expected '%1', got '%2'")
+                                     .arg(dspTargetToString(target), dspTargetToString(outDoc.target));
+        return false;
+    }
+    return true;
+}
+
+bool PresetManager::saveUserDspPreset(DspPresetDocument& doc,
+                                      bool overwrite,
+                                      QString* outError) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const QString trimmedName = doc.name.trimmed();
+        if (trimmedName.isEmpty()) {
+            if (outError) *outError = QStringLiteral("Preset name must not be empty");
+            return false;
+        }
+        if (isBuiltInDspPreset(doc.kind, doc.target, trimmedName) ||
+            (!doc.id.isEmpty() && isBuiltInDspPreset(doc.kind, doc.target, doc.id))) {
+            if (outError) *outError = QStringLiteral("Cannot overwrite read-only built-in preset '%1'").arg(trimmedName);
+            return false;
+        }
+
+        ensureCategoryDirectories();
+        const QString dirPath = dspPresetDirectory(doc.kind, doc.target);
+        const QString filePath = dirPath + QLatin1Char('/') + sanitizeName(trimmedName) + QStringLiteral(".json");
+
+        if (!overwrite && QFile::exists(filePath)) {
+            if (outError) *outError = QStringLiteral("A preset named '%1' already exists").arg(trimmedName);
+            return false;
+        }
+
+        // Preserve existing id/created_at when overwriting an existing user preset by name
+        const QString nowIso = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+        if (QFile::exists(filePath)) {
+            DspPresetDocument existing;
+            PresetValidationReport existingRep;
+            if (loadDspPresetFromFile(filePath, existing, existingRep)) {
+                if (doc.id.isEmpty()) doc.id = existing.id;
+                if (doc.createdAt.isEmpty()) doc.createdAt = existing.createdAt;
+            }
+        }
+
+        doc.format = QString::fromLatin1(kDspPresetFormat);
+        doc.version = kDspPresetCurrentVersion;
+        doc.name = trimmedName;
+        doc.isFactory = false;
+        doc.scope = (doc.kind == DspPresetKind::PerDsp && doc.target == DspPresetTarget::Peq)
+                        ? DspPresetScope::MasteringChain
+                        : DspPresetScope::Chain;
+        if (doc.id.isEmpty()) {
+            doc.id = QStringLiteral("user.") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        }
+        if (doc.createdAt.isEmpty()) {
+            doc.createdAt = nowIso;
+        }
+        doc.modifiedAt = nowIso;
+
+        const QByteArray bytes = DspPresetSerializer::toJsonBytes(doc);
+        QSaveFile saveFile(filePath);
+        if (!saveFile.open(QIODevice::WriteOnly)) {
+            if (outError) *outError = QStringLiteral("Failed to open preset file for writing: %1").arg(saveFile.errorString());
+            return false;
+        }
+        saveFile.write(bytes);
+        if (!saveFile.commit()) {
+            if (outError) *outError = QStringLiteral("Failed to atomically commit preset file '%1'").arg(filePath);
+            return false;
+        }
+    }
+
+    emit dspPresetListChanged();
+    return true;
+}
+
+bool PresetManager::renameUserDspPreset(DspPresetKind kind,
+                                        DspPresetTarget target,
+                                        const QString& id,
+                                        const QString& newName,
+                                        bool overwrite,
+                                        QString* outError) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const QString trimmedNew = newName.trimmed();
+        if (trimmedNew.isEmpty()) {
+            if (outError) *outError = QStringLiteral("New preset name must not be empty");
+            return false;
+        }
+        if (isBuiltInDspPreset(kind, target, id) || isBuiltInDspPreset(kind, target, trimmedNew)) {
+            if (outError) *outError = QStringLiteral("Cannot rename or overwrite a built-in preset");
+            return false;
+        }
+
+        const QString oldPath = findUserDspPresetFileLocked(kind, target, id);
+        if (oldPath.isEmpty()) {
+            if (outError) *outError = QStringLiteral("User preset '%1' not found").arg(id);
+            return false;
+        }
+
+        DspPresetDocument doc;
+        PresetValidationReport rep;
+        if (!loadDspPresetFromFile(oldPath, doc, rep)) {
+            if (outError) *outError = rep.errorMessage;
+            return false;
+        }
+
+        const QString newPath = dspPresetDirectory(kind, target) + QLatin1Char('/') +
+                                sanitizeName(trimmedNew) + QStringLiteral(".json");
+        if (!overwrite && newPath != oldPath && QFile::exists(newPath)) {
+            if (outError) *outError = QStringLiteral("A preset named '%1' already exists").arg(trimmedNew);
+            return false;
+        }
+
+        // Preserve immutable `id` and `createdAt`, update `name` and `modifiedAt`
+        doc.name = trimmedNew;
+        doc.modifiedAt = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+
+        const QByteArray bytes = DspPresetSerializer::toJsonBytes(doc);
+        QSaveFile saveFile(newPath);
+        if (!saveFile.open(QIODevice::WriteOnly)) {
+            if (outError) *outError = QStringLiteral("Failed to open renamed preset file: %1").arg(saveFile.errorString());
+            return false;
+        }
+        saveFile.write(bytes);
+        if (!saveFile.commit()) {
+            if (outError) *outError = QStringLiteral("Failed to commit renamed preset file");
+            return false;
+        }
+        if (newPath != oldPath) {
+            QFile::remove(oldPath);
+        }
+    }
+
+    emit dspPresetListChanged();
+    return true;
+}
+
+bool PresetManager::deleteUserDspPreset(DspPresetKind kind,
+                                        DspPresetTarget target,
+                                        const QString& idOrName,
+                                        QString* outError) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (isBuiltInDspPreset(kind, target, idOrName)) {
+            if (outError) *outError = QStringLiteral("Cannot delete read-only built-in preset '%1'").arg(idOrName);
+            return false;
+        }
+        const QString path = findUserDspPresetFileLocked(kind, target, idOrName);
+        if (path.isEmpty()) {
+            if (outError) *outError = QStringLiteral("User preset '%1' not found").arg(idOrName);
+            return false;
+        }
+        if (!QFile::remove(path)) {
+            if (outError) *outError = QStringLiteral("Failed to remove preset file '%1'").arg(path);
+            return false;
+        }
+    }
+
+    emit dspPresetListChanged();
+    return true;
 }
 
 } // namespace desk32::engine::preset

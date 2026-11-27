@@ -200,12 +200,18 @@ bool EngineController::initialize(bool offlineMode) {
   // Reset bypass states to defaults matching node construction
   m_peqBypassed.store(true, std::memory_order_relaxed);
   m_geqBypassed.store(true, std::memory_order_relaxed);
+  m_geqGlobalBypass.store(false, std::memory_order_relaxed);
   m_filterBypassed.store(true, std::memory_order_relaxed);
   m_compBypassed.store(true, std::memory_order_relaxed);
   m_insertBypassed.store(true, std::memory_order_relaxed);
   m_limiterBypassed.store(true, std::memory_order_relaxed);
   m_reverbBypassed.store(true, std::memory_order_relaxed);
   m_listeningCorrectionBypassed.store(false, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_presetStateTracker.resetToUnity();
+    m_lastDspPresetReport = engine::preset::PresetValidationReport{};
+  }
   m_globalDspBypass.store(false, std::memory_order_relaxed);
   m_globalBypassDesynced.store(false, std::memory_order_relaxed);
   m_directModeEnabled.store(false, std::memory_order_relaxed);
@@ -4141,6 +4147,7 @@ void EngineController::setGeqBandGain(int bandIndex, double gainDb) {
   }
   // Update Control Thread local UI Snapshot
   m_uiGeq.setBandGain(static_cast<size_t>(bandIndex), gainDb);
+  notifyManualDspParamChanged();
   emit geqParametersChanged();
 }
 
@@ -4152,6 +4159,7 @@ void EngineController::setGeqBandEnabled(int bandIndex, bool enabled) {
                                                  enabled);
   }
   m_uiGeq.setBandEnabled(static_cast<size_t>(bandIndex), enabled);
+  notifyManualDspParamChanged();
   emit geqParametersChanged();
 }
 
@@ -4173,6 +4181,7 @@ void EngineController::resetAllGeqBands() {
     m_pipeline->paramMailbox().resetAllGeqBands();
   }
   m_uiGeq.resetAllBands();
+  notifyManualDspParamChanged();
   emit geqParametersChanged();
   log::LogService::instance().log("DSP", "ResetGEQ", "Success",
                                   "Reset all 32 GEQ bands to 0 dB", "DSPNode",
@@ -4263,6 +4272,7 @@ void EngineController::setPeqBand(bool isRightChannel, int bandIndex,
   } else {
     m_uiPeq.setLeftBand(static_cast<size_t>(bandIndex), cfg);
   }
+  notifyManualDspParamChanged();
   emit peqParametersChanged();
 }
 
@@ -4286,6 +4296,7 @@ void EngineController::setPeqBandEnabled(bool isRightChannel, int bandIndex,
   } else {
     m_uiPeq.setLeftBand(static_cast<size_t>(bandIndex), cfg);
   }
+  notifyManualDspParamChanged();
   emit peqParametersChanged();
 }
 
@@ -4370,28 +4381,45 @@ void EngineController::setFilterParams(double hpfFreq, bool hpfOn, int hpfSlope,
                                        double hpfQ, double lpfQ) {
   const double clampedHpfQ = std::clamp(hpfQ, 0.1, 10.0);
   const double clampedLpfQ = std::clamp(lpfQ, 0.1, 10.0);
+  const auto parsedHpfSlope = HighLowPassFilter::slopeFromInt(hpfSlope);
+  const auto parsedLpfSlope = HighLowPassFilter::slopeFromInt(lpfSlope);
+  const uint8_t hpfSlopeCode = static_cast<uint8_t>(parsedHpfSlope);
+  const uint8_t lpfSlopeCode = static_cast<uint8_t>(parsedLpfSlope);
+
+  const bool paramEdited =
+      std::abs(m_uiFilter.hpfFrequency() - std::clamp(hpfFreq, 10.0, 1000.0)) > 1e-4 ||
+      std::abs(m_uiFilter.lpfFrequency() - std::clamp(lpfFreq, 1000.0, 22000.0)) > 1e-4 ||
+      m_uiFilter.hpfSlope() != parsedHpfSlope ||
+      m_uiFilter.lpfSlope() != parsedLpfSlope ||
+      std::abs(m_uiFilter.hpfQ() - clampedHpfQ) > 1e-4 ||
+      std::abs(m_uiFilter.lpfQ() - clampedLpfQ) > 1e-4;
+  const bool nodeEnableChanged =
+      (m_uiFilter.isHpfEnabled() != hpfOn) || (m_uiFilter.isLpfEnabled() != lpfOn);
+
   if (m_pipeline) {
     // P0-21: Continuous parameter update exclusively via lock-free
     // DspParameterMailbox
     m_pipeline->paramMailbox().setFilterParams(
         static_cast<float>(hpfFreq), static_cast<float>(lpfFreq),
-        static_cast<uint8_t>(hpfSlope), static_cast<uint8_t>(lpfSlope), hpfOn,
+        hpfSlopeCode, lpfSlopeCode, hpfOn,
         lpfOn, static_cast<float>(clampedHpfQ),
         static_cast<float>(clampedLpfQ));
   }
   m_uiFilter.setHpfFrequency(hpfFreq);
   m_uiFilter.setHpfEnabled(hpfOn);
-  m_uiFilter.setHpfSlope(hpfSlope == 1
-                             ? HighLowPassFilter::FilterSlope::Slope24dB
-                             : HighLowPassFilter::FilterSlope::Slope12dB);
+  m_uiFilter.setHpfSlope(parsedHpfSlope);
   m_uiFilter.setHpfQ(clampedHpfQ);
 
   m_uiFilter.setLpfFrequency(lpfFreq);
   m_uiFilter.setLpfEnabled(lpfOn);
-  m_uiFilter.setLpfSlope(lpfSlope == 1
-                             ? HighLowPassFilter::FilterSlope::Slope24dB
-                             : HighLowPassFilter::FilterSlope::Slope12dB);
+  m_uiFilter.setLpfSlope(parsedLpfSlope);
   m_uiFilter.setLpfQ(clampedLpfQ);
+
+  if (paramEdited) {
+    notifyManualDspParamChanged();
+  } else if (nodeEnableChanged) {
+    notifyDspNodeBypassChanged();
+  }
 
   emit filterParametersChanged();
   emit diagnosticsChanged();
@@ -4401,15 +4429,13 @@ QVariantMap EngineController::getFilterParams() {
   QVariantMap map;
   map["hpfFrequency"] = m_uiFilter.hpfFrequency();
   map["hpfEnabled"] = m_uiFilter.isHpfEnabled();
-  map["hpfSlope"] =
-      m_uiFilter.hpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1
-                                                                         : 0;
+  map["hpfSlope"] = static_cast<int>(m_uiFilter.hpfSlope());
+  map["hpfSlopeDbOct"] = HighLowPassFilter::slopeToDbPerOct(m_uiFilter.hpfSlope());
   map["hpfQ"] = m_uiFilter.hpfQ();
   map["lpfFrequency"] = m_uiFilter.lpfFrequency();
   map["lpfEnabled"] = m_uiFilter.isLpfEnabled();
-  map["lpfSlope"] =
-      m_uiFilter.lpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB ? 1
-                                                                         : 0;
+  map["lpfSlope"] = static_cast<int>(m_uiFilter.lpfSlope());
+  map["lpfSlopeDbOct"] = HighLowPassFilter::slopeToDbPerOct(m_uiFilter.lpfSlope());
   map["lpfQ"] = m_uiFilter.lpfQ();
   map["bypassed"] = m_filterBypassed.load(std::memory_order_relaxed);
   return map;
@@ -4446,6 +4472,7 @@ void EngineController::setCompressorParams(double thresholdDb, double ratio,
   double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
   m_uiComp.configure(sRate, thresholdDb, ratio, attackMs, releaseMs, makeupDb,
                      kneeDb, enabled);
+  notifyManualDspParamChanged();
   emit compressorParametersChanged();
 
   if (m_pipeline) {
@@ -4478,6 +4505,7 @@ void EngineController::setLimiterParams(double ceilingDb, double releaseMs,
   bool enabled = !m_limiterBypassed.load(std::memory_order_relaxed);
   double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
   m_uiLimiter.configure(sRate, ceilingDb, releaseMs, lookaheadMs, enabled);
+  notifyManualDspParamChanged();
   emit limiterParametersChanged();
 
   if (m_pipeline) {
@@ -4504,11 +4532,13 @@ QVariantMap EngineController::getLimiterParams() {
 
 void EngineController::setReverbParams(double roomSize, double damping,
                                        double wetLevel, double predelayMs,
-                                       bool tailPreserving) {
+                                       bool tailPreserving,
+                                       double decaySeconds) {
   bool enabled = !m_reverbBypassed.load(std::memory_order_relaxed);
   double sRate = m_pipeline ? m_pipeline->graphSampleRate() : 48000.0;
   m_uiReverb.configure(sRate, roomSize, damping, wetLevel, predelayMs,
-                       tailPreserving, enabled);
+                       tailPreserving, enabled, decaySeconds);
+  notifyManualDspParamChanged();
   emit reverbParametersChanged();
 
   if (m_pipeline) {
@@ -4517,7 +4547,8 @@ void EngineController::setReverbParams(double roomSize, double damping,
     m_pipeline->updateReverb(
         roomSize, damping, wetLevel, predelayMs, tailPreserving, true,
         m_reverbMaxTailRetentionSeconds.load(std::memory_order_relaxed),
-        m_reverbMaxProcessingTimeMs.load(std::memory_order_relaxed));
+        m_reverbMaxProcessingTimeMs.load(std::memory_order_relaxed),
+        decaySeconds);
   }
 }
 
@@ -4533,7 +4564,8 @@ void EngineController::setReverbLimits(double maxTailRetentionSeconds,
     m_pipeline->updateReverb(m_uiReverb.roomSize(), m_uiReverb.damping(),
                              m_uiReverb.wetLevel(), m_uiReverb.predelayMs(),
                              m_uiReverb.isTailPreserving(), true,
-                             clampedRetention, clampedBudgetMs);
+                             clampedRetention, clampedBudgetMs,
+                             m_uiReverb.usesExplicitDecay() ? m_uiReverb.decaySeconds() : -1.0);
   }
   if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
     SettingsManager::instance().setReverbMaxTailSeconds(clampedRetention);
@@ -4546,6 +4578,7 @@ QVariantMap EngineController::getReverbParams() {
   QVariantMap map;
   map["roomSize"] = m_uiReverb.roomSize();
   map["damping"] = m_uiReverb.damping();
+  map["decaySeconds"] = m_uiReverb.decaySeconds();
   map["wetLevel"] = m_pipeline ? m_pipeline->currentTelemetry().reverbWetLevel
                                : m_uiReverb.wetLevel();
   map["predelayMs"] = m_uiReverb.predelayMs();
@@ -4947,12 +4980,17 @@ void EngineController::setDspNodeBypass(const QString &nodeName, bool bypass) {
     return;
   }
 
+  const bool effectiveBypass =
+      (nodeName == "GEQ")
+          ? (bypass || m_geqGlobalBypass.load(std::memory_order_relaxed))
+          : bypass;
+
   if (m_pipeline) {
     engine::dsp::DspCommand cmd;
     cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
     cmd.index = nodeIndex;
     cmd.subIndex = targetChain;
-    cmd.boolFlag1 = bypass ? 1 : 0;
+    cmd.boolFlag1 = effectiveBypass ? 1 : 0;
     if (!m_pipeline->paramQueue().push(cmd)) {
       log::LogService::instance().log(
           "DSP", "NodeBypass", "Failed",
@@ -4969,17 +5007,22 @@ void EngineController::setDspNodeBypass(const QString &nodeName, bool bypass) {
 
   // Command successfully queued into Audio Thread: update state (P1-2)
   // Parameter values are strictly PRESERVED and not erased or reset on bypass
+  bool isChainNode = false;
   if (nodeName == "PEQ") {
     m_peqBypassed.store(bypass, std::memory_order_relaxed);
     m_uiPeq.setEnabled(!bypass);
+    isChainNode = true;
   } else if (nodeName == "GEQ") {
     m_geqBypassed.store(bypass, std::memory_order_relaxed);
-    m_uiGeq.setEnabled(!bypass);
+    m_uiGeq.setEnabled(!effectiveBypass);
+    isChainNode = true;
   } else if (nodeName == "Filter") {
     m_filterBypassed.store(bypass, std::memory_order_relaxed);
+    isChainNode = true;
   } else if (nodeName == "Compressor") {
     m_compBypassed.store(bypass, std::memory_order_relaxed);
     m_uiComp.setEnabled(!bypass);
+    isChainNode = true;
   } else if (nodeName == "ExternalInsert" || nodeName == "Insert") {
     m_insertBypassed.store(bypass, std::memory_order_relaxed);
     if (m_insertNode) {
@@ -4988,13 +5031,18 @@ void EngineController::setDspNodeBypass(const QString &nodeName, bool bypass) {
   } else if (nodeName == "Reverb") {
     m_reverbBypassed.store(bypass, std::memory_order_relaxed);
     m_uiReverb.setEnabled(!bypass);
+    isChainNode = true;
   } else if (nodeName == "Limiter") {
     m_limiterBypassed.store(bypass, std::memory_order_relaxed);
     m_uiLimiter.setEnabled(!bypass);
+    isChainNode = true;
   } else if (nodeName == "ListeningCorrection") {
     m_listeningCorrectionBypassed.store(bypass, std::memory_order_relaxed);
   }
 
+  if (isChainNode) {
+    notifyDspNodeBypassChanged();
+  }
   emitDspNodeSignal(nodeName);
   emit diagnosticsChanged();
   log::LogService::instance().log(
@@ -6845,7 +6893,10 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
           rev->setBypassed(m_reverbBypassed.load(std::memory_order_relaxed));
           rev->prepareInstance(sr, m_uiReverb.roomSize(), m_uiReverb.damping(),
                                m_uiReverb.wetLevel(), m_uiReverb.predelayMs(),
-                               m_uiReverb.isTailPreserving(), true);
+                               m_uiReverb.isTailPreserving(), true,
+                               m_reverbMaxTailRetentionSeconds.load(std::memory_order_relaxed),
+                               m_reverbMaxProcessingTimeMs.load(std::memory_order_relaxed),
+                               m_uiReverb.usesExplicitDecay() ? m_uiReverb.decaySeconds() : -1.0);
         }
       } else if (auto *lim =
                      dynamic_cast<engine::pipeline::PeakLimiterNode *>(node)) {
@@ -6957,7 +7008,8 @@ void EngineController::syncMasterDspToRenderEngine() {
                         m_uiLimiter);
 
   const bool peqOn = !m_peqBypassed.load(std::memory_order_relaxed);
-  const bool geqOn = !m_geqBypassed.load(std::memory_order_relaxed);
+  const bool geqOn = !m_geqBypassed.load(std::memory_order_relaxed) &&
+                     !m_geqGlobalBypass.load(std::memory_order_relaxed);
   const bool fltOn = !m_filterBypassed.load(std::memory_order_relaxed);
   const bool compOn = !m_compBypassed.load(std::memory_order_relaxed);
   const bool revOn = !m_reverbBypassed.load(std::memory_order_relaxed);
@@ -7723,6 +7775,766 @@ QVariantList EngineController::getSpectrumBins(int channelMode, int numBins,
     result.append(std::clamp(db, -90.0, 6.0));
   }
   return result;
+}
+
+// =============================================================================
+// Spec v3.8.3 §11.1 / Appendix A: Global & Per-DSP Presets (P3 & P5)
+// =============================================================================
+
+namespace {
+
+struct ScopedPresetApplyGuard {
+  bool &flag;
+  bool prev;
+  explicit ScopedPresetApplyGuard(bool &f) noexcept : flag(f), prev(f) {
+    flag = true;
+  }
+  ~ScopedPresetApplyGuard() { flag = prev; }
+};
+
+QVariantMap presetSummaryToMap(const engine::preset::DspPresetSummary &s) {
+  QVariantMap m;
+  m.insert(QStringLiteral("id"), s.id);
+  m.insert(QStringLiteral("name"), s.name);
+  m.insert(QStringLiteral("kind"), engine::preset::dspKindToString(s.kind));
+  m.insert(QStringLiteral("scope"), engine::preset::dspScopeToString(s.scope));
+  m.insert(QStringLiteral("target"),
+           s.kind == engine::preset::DspPresetKind::Global
+               ? QStringLiteral("all")
+               : engine::preset::dspTargetToString(s.target));
+  m.insert(QStringLiteral("isFactory"), s.isFactory);
+  m.insert(QStringLiteral("createdAt"), s.createdAt);
+  m.insert(QStringLiteral("modifiedAt"), s.modifiedAt);
+  return m;
+}
+
+} // namespace
+
+bool EngineController::isGeqGlobalBypass() const noexcept {
+  return m_geqGlobalBypass.load(std::memory_order_relaxed);
+}
+
+void EngineController::applyGeqEffectiveBypassToPipeline() {
+  const bool effectiveBypass =
+      m_geqBypassed.load(std::memory_order_relaxed) ||
+      m_geqGlobalBypass.load(std::memory_order_relaxed);
+  m_uiGeq.setEnabled(!effectiveBypass);
+  if (m_pipeline) {
+    engine::dsp::DspCommand cmd;
+    cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
+    cmd.index = m_masterNodeIndices[1].load(std::memory_order_relaxed);
+    cmd.subIndex = 0;
+    cmd.boolFlag1 = effectiveBypass ? 1 : 0;
+    (void)m_pipeline->paramQueue().push(cmd);
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+}
+
+void EngineController::setGeqGlobalBypass(bool bypass) {
+  const bool prev = m_geqGlobalBypass.exchange(bypass, std::memory_order_relaxed);
+  if (prev == bypass) {
+    return;
+  }
+  // Spec §11.1: GEQ全体バイパス is temporary bypass independent of DSP node ON/OFF,
+  // excluded from presets, preset-applied indicators, and Global `modified` diff.
+  applyGeqEffectiveBypassToPipeline();
+  emit geqParametersChanged();
+  emit diagnosticsChanged();
+  log::LogService::instance().log(
+      "DSP", "GeqGlobalBypass", "Success",
+      QString("GEQ Global Bypass %1").arg(bypass ? "Engaged" : "Disengaged"),
+      "DSPNode", "GEQ");
+}
+
+void EngineController::setHpfNodeEnabled(bool enabled) {
+  if (m_uiFilter.isHpfEnabled() == enabled &&
+      (!enabled || !m_filterBypassed.load(std::memory_order_relaxed))) {
+    return;
+  }
+  const bool lpfOn = m_uiFilter.isLpfEnabled();
+  const bool outerFilterBypass = !(enabled || lpfOn);
+  {
+    ScopedPresetApplyGuard guard(m_applyingDspPreset);
+    setDspNodeBypass(QStringLiteral("Filter"), outerFilterBypass);
+    setFilterParams(m_uiFilter.hpfFrequency(), enabled,
+                    static_cast<int>(m_uiFilter.hpfSlope()),
+                    m_uiFilter.lpfFrequency(), lpfOn,
+                    static_cast<int>(m_uiFilter.lpfSlope()),
+                    m_uiFilter.hpfQ(), m_uiFilter.lpfQ());
+  }
+  notifyDspNodeBypassChanged();
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+}
+
+void EngineController::setLpfNodeEnabled(bool enabled) {
+  if (m_uiFilter.isLpfEnabled() == enabled &&
+      (!enabled || !m_filterBypassed.load(std::memory_order_relaxed))) {
+    return;
+  }
+  const bool hpfOn = m_uiFilter.isHpfEnabled();
+  const bool outerFilterBypass = !(hpfOn || enabled);
+  {
+    ScopedPresetApplyGuard guard(m_applyingDspPreset);
+    setDspNodeBypass(QStringLiteral("Filter"), outerFilterBypass);
+    setFilterParams(m_uiFilter.hpfFrequency(), hpfOn,
+                    static_cast<int>(m_uiFilter.hpfSlope()),
+                    m_uiFilter.lpfFrequency(), enabled,
+                    static_cast<int>(m_uiFilter.lpfSlope()),
+                    m_uiFilter.hpfQ(), m_uiFilter.lpfQ());
+  }
+  notifyDspNodeBypassChanged();
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+}
+
+engine::preset::GlobalDspPresetData
+EngineController::captureCurrentGlobalDspState() const {
+  using namespace engine::preset;
+  GlobalDspPresetData g = GlobalDspPresetData::unity();
+
+  // 1. PEQ (Mastering Chain)
+  g.peq.preampDb = m_uiPeq.preampDb();
+  for (size_t i = 0; i < ParametricEQ::BANDS_PER_CHANNEL; ++i) {
+    const auto &lb = m_uiPeq.leftBand(i);
+    g.peq.leftBands[i].freqHz = lb.frequency;
+    g.peq.leftBands[i].gainDb = lb.gainDb;
+    g.peq.leftBands[i].q = lb.Q;
+    g.peq.leftBands[i].type = lb.type;
+    g.peq.leftBands[i].enabled = lb.enabled;
+
+    const auto &rb = m_uiPeq.rightBand(i);
+    g.peq.rightBands[i].freqHz = rb.frequency;
+    g.peq.rightBands[i].gainDb = rb.gainDb;
+    g.peq.rightBands[i].q = rb.Q;
+    g.peq.rightBands[i].type = rb.type;
+    g.peq.rightBands[i].enabled = rb.enabled;
+  }
+  g.peq.overflowLeft.clear();
+  for (const auto &ob : m_uiPeq.overflowLeftBands()) {
+    PeqBandPreset b;
+    b.freqHz = ob.frequency;
+    b.gainDb = ob.gainDb;
+    b.q = ob.Q;
+    b.type = ob.type;
+    b.enabled = ob.enabled;
+    g.peq.overflowLeft.push_back(std::move(b));
+  }
+  g.peq.overflowRight.clear();
+  for (const auto &ob : m_uiPeq.overflowRightBands()) {
+    PeqBandPreset b;
+    b.freqHz = ob.frequency;
+    b.gainDb = ob.gainDb;
+    b.q = ob.Q;
+    b.type = ob.type;
+    b.enabled = ob.enabled;
+    g.peq.overflowRight.push_back(std::move(b));
+  }
+
+  // 2. GEQ
+  for (size_t i = 0; i < GraphicEQ::NUM_BANDS; ++i) {
+    g.geq.gainsDb[i] = m_uiGeq.bandGain(i);
+    g.geq.bandEnabled[i] = m_uiGeq.isBandEnabled(i);
+  }
+
+  // 3. HPF & LPF
+  g.hpf.cutoffHz = m_uiFilter.hpfFrequency();
+  g.hpf.q = m_uiFilter.hpfQ();
+  g.hpf.slopeDbOct = HighLowPassFilter::slopeToDbPerOct(m_uiFilter.hpfSlope());
+
+  g.lpf.cutoffHz = m_uiFilter.lpfFrequency();
+  g.lpf.q = m_uiFilter.lpfQ();
+  g.lpf.slopeDbOct = HighLowPassFilter::slopeToDbPerOct(m_uiFilter.lpfSlope());
+
+  // 4. Compressor
+  g.compressor.thresholdDb = m_uiComp.thresholdDb();
+  g.compressor.ratio = m_uiComp.ratio();
+  g.compressor.attackMs = m_uiComp.attackMs();
+  g.compressor.releaseMs = m_uiComp.releaseMs();
+  g.compressor.kneeDb = m_uiComp.kneeDb();
+  g.compressor.makeupDb = m_uiComp.makeupGainDb();
+
+  // 5. Limiter (Lookahead excluded per A.8)
+  g.limiter.ceilingDbfs = m_uiLimiter.ceilingDb();
+  g.limiter.releaseMs = m_uiLimiter.releaseMs();
+
+  // 6. Reverb (Tail mode excluded per A.9)
+  g.reverb.decayS = m_uiReverb.decaySeconds();
+  g.reverb.predelayMs = m_uiReverb.predelayMs();
+  g.reverb.size = m_uiReverb.roomSize();
+  g.reverb.damping = m_uiReverb.damping();
+  g.reverb.wetDryPct = std::clamp(m_uiReverb.wetLevel() * 100.0, 0.0, 100.0);
+
+  // 7. DSP Node ON/OFF (excluding GEQ global bypass, Trim, Master, External Insert, LC)
+  const bool outerFilterActive = !m_filterBypassed.load(std::memory_order_relaxed);
+  g.setNodeEnabled(DspPresetTarget::Peq, !m_peqBypassed.load(std::memory_order_relaxed));
+  g.setNodeEnabled(DspPresetTarget::Geq, !m_geqBypassed.load(std::memory_order_relaxed));
+  g.setNodeEnabled(DspPresetTarget::Hpf, outerFilterActive && m_uiFilter.isHpfEnabled());
+  g.setNodeEnabled(DspPresetTarget::Lpf, outerFilterActive && m_uiFilter.isLpfEnabled());
+  g.setNodeEnabled(DspPresetTarget::Compressor, !m_compBypassed.load(std::memory_order_relaxed));
+  g.setNodeEnabled(DspPresetTarget::Limiter, !m_limiterBypassed.load(std::memory_order_relaxed));
+  g.setNodeEnabled(DspPresetTarget::Reverb, !m_reverbBypassed.load(std::memory_order_relaxed));
+  return g;
+}
+
+void EngineController::notifyManualDspParamChanged() {
+  if (m_applyingDspPreset) {
+    return;
+  }
+  const auto cur = captureCurrentGlobalDspState();
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_presetStateTracker.onManualParameterChanged(cur);
+  }
+  emit dspPresetStateChanged();
+}
+
+void EngineController::notifyDspNodeBypassChanged() {
+  if (m_applyingDspPreset) {
+    return;
+  }
+  const auto cur = captureCurrentGlobalDspState();
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_presetStateTracker.onDspNodeBypassToggled(cur);
+  }
+  emit dspPresetStateChanged();
+}
+
+void EngineController::applyPeqPresetData(const engine::preset::PeqPresetData &peq) {
+  std::vector<ParametricEQ::BandConfig> leftVec;
+  std::vector<ParametricEQ::BandConfig> rightVec;
+  leftVec.reserve(ParametricEQ::BANDS_PER_CHANNEL + peq.overflowLeft.size());
+  rightVec.reserve(ParametricEQ::BANDS_PER_CHANNEL + peq.overflowRight.size());
+
+  auto toBandCfg = [](const engine::preset::PeqBandPreset &b) {
+    ParametricEQ::BandConfig cfg;
+    cfg.frequency = b.freqHz;
+    cfg.gainDb = b.gainDb;
+    cfg.Q = b.q;
+    cfg.type = b.type;
+    cfg.enabled = b.enabled;
+    return cfg;
+  };
+  for (size_t i = 0; i < ParametricEQ::BANDS_PER_CHANNEL; ++i) {
+    leftVec.push_back(toBandCfg(peq.leftBands[i]));
+    rightVec.push_back(toBandCfg(peq.rightBands[i]));
+  }
+  for (const auto &ob : peq.overflowLeft) leftVec.push_back(toBandCfg(ob));
+  for (const auto &ob : peq.overflowRight) rightVec.push_back(toBandCfg(ob));
+
+  (void)m_uiPeq.importBandsWithReport(leftVec, rightVec);
+  m_uiPeq.setPreampDb(peq.preampDb);
+
+  if (m_pipeline) {
+    std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> lArr{};
+    std::array<engine::dsp::ContinuousDspParameters::PeqBandConfig, 24> rArr{};
+    for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
+      const auto &lb = m_uiPeq.leftBand(b);
+      lArr[b].frequency = static_cast<float>(lb.frequency);
+      lArr[b].gainDb = static_cast<float>(lb.gainDb);
+      lArr[b].Q = static_cast<float>(lb.Q);
+      lArr[b].type = static_cast<uint8_t>(lb.type);
+      lArr[b].enabled = lb.enabled ? 1 : 0;
+      lArr[b].modified = 1;
+
+      const auto &rb = m_uiPeq.rightBand(b);
+      rArr[b].frequency = static_cast<float>(rb.frequency);
+      rArr[b].gainDb = static_cast<float>(rb.gainDb);
+      rArr[b].Q = static_cast<float>(rb.Q);
+      rArr[b].type = static_cast<uint8_t>(rb.type);
+      rArr[b].enabled = rb.enabled ? 1 : 0;
+      rArr[b].modified = 1;
+    }
+    m_pipeline->paramMailbox().applyPeqPreset(lArr, rArr, static_cast<float>(peq.preampDb));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+  emit peqParametersChanged();
+}
+
+void EngineController::applyGeqPresetData(const engine::preset::GeqPresetData &geq) {
+  std::array<float, 32> gainsF{};
+  for (size_t b = 0; b < GraphicEQ::NUM_BANDS; ++b) {
+    m_uiGeq.setBandEnabled(b, geq.bandEnabled[b]);
+    m_uiGeq.setBandGain(b, geq.gainsDb[b]);
+    gainsF[b] = static_cast<float>(geq.gainsDb[b]);
+  }
+  if (m_pipeline) {
+    for (size_t b = 0; b < GraphicEQ::NUM_BANDS; ++b) {
+      m_pipeline->paramMailbox().setGeqBandEnabled(b, geq.bandEnabled[b]);
+    }
+    m_pipeline->paramMailbox().setAllGeqBandGains(gainsF);
+  }
+  emit geqParametersChanged();
+}
+
+void EngineController::applyHpfPresetData(const engine::preset::HpfPresetData &hpf,
+                                          const bool *optEnabled) {
+  const bool hpfOn = optEnabled ? *optEnabled : m_uiFilter.isHpfEnabled();
+  const int hpfSlopeCode = static_cast<int>(HighLowPassFilter::slopeFromDbPerOct(hpf.slopeDbOct));
+  setFilterParams(hpf.cutoffHz, hpfOn, hpfSlopeCode,
+                  m_uiFilter.lpfFrequency(), m_uiFilter.isLpfEnabled(),
+                  static_cast<int>(m_uiFilter.lpfSlope()),
+                  hpf.q, m_uiFilter.lpfQ());
+}
+
+void EngineController::applyLpfPresetData(const engine::preset::LpfPresetData &lpf,
+                                          const bool *optEnabled) {
+  const bool lpfOn = optEnabled ? *optEnabled : m_uiFilter.isLpfEnabled();
+  const int lpfSlopeCode = static_cast<int>(HighLowPassFilter::slopeFromDbPerOct(lpf.slopeDbOct));
+  setFilterParams(m_uiFilter.hpfFrequency(), m_uiFilter.isHpfEnabled(),
+                  static_cast<int>(m_uiFilter.hpfSlope()),
+                  lpf.cutoffHz, lpfOn, lpfSlopeCode,
+                  m_uiFilter.hpfQ(), lpf.q);
+}
+
+void EngineController::applyCompressorPresetData(
+    const engine::preset::CompressorPresetData &comp) {
+  setCompressorParams(comp.thresholdDb, comp.ratio, comp.attackMs,
+                      comp.releaseMs, comp.makeupDb, comp.kneeDb);
+}
+
+void EngineController::applyLimiterPresetData(
+    const engine::preset::LimiterPresetData &lim) {
+  // Lookahead is excluded from presets per Appendix A.8; preserve implementation fixed value.
+  setLimiterParams(lim.ceilingDbfs, lim.releaseMs, m_uiLimiter.lookaheadMs());
+}
+
+void EngineController::applyReverbPresetData(
+    const engine::preset::ReverbPresetData &rev) {
+  // Tail mode is excluded from presets per Appendix A.9; preserve current tailPreserving setting.
+  setReverbParams(rev.size, rev.damping, std::clamp(rev.wetDryPct / 100.0, 0.0, 1.0),
+                  rev.predelayMs, m_uiReverb.isTailPreserving(), rev.decayS);
+}
+
+bool EngineController::applyValidatedDspPresetDocument(
+    const engine::preset::DspPresetDocument &doc,
+    const engine::preset::PresetValidationReport &report) {
+  using namespace engine::preset;
+
+  // Store latest validation report
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_lastDspPresetReport = report;
+  }
+
+  if (!report.ok) {
+    QJsonObject det;
+    det.insert(QStringLiteral("preset_id"), doc.id);
+    det.insert(QStringLiteral("preset_name"), doc.name);
+    det.insert(QStringLiteral("kind"), dspKindToString(doc.kind));
+    det.insert(QStringLiteral("target"),
+               doc.kind == DspPresetKind::Global ? QStringLiteral("all")
+                                                 : dspTargetToString(doc.target));
+    det.insert(QStringLiteral("error"), report.errorMessage);
+    log::LogService::instance().log(
+        "PresetManagement", "ApplyDspPreset", "Failed",
+        QString("Rejected DSP preset '%1': %2").arg(doc.name, report.errorMessage),
+        "Preset", doc.id.isEmpty() ? doc.name : doc.id,
+        QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)),
+        QString(), QString(), log::ErrorCode::PresetNotFound, 0.0);
+    return false;
+  }
+
+  // All-or-nothing atomic application guarded so internal setters do not fire manual-edit transitions
+  {
+    ScopedPresetApplyGuard guard(m_applyingDspPreset);
+    if (doc.kind == DspPresetKind::Global) {
+      const auto &g = doc.global;
+      applyPeqPresetData(g.peq);
+      applyGeqPresetData(g.geq);
+
+      const bool hpfOn = g.isNodeEnabled(DspPresetTarget::Hpf);
+      const bool lpfOn = g.isNodeEnabled(DspPresetTarget::Lpf);
+      const int hpfSlopeCode = static_cast<int>(HighLowPassFilter::slopeFromDbPerOct(g.hpf.slopeDbOct));
+      const int lpfSlopeCode = static_cast<int>(HighLowPassFilter::slopeFromDbPerOct(g.lpf.slopeDbOct));
+      setFilterParams(g.hpf.cutoffHz, hpfOn, hpfSlopeCode,
+                      g.lpf.cutoffHz, lpfOn, lpfSlopeCode,
+                      g.hpf.q, g.lpf.q);
+
+      applyCompressorPresetData(g.compressor);
+      applyLimiterPresetData(g.limiter);
+      applyReverbPresetData(g.reverb);
+
+      // Apply all 7 DSP node ON/OFF flags (GEQ global bypass remains untouched per §11.1)
+      setDspNodeBypass(QStringLiteral("PEQ"), !g.isNodeEnabled(DspPresetTarget::Peq));
+      setDspNodeBypass(QStringLiteral("GEQ"), !g.isNodeEnabled(DspPresetTarget::Geq));
+      setDspNodeBypass(QStringLiteral("Filter"), !(hpfOn || lpfOn));
+      setDspNodeBypass(QStringLiteral("Compressor"), !g.isNodeEnabled(DspPresetTarget::Compressor));
+      setDspNodeBypass(QStringLiteral("Limiter"), !g.isNodeEnabled(DspPresetTarget::Limiter));
+      setDspNodeBypass(QStringLiteral("Reverb"), !g.isNodeEnabled(DspPresetTarget::Reverb));
+    } else {
+      switch (doc.target) {
+      case DspPresetTarget::Peq:
+        applyPeqPresetData(doc.global.peq);
+        break;
+      case DspPresetTarget::Geq:
+        applyGeqPresetData(doc.global.geq);
+        break;
+      case DspPresetTarget::Hpf:
+        applyHpfPresetData(doc.global.hpf, nullptr);
+        break;
+      case DspPresetTarget::Lpf:
+        applyLpfPresetData(doc.global.lpf, nullptr);
+        break;
+      case DspPresetTarget::Compressor:
+        applyCompressorPresetData(doc.global.compressor);
+        break;
+      case DspPresetTarget::Limiter:
+        applyLimiterPresetData(doc.global.limiter);
+        break;
+      case DspPresetTarget::Reverb:
+        applyReverbPresetData(doc.global.reverb);
+        break;
+      case DspPresetTarget::Count:
+        return false;
+      }
+    }
+  }
+
+  // Synchronize Render template chain so Render outputs reflect Global/Per-DSP presets (Spec §11.1)
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+
+  // Update Application Controller state machine (P5)
+  const auto curState = captureCurrentGlobalDspState();
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    if (doc.kind == DspPresetKind::Global) {
+      m_presetStateTracker.onGlobalPresetApplied(doc.id, doc.name, doc.global, curState);
+    } else {
+      m_presetStateTracker.onPerDspPresetApplied(doc.target, curState);
+    }
+  }
+
+  // Log application with id, name, kind, target, and any validation warnings
+  QJsonObject det;
+  det.insert(QStringLiteral("preset_id"), doc.id);
+  det.insert(QStringLiteral("preset_name"), doc.name);
+  det.insert(QStringLiteral("kind"), dspKindToString(doc.kind));
+  det.insert(QStringLiteral("scope"), dspScopeToString(doc.scope));
+  det.insert(QStringLiteral("target"),
+             doc.kind == DspPresetKind::Global ? QStringLiteral("all")
+                                               : dspTargetToString(doc.target));
+  det.insert(QStringLiteral("migrated_from_legacy"), report.migratedFromLegacy);
+  if (report.hasWarnings()) {
+    det.insert(QStringLiteral("warnings"), QJsonArray::fromStringList(report.warnings));
+    det.insert(QStringLiteral("clamped"), QJsonArray::fromStringList(report.clampedFields));
+    det.insert(QStringLiteral("unknown_keys"), QJsonArray::fromStringList(report.unknownKeys));
+    det.insert(QStringLiteral("unknown_enums"), QJsonArray::fromStringList(report.unknownEnumFields));
+    det.insert(QStringLiteral("peq_overflow_left"), static_cast<int>(report.peqOverflowLeft));
+    det.insert(QStringLiteral("peq_overflow_right"), static_cast<int>(report.peqOverflowRight));
+  }
+  log::LogService::instance().log(
+      "PresetManagement", "ApplyDspPreset", report.hasWarnings() ? "Warning" : "Success",
+      QString("Applied %1 DSP preset '%2' (target=%3)")
+          .arg(dspKindToString(doc.kind), doc.name,
+               doc.kind == DspPresetKind::Global ? QStringLiteral("all")
+                                                 : dspTargetToString(doc.target)),
+      "Preset", doc.id,
+      QString::fromUtf8(QJsonDocument(det).toJson(QJsonDocument::Compact)));
+
+  emit dspPresetStateChanged();
+  emit presetManagementChanged();
+  emit diagnosticsChanged();
+  return true;
+}
+
+QString EngineController::activeGlobalPresetId() const {
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_presetStateTracker.activeGlobalId();
+}
+
+QString EngineController::activeGlobalPresetName() const {
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_presetStateTracker.activeGlobalName();
+}
+
+bool EngineController::isGlobalPresetModified() const {
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_presetStateTracker.isGlobalModified();
+}
+
+QVariantMap EngineController::dspPresetIndicators() const {
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_presetStateTracker.dspPresetIndicatorsMap();
+}
+
+bool EngineController::isDspPresetApplied(const QString &target) const {
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_presetStateTracker.isDspPresetApplied(t);
+}
+
+QVariantList EngineController::listGlobalDspPresets() const {
+  QVariantList out;
+  for (const auto &s : m_presetManager.listDspPresets(engine::preset::DspPresetKind::Global)) {
+    out.append(presetSummaryToMap(s));
+  }
+  return out;
+}
+
+QVariantList EngineController::listPerDspPresets(const QString &target) const {
+  QVariantList out;
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!engine::preset::dspTargetFromString(target, t)) {
+    return out;
+  }
+  for (const auto &s : m_presetManager.listDspPresets(engine::preset::DspPresetKind::PerDsp, t)) {
+    out.append(presetSummaryToMap(s));
+  }
+  return out;
+}
+
+bool EngineController::hasUserDspPresetNamed(const QString &kind,
+                                             const QString &target,
+                                             const QString &name) const {
+  const bool isGlobal = (kind.trimmed().toLower() == QLatin1String("global"));
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!isGlobal && !engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+  return m_presetManager.hasUserDspPresetNamed(
+      isGlobal ? engine::preset::DspPresetKind::Global
+               : engine::preset::DspPresetKind::PerDsp,
+      t, name);
+}
+
+bool EngineController::isBuiltInDspPreset(const QString &kind,
+                                          const QString &target,
+                                          const QString &idOrName) const {
+  const bool isGlobal = (kind.trimmed().toLower() == QLatin1String("global"));
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!isGlobal && !engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+  return m_presetManager.isBuiltInDspPreset(
+      isGlobal ? engine::preset::DspPresetKind::Global
+               : engine::preset::DspPresetKind::PerDsp,
+      t, idOrName);
+}
+
+bool EngineController::applyGlobalDspPreset(const QString &idOrName) {
+  engine::preset::DspPresetDocument doc;
+  engine::preset::PresetValidationReport report;
+  if (!m_presetManager.loadDspPreset(engine::preset::DspPresetKind::Global,
+                                     engine::preset::DspPresetTarget::Peq,
+                                     idOrName, doc, report)) {
+    doc.kind = engine::preset::DspPresetKind::Global;
+    doc.name = idOrName;
+    return applyValidatedDspPresetDocument(doc, report);
+  }
+  return applyValidatedDspPresetDocument(doc, report);
+}
+
+bool EngineController::applyPerDspPreset(const QString &target,
+                                         const QString &idOrName) {
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  engine::preset::DspPresetDocument doc;
+  engine::preset::PresetValidationReport report;
+  if (!engine::preset::dspTargetFromString(target, t)) {
+    report.ok = false;
+    report.errorMessage = QStringLiteral("Unknown DSP target '%1'").arg(target);
+    doc.kind = engine::preset::DspPresetKind::PerDsp;
+    doc.name = idOrName;
+    return applyValidatedDspPresetDocument(doc, report);
+  }
+  if (!m_presetManager.loadDspPreset(engine::preset::DspPresetKind::PerDsp, t,
+                                     idOrName, doc, report)) {
+    doc.kind = engine::preset::DspPresetKind::PerDsp;
+    doc.target = t;
+    doc.name = idOrName;
+    return applyValidatedDspPresetDocument(doc, report);
+  }
+  return applyValidatedDspPresetDocument(doc, report);
+}
+
+bool EngineController::applyDspPresetFromFile(const QString &filePath) {
+  engine::preset::DspPresetDocument doc;
+  engine::preset::PresetValidationReport report;
+  if (!m_presetManager.loadDspPresetFromFile(filePath, doc, report)) {
+    doc.name = filePath;
+    return applyValidatedDspPresetDocument(doc, report);
+  }
+  return applyValidatedDspPresetDocument(doc, report);
+}
+
+bool EngineController::saveGlobalDspPreset(const QString &name, bool overwrite) {
+  engine::preset::DspPresetDocument doc;
+  doc.kind = engine::preset::DspPresetKind::Global;
+  doc.scope = engine::preset::DspPresetScope::Chain;
+  doc.name = name.trimmed();
+  doc.global = captureCurrentGlobalDspState();
+
+  QString err;
+  const bool ok = m_presetManager.saveUserDspPreset(doc, overwrite, &err);
+  if (!ok) {
+    engine::preset::PresetValidationReport rep;
+    rep.ok = false;
+    rep.errorMessage = err;
+    {
+      std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+      m_lastDspPresetReport = rep;
+    }
+    log::LogService::instance().log(
+        "PresetManagement", "SaveDspPreset", "Failed",
+        QString("Failed to save global DSP preset '%1': %2").arg(name, err),
+        "Preset", name);
+    return false;
+  }
+
+  const auto curState = captureCurrentGlobalDspState();
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_presetStateTracker.onGlobalPresetSaved(doc.id, doc.name, doc.global, curState);
+    m_lastDspPresetReport = engine::preset::PresetValidationReport{};
+  }
+  log::LogService::instance().log(
+      "PresetManagement", "SaveDspPreset", "Success",
+      QString("Saved global DSP preset '%1' (id=%2)").arg(doc.name, doc.id),
+      "Preset", doc.id);
+  emit dspPresetStateChanged();
+  emit presetManagementChanged();
+  return true;
+}
+
+bool EngineController::savePerDspPreset(const QString &target,
+                                        const QString &name, bool overwrite) {
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+
+  engine::preset::DspPresetDocument doc;
+  doc.kind = engine::preset::DspPresetKind::PerDsp;
+  doc.target = t;
+  doc.scope = (t == engine::preset::DspPresetTarget::Peq)
+                  ? engine::preset::DspPresetScope::MasteringChain
+                  : engine::preset::DspPresetScope::Chain;
+  doc.name = name.trimmed();
+  doc.global = captureCurrentGlobalDspState();
+
+  QString err;
+  const bool ok = m_presetManager.saveUserDspPreset(doc, overwrite, &err);
+  if (!ok) {
+    engine::preset::PresetValidationReport rep;
+    rep.ok = false;
+    rep.errorMessage = err;
+    {
+      std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+      m_lastDspPresetReport = rep;
+    }
+    log::LogService::instance().log(
+        "PresetManagement", "SaveDspPreset", "Failed",
+        QString("Failed to save per-DSP (%1) preset '%2': %3").arg(target, name, err),
+        "Preset", name);
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_lastDspPresetReport = engine::preset::PresetValidationReport{};
+  }
+  log::LogService::instance().log(
+      "PresetManagement", "SaveDspPreset", "Success",
+      QString("Saved per-DSP (%1) preset '%2' (id=%3)").arg(target, doc.name, doc.id),
+      "Preset", doc.id);
+  emit presetManagementChanged();
+  return true;
+}
+
+bool EngineController::renameUserDspPreset(const QString &kind,
+                                           const QString &target,
+                                           const QString &id,
+                                           const QString &newName,
+                                           bool overwrite) {
+  const bool isGlobal = (kind.trimmed().toLower() == QLatin1String("global"));
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!isGlobal && !engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+
+  QString err;
+  const bool ok = m_presetManager.renameUserDspPreset(
+      isGlobal ? engine::preset::DspPresetKind::Global
+               : engine::preset::DspPresetKind::PerDsp,
+      t, id, newName, overwrite, &err);
+  if (!ok) {
+    engine::preset::PresetValidationReport rep;
+    rep.ok = false;
+    rep.errorMessage = err;
+    {
+      std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+      m_lastDspPresetReport = rep;
+    }
+    log::LogService::instance().log(
+        "PresetManagement", "RenameDspPreset", "Failed",
+        QString("Failed to rename DSP preset '%1' -> '%2': %3").arg(id, newName, err),
+        "Preset", id);
+    return false;
+  }
+
+  if (isGlobal) {
+    std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+    m_presetStateTracker.onGlobalPresetRenamed(id, newName);
+  }
+  log::LogService::instance().log(
+      "PresetManagement", "RenameDspPreset", "Success",
+      QString("Renamed DSP preset '%1' -> '%2'").arg(id, newName),
+      "Preset", id);
+  emit dspPresetStateChanged();
+  emit presetManagementChanged();
+  return true;
+}
+
+bool EngineController::deleteUserDspPreset(const QString &kind,
+                                           const QString &target,
+                                           const QString &idOrName) {
+  const bool isGlobal = (kind.trimmed().toLower() == QLatin1String("global"));
+  engine::preset::DspPresetTarget t = engine::preset::DspPresetTarget::Peq;
+  if (!isGlobal && !engine::preset::dspTargetFromString(target, t)) {
+    return false;
+  }
+
+  QString err;
+  const bool ok = m_presetManager.deleteUserDspPreset(
+      isGlobal ? engine::preset::DspPresetKind::Global
+               : engine::preset::DspPresetKind::PerDsp,
+      t, idOrName, &err);
+  if (!ok) {
+    engine::preset::PresetValidationReport rep;
+    rep.ok = false;
+    rep.errorMessage = err;
+    {
+      std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+      m_lastDspPresetReport = rep;
+    }
+    log::LogService::instance().log(
+        "PresetManagement", "DeleteDspPreset", "Failed",
+        QString("Failed to delete DSP preset '%1': %2").arg(idOrName, err),
+        "Preset", idOrName);
+    return false;
+  }
+
+  log::LogService::instance().log(
+      "PresetManagement", "DeleteDspPreset", "Success",
+      QString("Deleted user DSP preset '%1'").arg(idOrName),
+      "Preset", idOrName);
+  emit presetManagementChanged();
+  return true;
+}
+
+QVariantMap EngineController::lastDspPresetReport() const {
+  std::lock_guard<std::mutex> lock(m_dspPresetStateMutex);
+  return m_lastDspPresetReport.toVariantMap();
 }
 
 } // namespace desk32::core

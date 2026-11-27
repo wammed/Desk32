@@ -278,6 +278,8 @@ Item {
         if (fp) {
             if (!dspHpfKnob.isDragging) dspHpfKnob.value = fp.hpfFrequency !== undefined ? fp.hpfFrequency : 20.0
             if (!dspLpfKnob.isDragging) dspLpfKnob.value = fp.lpfFrequency !== undefined ? fp.lpfFrequency : 20000.0
+            if (!dspHpfQKnob.isDragging) dspHpfQKnob.value = fp.hpfQ !== undefined ? fp.hpfQ : 0.71
+            if (!dspLpfQKnob.isDragging) dspLpfQKnob.value = fp.lpfQ !== undefined ? fp.lpfQ : 0.71
             dspHpfEnabled = !!fp.hpfEnabled
             dspLpfEnabled = !!fp.lpfEnabled
             dspHpfSlope = fp.hpfSlope !== undefined ? fp.hpfSlope : 0
@@ -297,10 +299,11 @@ Item {
         }
         var rp = EngineController.getReverbParams()
         if (rp) {
-            if (!dspRevRoomKnob.isDragging) dspRevRoomKnob.value = rp.roomSize !== undefined ? rp.roomSize : 0.35
-            if (!dspRevDampKnob.isDragging) dspRevDampKnob.value = rp.damping !== undefined ? rp.damping : 0.5
-            if (!dspRevWetKnob.isDragging) dspRevWetKnob.value = rp.wetLevel !== undefined ? rp.wetLevel : 0.15
-            if (!dspRevPreKnob.isDragging) dspRevPreKnob.value = rp.predelayMs !== undefined ? rp.predelayMs : 12.0
+            if (!dspRevRoomKnob.isDragging) dspRevRoomKnob.value = rp.roomSize !== undefined ? rp.roomSize : 0.10
+            if (!dspRevDampKnob.isDragging) dspRevDampKnob.value = rp.damping !== undefined ? rp.damping : 0.50
+            if (!dspRevWetKnob.isDragging) dspRevWetKnob.value = rp.wetLevel !== undefined ? (rp.wetLevel * 100.0) : 0.0
+            if (!dspRevPreKnob.isDragging) dspRevPreKnob.value = rp.predelayMs !== undefined ? rp.predelayMs : 0.0
+            if (!dspRevDecayKnob.isDragging) dspRevDecayKnob.value = rp.decaySeconds !== undefined ? rp.decaySeconds : 0.2
             dspRevTailPreserving = rp.tailPreserving !== undefined ? !!rp.tailPreserving : true
             dspRevBypassed = !!rp.bypassed
         }
@@ -402,6 +405,12 @@ Item {
         function onCompressorParametersChanged() { consoleRoot.refreshDspRack() }
         function onReverbParametersChanged() { consoleRoot.refreshDspRack() }
         function onLimiterParametersChanged() { consoleRoot.refreshDspRack() }
+        function onDspPresetStateChanged() {
+            consoleRoot.refreshGeqFaders()
+            consoleRoot.refreshPeqInspector()
+            consoleRoot.refreshDspRack()
+            consoleRoot.refreshEqCurve()
+        }
         function onDspTelemetryChanged() {
             consoleRoot.dspCompGainReductionDb = EngineController.compressorGainReductionDb
             consoleRoot.dspLimGainReductionDb = EngineController.limiterGainReductionDb
@@ -1083,7 +1092,7 @@ Item {
                                             }
 
                                             if (consoleRoot.currentOpTab === 0) {
-                                                var geqByp = EngineController.geqBypassed || consoleRoot.isDirect
+                                                var geqByp = EngineController.geqBypassed || EngineController.geqGlobalBypass || consoleRoot.isDirect
                                                 drawEqCurve(EngineController.getGeqCurve(180),
                                                             geqByp ? "rgba(47, 224, 255, 0.50)" : "#2FE0FF",
                                                             geqByp ? null : "rgba(0, 229, 255, 0.22)",
@@ -1897,6 +1906,24 @@ Item {
                         }
                     }
 
+                    // Single DSP Preset Switch (Spec v3.8.3 §11.1 / P6: Global Name + Modified + Modal)
+                    ConsoleButton {
+                        id: globalPresetSwitchBtn
+                        Layout.fillWidth: true
+                        implicitHeight: 32
+                        text: qsTr("DSP PRESET: %1%2")
+                              .arg(EngineController.activeGlobalPresetName)
+                              .arg(EngineController.globalPresetModified ? qsTr("  [MODIFIED]") : "")
+                        fontSize: 10
+                        monospace: true
+                        showLed: true
+                        ledColor: EngineController.globalPresetModified ? "#F5B841" : "#00E5FF"
+                        accentColor: EngineController.globalPresetModified ? "#F5B841" : "#00E5FF"
+                        highlighted: EngineController.globalPresetModified
+                        toolTipText: qsTr("Open layered DSP Preset Manager (Global, Per-DSP, and Listening Correction)")
+                        onClicked: dspPresetModal.open()
+                    }
+
                     // Bottom Full-Width Clickable 5-State BIT-PERFECT Hardware Badge
                     ConsoleButton {
                         Layout.fillWidth: true
@@ -1961,7 +1988,7 @@ Item {
                                 bandEnabled: EngineController.isGeqBandEnabled(index)
                                 showHeaderLed: true
                                 showReadout: false
-                                enabled: !consoleRoot.isDirect && !EngineController.geqBypassed
+                                enabled: !consoleRoot.isDirect && !EngineController.geqBypassed && !EngineController.geqGlobalBypass
                                 onValueEdited: function(v) {
                                     value = v
                                     EngineController.setGeqBandGain(index, v)
@@ -2036,15 +2063,48 @@ Item {
                                 anchors.bottomMargin: 2
                                 spacing: 4
 
-                                ConsoleButton {
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    implicitHeight: 26
-                                    text: EngineController.geqBypassed ? qsTr("GEQ BYPASSED") : qsTr("GEQ ACTIVE")
-                                    fontSize: 10
-                                    accentColor: "#32E6FF"
-                                    highlighted: !EngineController.geqBypassed
-                                    enabled: !consoleRoot.isDirect
-                                    onClicked: EngineController.setDspNodeBypass("GEQ", !EngineController.geqBypassed)
+                                    spacing: 4
+
+                                    // GEQ Preset-Applied Indicator ONLY (§11.1)
+                                    Rectangle {
+                                        readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["geq"])
+                                        implicitWidth: 10
+                                        implicitHeight: 10
+                                        radius: 5
+                                        color: presetOn ? "#00E5FF" : "#2D3743"
+                                        border.color: presetOn ? "#8DF2FF" : "#445160"
+                                        ToolTip.visible: geqIndMa.containsMouse
+                                        ToolTip.text: presetOn ? qsTr("GEQ Preset Applied") : qsTr("GEQ Preset Indicator: OFF")
+                                        MouseArea { id: geqIndMa; anchors.fill: parent; hoverEnabled: true }
+                                    }
+
+                                    // GEQ DSP Node ON/OFF (included in Global preset)
+                                    ConsoleButton {
+                                        Layout.fillWidth: true
+                                        implicitHeight: 24
+                                        text: EngineController.geqBypassed ? qsTr("NODE OFF") : qsTr("NODE ON")
+                                        fontSize: 9
+                                        accentColor: "#32E6FF"
+                                        highlighted: !EngineController.geqBypassed
+                                        enabled: !consoleRoot.isDirect
+                                        toolTipText: qsTr("GEQ DSP Node ON / OFF (saved in Global presets)")
+                                        onClicked: EngineController.setDspNodeBypass("GEQ", !EngineController.geqBypassed)
+                                    }
+
+                                    // GEQ Temporary Global Bypass (excluded from presets per §11.1)
+                                    ConsoleButton {
+                                        implicitWidth: 56
+                                        implicitHeight: 24
+                                        text: EngineController.geqGlobalBypass ? qsTr("BYP ON") : qsTr("BYP")
+                                        fontSize: 8
+                                        accentColor: "#F5B841"
+                                        highlighted: EngineController.geqGlobalBypass
+                                        enabled: !consoleRoot.isDirect
+                                        toolTipText: qsTr("Temporary GEQ Global Bypass (excluded from presets and modified state)")
+                                        onClicked: EngineController.setGeqGlobalBypass(!EngineController.geqGlobalBypass)
+                                    }
                                 }
 
                                 RowLayout {
@@ -2127,7 +2187,7 @@ Item {
                                 bandEnabled: EngineController.isGeqBandEnabled(bandIdx)
                                 showHeaderLed: true
                                 showReadout: false
-                                enabled: !consoleRoot.isDirect && !EngineController.geqBypassed
+                                enabled: !consoleRoot.isDirect && !EngineController.geqBypassed && !EngineController.geqGlobalBypass
                                 onValueEdited: function(v) {
                                     value = v
                                     EngineController.setGeqBandGain(bandIdx, v)
@@ -2580,6 +2640,19 @@ Item {
                                                     highlighted: true
                                                     toolTipText: qsTr("Switch between Master PEQ and Listening Correction PEQ")
                                                     onClicked: consoleRoot.peqEditListening = !consoleRoot.peqEditListening
+                                                }
+                                                // Mastering PEQ Preset-Applied Indicator ONLY (§11.1)
+                                                Rectangle {
+                                                    visible: !consoleRoot.peqEditListening
+                                                    readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["peq"])
+                                                    implicitWidth: 10
+                                                    implicitHeight: 10
+                                                    radius: 5
+                                                    color: presetOn ? "#00E5FF" : "#2D3743"
+                                                    border.color: presetOn ? "#8DF2FF" : "#445160"
+                                                    ToolTip.visible: peqIndMa.containsMouse
+                                                    ToolTip.text: presetOn ? qsTr("PEQ Preset Applied") : qsTr("PEQ Preset Indicator: OFF")
+                                                    MouseArea { id: peqIndMa; anchors.fill: parent; hoverEnabled: true }
                                                 }
                                                 ConsoleButton {
                                                     text: EngineController.peqBypassed ? qsTr("EQ BYPASSED") : qsTr("EQ ACTIVE")
@@ -3081,32 +3154,47 @@ Item {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        spacing: 6
+                                        spacing: 4
 
                                         ColumnLayout {
                                             Layout.preferredWidth: 46
-                                            spacing: 4
-                                            ConsoleButton {
+                                            spacing: 3
+                                            RowLayout {
                                                 Layout.fillWidth: true
-                                                implicitHeight: 42
-                                                text: consoleRoot.dspHpfEnabled ? qsTr("HPF\nON") : qsTr("HPF\nOFF")
-                                                fontSize: 9
-                                                highlighted: consoleRoot.dspHpfEnabled
-                                                enabled: !consoleRoot.isDirect
-                                                onClicked: {
-                                                    consoleRoot.dspHpfEnabled = !consoleRoot.dspHpfEnabled
-                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
+                                                spacing: 3
+                                                Rectangle {
+                                                    readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["hpf"])
+                                                    implicitWidth: 8; implicitHeight: 8; radius: 4
+                                                    color: presetOn ? "#00E5FF" : "#2D3743"
+                                                    border.color: presetOn ? "#8DF2FF" : "#445160"
+                                                    ToolTip.visible: hpfIndMa.containsMouse
+                                                    ToolTip.text: presetOn ? qsTr("HPF Preset Applied") : qsTr("HPF Preset Indicator: OFF")
+                                                    MouseArea { id: hpfIndMa; anchors.fill: parent; hoverEnabled: true }
+                                                }
+                                                Label {
+                                                    text: "HPF"
+                                                    font.family: "Monospace"; font.pixelSize: 8; font.bold: true; color: "#8EC3D6"
                                                 }
                                             }
                                             ConsoleButton {
                                                 Layout.fillWidth: true
-                                                implicitHeight: 24
-                                                text: consoleRoot.dspHpfSlope === 1 ? "24dB" : "12dB"
+                                                implicitHeight: 30
+                                                text: consoleRoot.dspHpfEnabled ? qsTr("ON") : qsTr("OFF")
+                                                fontSize: 9
+                                                highlighted: consoleRoot.dspHpfEnabled
+                                                enabled: !consoleRoot.isDirect
+                                                onClicked: EngineController.setHpfNodeEnabled(!consoleRoot.dspHpfEnabled)
+                                            }
+                                            ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 22
+                                                text: consoleRoot.dspHpfSlope === 1 ? "24dB" : (consoleRoot.dspHpfSlope === 2 ? "18dB" : "12dB")
                                                 fontSize: 9
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
-                                                    consoleRoot.dspHpfSlope = consoleRoot.dspHpfSlope === 1 ? 0 : 1
-                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
+                                                    var nextSlope = consoleRoot.dspHpfSlope === 0 ? 2 : (consoleRoot.dspHpfSlope === 2 ? 1 : 0)
+                                                    consoleRoot.dspHpfSlope = nextSlope
+                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, dspHpfQKnob.value, dspLpfQKnob.value)
                                                 }
                                             }
                                         }
@@ -3114,11 +3202,21 @@ Item {
                                         ConsoleKnob {
                                             id: dspHpfKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("HPF Cutoff")
-                                            minValue: 20.0; maxValue: 2000.0; defaultValue: 20.0; logarithmic: true
-                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
+                                            labelText: qsTr("HPF Freq")
+                                            minValue: 10.0; maxValue: 1000.0; defaultValue: 20.0; logarithmic: true
+                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 40; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(v, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(v, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, dspHpfQKnob.value, dspLpfQKnob.value) }
+                                        }
+
+                                        ConsoleKnob {
+                                            id: dspHpfQKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("HPF Q")
+                                            minValue: 0.1; maxValue: 10.0; defaultValue: 0.71; logarithmic: true
+                                            unitSuffix: ""; decimals: 2; knobDiameter: 40; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, v, dspLpfQKnob.value) }
                                         }
 
                                         Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#2D526E" }
@@ -3126,18 +3224,18 @@ Item {
                                         ConsoleKnob {
                                             id: hpfInTrimKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("HPF IN")
+                                            labelText: qsTr("IN")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
-                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 38; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setDspTrim("hpf", false, v) }
                                         }
                                         ConsoleKnob {
                                             id: hpfOutTrimKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("HPF OUT")
+                                            labelText: qsTr("OUT")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
-                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 38; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setDspTrim("hpf", true, v) }
                                         }
@@ -3149,32 +3247,47 @@ Item {
                                     RowLayout {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        spacing: 6
+                                        spacing: 4
 
                                         ColumnLayout {
                                             Layout.preferredWidth: 46
-                                            spacing: 4
-                                            ConsoleButton {
+                                            spacing: 3
+                                            RowLayout {
                                                 Layout.fillWidth: true
-                                                implicitHeight: 42
-                                                text: consoleRoot.dspLpfEnabled ? qsTr("LPF\nON") : qsTr("LPF\nOFF")
-                                                fontSize: 9
-                                                highlighted: consoleRoot.dspLpfEnabled
-                                                enabled: !consoleRoot.isDirect
-                                                onClicked: {
-                                                    consoleRoot.dspLpfEnabled = !consoleRoot.dspLpfEnabled
-                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
+                                                spacing: 3
+                                                Rectangle {
+                                                    readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["lpf"])
+                                                    implicitWidth: 8; implicitHeight: 8; radius: 4
+                                                    color: presetOn ? "#00E5FF" : "#2D3743"
+                                                    border.color: presetOn ? "#8DF2FF" : "#445160"
+                                                    ToolTip.visible: lpfIndMa.containsMouse
+                                                    ToolTip.text: presetOn ? qsTr("LPF Preset Applied") : qsTr("LPF Preset Indicator: OFF")
+                                                    MouseArea { id: lpfIndMa; anchors.fill: parent; hoverEnabled: true }
+                                                }
+                                                Label {
+                                                    text: "LPF"
+                                                    font.family: "Monospace"; font.pixelSize: 8; font.bold: true; color: "#8EC3D6"
                                                 }
                                             }
                                             ConsoleButton {
                                                 Layout.fillWidth: true
-                                                implicitHeight: 24
-                                                text: consoleRoot.dspLpfSlope === 1 ? "24dB" : "12dB"
+                                                implicitHeight: 30
+                                                text: consoleRoot.dspLpfEnabled ? qsTr("ON") : qsTr("OFF")
+                                                fontSize: 9
+                                                highlighted: consoleRoot.dspLpfEnabled
+                                                enabled: !consoleRoot.isDirect
+                                                onClicked: EngineController.setLpfNodeEnabled(!consoleRoot.dspLpfEnabled)
+                                            }
+                                            ConsoleButton {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 22
+                                                text: consoleRoot.dspLpfSlope === 1 ? "24dB" : (consoleRoot.dspLpfSlope === 2 ? "18dB" : "12dB")
                                                 fontSize: 9
                                                 enabled: !consoleRoot.isDirect
                                                 onClicked: {
-                                                    consoleRoot.dspLpfSlope = consoleRoot.dspLpfSlope === 1 ? 0 : 1
-                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707)
+                                                    var nextSlope = consoleRoot.dspLpfSlope === 0 ? 2 : (consoleRoot.dspLpfSlope === 2 ? 1 : 0)
+                                                    consoleRoot.dspLpfSlope = nextSlope
+                                                    EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, dspHpfQKnob.value, dspLpfQKnob.value)
                                                 }
                                             }
                                         }
@@ -3182,11 +3295,21 @@ Item {
                                         ConsoleKnob {
                                             id: dspLpfKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("LPF Cutoff")
-                                            minValue: 1000.0; maxValue: 20000.0; defaultValue: 20000.0; logarithmic: true
-                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
+                                            labelText: qsTr("LPF Freq")
+                                            minValue: 1000.0; maxValue: 22000.0; defaultValue: 20000.0; logarithmic: true
+                                            unitSuffix: " Hz"; decimals: 0; knobDiameter: 40; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, v, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, 0.707, 0.707) }
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, v, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, dspHpfQKnob.value, dspLpfQKnob.value) }
+                                        }
+
+                                        ConsoleKnob {
+                                            id: dspLpfQKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("LPF Q")
+                                            minValue: 0.1; maxValue: 10.0; defaultValue: 0.71; logarithmic: true
+                                            unitSuffix: ""; decimals: 2; knobDiameter: 40; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setFilterParams(dspHpfKnob.value, consoleRoot.dspHpfEnabled, consoleRoot.dspHpfSlope, dspLpfKnob.value, consoleRoot.dspLpfEnabled, consoleRoot.dspLpfSlope, dspHpfQKnob.value, v) }
                                         }
 
                                         Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#2D526E" }
@@ -3194,18 +3317,18 @@ Item {
                                         ConsoleKnob {
                                             id: lpfInTrimKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("LPF IN")
+                                            labelText: qsTr("IN")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
-                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 38; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setDspTrim("lpf", false, v) }
                                         }
                                         ConsoleKnob {
                                             id: lpfOutTrimKnob
                                             Layout.fillWidth: true
-                                            labelText: qsTr("LPF OUT")
+                                            labelText: qsTr("OUT")
                                             minValue: -12.0; maxValue: 12.0; defaultValue: 0.0; logarithmic: false; bipolar: true
-                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            unitSuffix: "dB"; decimals: 1; knobDiameter: 38; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setDspTrim("lpf", true, v) }
                                         }
@@ -3239,6 +3362,15 @@ Item {
                                         font.pixelSize: 15
                                         font.bold: true
                                         color: "#E8BA6B"
+                                    }
+                                    Rectangle {
+                                        readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["compressor"])
+                                        implicitWidth: 10; implicitHeight: 10; radius: 5
+                                        color: presetOn ? "#00E5FF" : "#2D3743"
+                                        border.color: presetOn ? "#8DF2FF" : "#445160"
+                                        ToolTip.visible: compIndMa.containsMouse
+                                        ToolTip.text: presetOn ? qsTr("Compressor Preset Applied") : qsTr("Compressor Preset Indicator: OFF")
+                                        MouseArea { id: compIndMa; anchors.fill: parent; hoverEnabled: true }
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
@@ -3331,7 +3463,7 @@ Item {
                                             id: dspCompThreshKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Threshold")
-                                            minValue: -48.0; maxValue: 0.0; defaultValue: -12.0; logarithmic: false
+                                            minValue: -60.0; maxValue: 0.0; defaultValue: 0.0; logarithmic: false
                                             unitSuffix: " dB"; decimals: 1; knobDiameter: 44; arcColor: "#F5B841"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setCompressorParams(v, dspCompRatioKnob.value, dspCompAttackKnob.value, dspCompReleaseKnob.value, dspCompMakeupKnob.value, dspCompKneeKnob.value) }
@@ -3340,7 +3472,7 @@ Item {
                                             id: dspCompRatioKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Ratio")
-                                            minValue: 1.0; maxValue: 20.0; defaultValue: 2.0; logarithmic: true
+                                            minValue: 1.0; maxValue: 20.0; defaultValue: 1.0; logarithmic: true
                                             unitSuffix: ":1"; decimals: 1; knobDiameter: 44; arcColor: "#F5B841"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setCompressorParams(dspCompThreshKnob.value, v, dspCompAttackKnob.value, dspCompReleaseKnob.value, dspCompMakeupKnob.value, dspCompKneeKnob.value) }
@@ -3349,7 +3481,7 @@ Item {
                                             id: dspCompKneeKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Knee")
-                                            minValue: 0.0; maxValue: 24.0; defaultValue: 2.0; logarithmic: false
+                                            minValue: 0.0; maxValue: 20.0; defaultValue: 0.0; logarithmic: false
                                             unitSuffix: " dB"; decimals: 1; knobDiameter: 44; arcColor: "#F5B841"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setCompressorParams(dspCompThreshKnob.value, dspCompRatioKnob.value, dspCompAttackKnob.value, dspCompReleaseKnob.value, dspCompMakeupKnob.value, v) }
@@ -3358,7 +3490,7 @@ Item {
                                             id: dspCompAttackKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Attack")
-                                            minValue: 0.5; maxValue: 150.0; defaultValue: 10.0; logarithmic: true
+                                            minValue: 0.1; maxValue: 500.0; defaultValue: 10.0; logarithmic: true
                                             unitSuffix: " ms"; decimals: 1; knobDiameter: 44; arcColor: "#F5B841"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setCompressorParams(dspCompThreshKnob.value, dspCompRatioKnob.value, v, dspCompReleaseKnob.value, dspCompMakeupKnob.value, dspCompKneeKnob.value) }
@@ -3367,7 +3499,7 @@ Item {
                                             id: dspCompReleaseKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Release")
-                                            minValue: 10.0; maxValue: 1000.0; defaultValue: 120.0; logarithmic: true
+                                            minValue: 1.0; maxValue: 1000.0; defaultValue: 100.0; logarithmic: true
                                             unitSuffix: " ms"; decimals: 0; knobDiameter: 44; arcColor: "#F5B841"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setCompressorParams(dspCompThreshKnob.value, dspCompRatioKnob.value, dspCompAttackKnob.value, v, dspCompMakeupKnob.value, dspCompKneeKnob.value) }
@@ -3453,6 +3585,15 @@ Item {
                                             font.bold: true
                                             color: "#FCE8A6"
                                         }
+                                    }
+                                    Rectangle {
+                                        readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["limiter"])
+                                        implicitWidth: 10; implicitHeight: 10; radius: 5
+                                        color: presetOn ? "#00E5FF" : "#2D3743"
+                                        border.color: presetOn ? "#8DF2FF" : "#445160"
+                                        ToolTip.visible: limIndMa.containsMouse
+                                        ToolTip.text: presetOn ? qsTr("Limiter Preset Applied") : qsTr("Limiter Preset Indicator: OFF")
+                                        MouseArea { id: limIndMa; anchors.fill: parent; hoverEnabled: true }
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
@@ -3542,8 +3683,8 @@ Item {
                                             id: dspLimCeilKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Ceiling")
-                                            minValue: -12.0; maxValue: 0.0; defaultValue: -0.3; logarithmic: false
-                                            unitSuffix: " dB"; decimals: 1; knobDiameter: 66; arcColor: "#F2C044"
+                                            minValue: -12.0; maxValue: 0.0; defaultValue: 0.0; logarithmic: false
+                                            unitSuffix: " dBFS"; decimals: 1; knobDiameter: 66; arcColor: "#F2C044"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setLimiterParams(v, dspLimRelKnob.value, dspLimLookKnob.value) }
                                         }
@@ -3551,7 +3692,7 @@ Item {
                                             id: dspLimRelKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Release")
-                                            minValue: 5.0; maxValue: 500.0; defaultValue: 50.0; logarithmic: true
+                                            minValue: 10.0; maxValue: 500.0; defaultValue: 50.0; logarithmic: true
                                             unitSuffix: " ms"; decimals: 0; knobDiameter: 66; arcColor: "#F2C044"
                                             enabled: !consoleRoot.isDirect
                                             onValueEdited: function(v) { value = v; EngineController.setLimiterParams(dspLimCeilKnob.value, v, dspLimLookKnob.value) }
@@ -3621,6 +3762,15 @@ Item {
                                         font.bold: true
                                         color: "#6BE0FF"
                                     }
+                                    Rectangle {
+                                        readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["reverb"])
+                                        implicitWidth: 10; implicitHeight: 10; radius: 5
+                                        color: presetOn ? "#00E5FF" : "#2D3743"
+                                        border.color: presetOn ? "#8DF2FF" : "#445160"
+                                        ToolTip.visible: revIndMa.containsMouse
+                                        ToolTip.text: presetOn ? qsTr("Reverb Preset Applied") : qsTr("Reverb Preset Indicator: OFF")
+                                        MouseArea { id: revIndMa; anchors.fill: parent; hoverEnabled: true }
+                                    }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
                                         text: consoleRoot.dspRevBypassed ? qsTr("OFF") : qsTr("ON")
@@ -3678,11 +3828,11 @@ Item {
                                             ctx.lineWidth = 2.0
                                             ctx.beginPath()
                                             ctx.moveTo(0, height)
-                                            var preX = Math.min(width * 0.25, (dspRevPreKnob.value / 100.0) * width * 0.25)
-                                            var decay = 1.5 + (1.0 - dspRevRoomKnob.value) * 4.5
+                                            var preX = Math.min(width * 0.25, (dspRevPreKnob.value / 200.0) * width * 0.25)
+                                            var decayRate = 6.9 / Math.max(0.1, dspRevDecayKnob.value)
                                             for (var x = preX; x <= width; x += 2) {
-                                                var t = (x - preX) / Math.max(1, width - preX)
-                                                var amp = Math.exp(-t * decay)
+                                                var tSec = ((x - preX) / Math.max(1, width - preX)) * 5.0
+                                                var amp = Math.exp(-tSec * decayRate * 0.5)
                                                 var y = height - amp * (height - 6)
                                                 ctx.lineTo(x, y)
                                             }
@@ -3721,28 +3871,28 @@ Item {
                                             id: dspRevPreKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Pre-Delay")
-                                            minValue: 0.0; maxValue: 100.0; defaultValue: 12.0; logarithmic: false
+                                            minValue: 0.0; maxValue: 200.0; defaultValue: 0.0; logarithmic: false
                                             unitSuffix: " ms"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, dspRevWetKnob.value, v, consoleRoot.dspRevTailPreserving); reverbMiniCanvas.requestPaint() }
+                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, dspRevWetKnob.value / 100.0, v, consoleRoot.dspRevTailPreserving, dspRevDecayKnob.value); reverbMiniCanvas.requestPaint() }
                                         }
                                         ConsoleKnob {
                                             id: dspRevRoomKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Size")
-                                            minValue: 0.0; maxValue: 1.0; defaultValue: 0.35; logarithmic: false
+                                            minValue: 0.0; maxValue: 1.0; defaultValue: 0.10; logarithmic: false
                                             unitSuffix: ""; decimals: 2; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(v, dspRevDampKnob.value, dspRevWetKnob.value, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving); reverbMiniCanvas.requestPaint() }
+                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(v, dspRevDampKnob.value, dspRevWetKnob.value / 100.0, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving, dspRevDecayKnob.value); reverbMiniCanvas.requestPaint() }
                                         }
                                         ConsoleKnob {
                                             id: dspRevDampKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Damping")
-                                            minValue: 0.0; maxValue: 1.0; defaultValue: 0.5; logarithmic: false
+                                            minValue: 0.0; maxValue: 1.0; defaultValue: 0.50; logarithmic: false
                                             unitSuffix: ""; decimals: 2; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, v, dspRevWetKnob.value, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving) }
+                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, v, dspRevWetKnob.value / 100.0, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving, dspRevDecayKnob.value) }
                                         }
                                         ConsoleButton {
                                             Layout.fillWidth: true
@@ -3754,19 +3904,27 @@ Item {
                                             enabled: !consoleRoot.isDirect
                                             onClicked: {
                                                 consoleRoot.dspRevTailPreserving = !consoleRoot.dspRevTailPreserving
-                                                EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, dspRevWetKnob.value, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving)
+                                                EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, dspRevWetKnob.value / 100.0, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving, dspRevDecayKnob.value)
                                             }
                                         }
                                         ConsoleKnob {
                                             id: dspRevWetKnob
                                             Layout.fillWidth: true
                                             labelText: qsTr("Wet/Dry")
-                                            minValue: 0.0; maxValue: 1.0; defaultValue: 0.15; logarithmic: false
-                                            unitSuffix: ""; decimals: 2; knobDiameter: 44; arcColor: "#48D8FF"
+                                            minValue: 0.0; maxValue: 100.0; defaultValue: 0.0; logarithmic: false
+                                            unitSuffix: " %"; decimals: 0; knobDiameter: 44; arcColor: "#48D8FF"
                                             enabled: !consoleRoot.isDirect
-                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, v, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving) }
+                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, v / 100.0, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving, dspRevDecayKnob.value) }
                                         }
-                                        Item { Layout.fillWidth: true }
+                                        ConsoleKnob {
+                                            id: dspRevDecayKnob
+                                            Layout.fillWidth: true
+                                            labelText: qsTr("Decay")
+                                            minValue: 0.1; maxValue: 10.0; defaultValue: 0.2; logarithmic: true
+                                            unitSuffix: " s"; decimals: 1; knobDiameter: 44; arcColor: "#48D8FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) { value = v; EngineController.setReverbParams(dspRevRoomKnob.value, dspRevDampKnob.value, dspRevWetKnob.value / 100.0, dspRevPreKnob.value, consoleRoot.dspRevTailPreserving, v); reverbMiniCanvas.requestPaint() }
+                                        }
                                     }
 
                                     Rectangle { Layout.preferredWidth: 1; width: 1; Layout.fillHeight: true; color: "#244D5A" }
@@ -4379,5 +4537,9 @@ Item {
                 }
             }
         }
+    }
+
+    PresetModalPopup {
+        id: dspPresetModal
     }
 }

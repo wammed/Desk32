@@ -409,8 +409,8 @@ public:
             m_sampleRate,
             static_cast<double>(hpfFreq),
             static_cast<double>(lpfFreq),
-            hpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
-            lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
+            HighLowPassFilter::slopeFromInt(static_cast<int>(hpfSlope)),
+            HighLowPassFilter::slopeFromInt(static_cast<int>(lpfSlope)),
             hpfOn,
             lpfOn,
             static_cast<double>(clampedHpfQ),
@@ -526,7 +526,6 @@ public:
             m_staging.listeningRightEnabled[b] = r.enabled;
         }
         m_listeningPresetConfigured = true;
-        m_staging.listeningPreampDb = 0.0f;
         m_staging.listeningModified = true;
         publishStaging();
     }
@@ -634,10 +633,12 @@ private:
             m_sampleRate,
             static_cast<double>(m_staging.hpfFrequency),
             static_cast<double>(m_staging.lpfFrequency),
-            m_staging.hpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
-            m_staging.lpfSlope == 1 ? HighLowPassFilter::FilterSlope::Slope24dB : HighLowPassFilter::FilterSlope::Slope12dB,
+            HighLowPassFilter::slopeFromInt(static_cast<int>(m_staging.hpfSlope)),
+            HighLowPassFilter::slopeFromInt(static_cast<int>(m_staging.lpfSlope)),
             m_staging.hpfEnabled != 0,
-            m_staging.lpfEnabled != 0
+            m_staging.lpfEnabled != 0,
+            static_cast<double>(m_staging.hpfQ),
+            static_cast<double>(m_staging.lpfQ)
         );
 
         // Listening

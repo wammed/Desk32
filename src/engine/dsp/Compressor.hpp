@@ -62,8 +62,8 @@ public:
         p->sampleRate = sampleRate;
         p->thresholdDb = std::clamp(thresholdDb, -60.0, 0.0);
         p->ratio = std::clamp(ratio, 1.0, 20.0);
-        p->attackMs = std::max(0.1, attackMs);
-        p->releaseMs = std::max(1.0, releaseMs);
+        p->attackMs = std::clamp(attackMs, 0.1, 500.0);
+        p->releaseMs = std::clamp(releaseMs, 1.0, 1000.0);
         p->makeupGainDb = std::clamp(makeupGainDb, -12.0, 24.0);
         p->makeupGain = std::pow(10.0, p->makeupGainDb / 20.0);
         p->kneeDb = std::clamp(kneeDb, 0.0, 20.0);

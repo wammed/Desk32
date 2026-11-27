@@ -328,6 +328,8 @@ add_executable(test_phase2_dsp
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -389,6 +391,8 @@ add_executable(test_phase3_external_insert
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -450,6 +454,8 @@ add_executable(test_phase4_export_render
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -555,6 +561,8 @@ add_executable(test_workspace_v381
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -618,6 +626,8 @@ add_executable(test_output_device_ui
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -699,6 +709,8 @@ add_executable(test_jack_output
     ../src/core/EngineController.cpp
     ../src/engine/audio/WaveformExtractor.cpp
     ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
     ../src/engine/preset/PresetManager.cpp
     ../src/engine/metadata/TrackMetadata.cpp
     ../src/engine/workspace/WorkspaceManager.cpp
@@ -759,6 +771,148 @@ target_compile_options(test_jack_output PRIVATE ${TAGLIB_CFLAGS_OTHER})
 add_dependencies(test_jack_output desk32_git_version)
 add_test(NAME test_jack_output COMMAND test_jack_output)
 set_tests_properties(test_jack_output PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Spec v3.8.3 P1/P2/P3/P4: Typed DSP Presets, 48 Built-ins, 18 dB/oct Filter, Reverb Decay, Atomic Apply
+add_executable(test_dsp_presets
+    test_dsp_presets.cpp
+    ../src/core/SettingsManager.cpp
+    ../src/core/LanguageManager.cpp
+    ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_compile_definitions(test_dsp_presets PRIVATE
+    DESK32_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(test_dsp_presets PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_dsp_presets PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_dsp_presets SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+)
+target_compile_options(test_dsp_presets PRIVATE ${TAGLIB_CFLAGS_OTHER})
+
+add_dependencies(test_dsp_presets desk32_git_version)
+add_test(NAME test_dsp_presets COMMAND test_dsp_presets)
+set_tests_properties(test_dsp_presets PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Spec v3.8.3 P5: Application Controller Preset State Transitions & Modified Calculation
+add_executable(test_dsp_preset_state
+    test_dsp_preset_state.cpp
+    ../src/core/SettingsManager.cpp
+    ../src/core/LanguageManager.cpp
+    ../src/core/EngineController.cpp
+    ../src/engine/audio/WaveformExtractor.cpp
+    ../src/core/log/LogService.cpp
+    ../src/engine/preset/DspPresetSerializer.cpp
+    ../src/engine/preset/BuiltInDspPresets.cpp
+    ../src/engine/preset/PresetManager.cpp
+    ../src/engine/metadata/TrackMetadata.cpp
+    ../src/engine/workspace/WorkspaceManager.cpp
+    ../src/engine/decoder/DecoderWorker.cpp
+    ../src/engine/decoder/FFmpegAudioDecoder.cpp
+    ../src/engine/backend/PipeWireAudioOutput.cpp
+    ../src/engine/backend/PipeWireControlAdapter.cpp
+    ../src/engine/backend/JackAudioOutput.cpp
+    ../src/engine/backend/JackControlAdapter.cpp
+    ../src/engine/insert/PipeWireInsertTransport.cpp
+    ../src/engine/insert/JackInsertTransport.cpp
+    ../src/engine/render/RenderEngine.cpp
+    ../src/engine/render/RenderSequenceManager.cpp
+    ../src/engine/session/FolderSession.cpp
+    ../src/engine/deck/ReferenceDeck.cpp
+    ../src/engine/deck/DeckManager.cpp
+)
+
+target_compile_definitions(test_dsp_preset_state PRIVATE
+    DESK32_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(test_dsp_preset_state PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Test
+    Qt6::Sql
+    Qt6::Qml
+    Qt6::Quick
+    Qt6::QuickControls2
+    ${PIPEWIRE_LIBRARIES}
+    ${JACK_LIBRARIES}
+    ${SOXR_LIBRARIES}
+    ${AVFORMAT_LIBRARIES}
+    ${AVCODEC_LIBRARIES}
+    ${SWRESAMPLE_LIBRARIES}
+    ${AVUTIL_LIBRARIES}
+    ${TAGLIB_LIBRARIES}
+    ALSA::ALSA
+)
+
+target_include_directories(test_dsp_preset_state PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${SOXR_INCLUDE_DIRS}
+)
+
+target_include_directories(test_dsp_preset_state SYSTEM PRIVATE
+    ${PIPEWIRE_INCLUDE_DIRS}
+    ${JACK_INCLUDE_DIRS}
+    ${AVFORMAT_INCLUDE_DIRS}
+    ${AVCODEC_INCLUDE_DIRS}
+    ${SWRESAMPLE_INCLUDE_DIRS}
+    ${AVUTIL_INCLUDE_DIRS}
+    ${TAGLIB_INCLUDE_DIRS}
+)
+target_compile_options(test_dsp_preset_state PRIVATE ${TAGLIB_CFLAGS_OTHER})
+
+add_dependencies(test_dsp_preset_state desk32_git_version)
+add_test(NAME test_dsp_preset_state COMMAND test_dsp_preset_state)
+set_tests_properties(test_dsp_preset_state PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 
 
