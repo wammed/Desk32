@@ -74,6 +74,10 @@ class TestUnderrunInvestigation : public QObject {
 private slots:
     void initTestCase();
     void testCandidateADeterministicRace();
+    void testSeekDeterministicRace();
+    void testSeekReleasesGuardAfterFirstChunkPrefill();
+    void testPlayingSeekSingleAndBurstStress();
+    void testConfigureRateDuringPlaybackNoUnderrun();
     void testGenuineUnderrunStillDetected();
     void testCandidateBLatencyAndPrefill();
     void testHighFrequencyAutoAdvance600();
@@ -149,6 +153,242 @@ void TestUnderrunInvestigation::testCandidateADeterministicRace() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    deck.stop();
+}
+
+void TestUnderrunInvestigation::testSeekDeterministicRace() {
+    ReferenceDeck deck('A');
+    const std::string longWav = (m_tempDir.path() + "/track_seek_race_44k.wav").toStdString();
+    QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+    QVERIFY(deck.loadTrack(longWav, 48000.0));
+    deck.play();
+
+    std::vector<double> outL(1024, 0.0), outR(1024, 0.0);
+    QCOMPARE(deck.renderBlock(outL.data(), outR.data(), 1024), size_t(1024));
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+
+    // Pause Worker right inside Seek after resetProducer() + isEof=false, before seek()/prefill
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool workerInSeekWindow = false;
+    bool audioThreadDone = false;
+
+    deck.worker().setInSeekTransitionHook([&](uint64_t) {
+        std::unique_lock<std::mutex> lock(mtx);
+        workerInSeekWindow = true;
+        cv.notify_all();
+        cv.wait_for(lock, std::chrono::seconds(5), [&]() { return audioThreadDone; });
+    });
+
+    size_t inWindowRead = 999999;
+    double inWindowPeak = 1.0;
+    std::thread audioThread([&]() {
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait_for(lock, std::chrono::seconds(5), [&]() { return workerInSeekWindow; });
+        }
+        std::fill(outL.begin(), outL.end(), 1.0);
+        std::fill(outR.begin(), outR.end(), 1.0);
+        inWindowRead = deck.renderBlock(outL.data(), outR.data(), 1024);
+        double peak = 0.0;
+        for (size_t i = 0; i < 1024; ++i) {
+            peak = std::max(peak, std::max(std::abs(outL[i]), std::abs(outR[i])));
+        }
+        inWindowPeak = peak;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            audioThreadDone = true;
+        }
+        cv.notify_all();
+    });
+
+    const auto seekRes = deck.seekWithResult(44100); // 1.0s
+    audioThread.join();
+    deck.worker().setInSeekTransitionHook(nullptr);
+
+    QVERIFY(seekRes.success);
+    QCOMPARE(inWindowRead, size_t(0));
+    QCOMPARE(inWindowPeak, 0.0);
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+
+    UnderrunSnapshot snap{};
+    QVERIFY(!deck.worker().popUnderrunSnapshot(snap));
+
+    // Normal playback resumes immediately after Seek with zero underruns
+    const size_t afterRead = deck.renderBlock(outL.data(), outR.data(), 1024);
+    QCOMPARE(afterRead, size_t(1024));
+    double afterPeak = 0.0;
+    for (size_t i = 0; i < afterRead; ++i) {
+        afterPeak = std::max(afterPeak, std::max(std::abs(outL[i]), std::abs(outR[i])));
+    }
+    QVERIFY(afterPeak > 0.01);
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    deck.stop();
+}
+
+void TestUnderrunInvestigation::testSeekReleasesGuardAfterFirstChunkPrefill() {
+    ReferenceDeck deck('A');
+    const std::string longWav = (m_tempDir.path() + "/track_seek_first_chunk_44k.wav").toStdString();
+    QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+    QVERIFY(deck.loadTrack(longWav, 48000.0));
+    deck.play();
+
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool seekEntered = false;
+    int seekChunkCount = 0;
+    bool afterFirstChunk = false;
+    bool audioVerified = false;
+    bool abortWait = false;
+
+    struct HookGuard {
+        ReferenceDeck& deckRef;
+        std::mutex& mtxRef;
+        std::condition_variable& cvRef;
+        bool& abortRef;
+        ~HookGuard() {
+            {
+                std::lock_guard<std::mutex> lock(mtxRef);
+                abortRef = true;
+            }
+            cvRef.notify_all();
+            deckRef.worker().setInSeekTransitionHook(nullptr);
+            deckRef.worker().setBeforeDecodeChunkHook(nullptr);
+            deckRef.stop();
+        }
+    } cleanup{deck, mtx, cv, abortWait};
+
+    deck.worker().setInSeekTransitionHook([&](uint64_t) {
+        std::lock_guard<std::mutex> lock(mtx);
+        seekEntered = true;
+        seekChunkCount = 0;
+    });
+
+    deck.worker().setBeforeDecodeChunkHook([&](uint64_t) {
+        std::unique_lock<std::mutex> lock(mtx);
+        if (!seekEntered) {
+            return;
+        }
+        const int idx = seekChunkCount++;
+        if (idx == 1) {
+            // Chunk 0 (1st prefill chunk) has completed and guard should already be released.
+            afterFirstChunk = true;
+            cv.notify_all();
+            cv.wait_for(lock, std::chrono::seconds(5), [&]() { return audioVerified || abortWait; });
+        }
+    });
+
+    size_t midPrefillRead = 0;
+    double midPrefillPeak = 0.0;
+    std::thread audioThread([&]() {
+        {
+            std::unique_lock<std::mutex> lock(mtx);
+            cv.wait_for(lock, std::chrono::seconds(5), [&]() { return afterFirstChunk || abortWait; });
+        }
+        std::vector<double> outL(256, 0.0), outR(256, 0.0);
+        midPrefillRead = deck.renderBlock(outL.data(), outR.data(), 256);
+        double peak = 0.0;
+        for (size_t i = 0; i < midPrefillRead; ++i) {
+            peak = std::max(peak, std::max(std::abs(outL[i]), std::abs(outR[i])));
+        }
+        midPrefillPeak = peak;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            audioVerified = true;
+        }
+        cv.notify_all();
+    });
+
+    const auto seekRes = deck.seekWithResult(88200); // 2.0s
+    audioThread.join();
+
+    QVERIFY(seekRes.success);
+    QCOMPARE(midPrefillRead, size_t(256));
+    QVERIFY(midPrefillPeak > 0.01);
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    UnderrunSnapshot snap{};
+    QVERIFY(!deck.worker().popUnderrunSnapshot(snap));
+}
+
+void TestUnderrunInvestigation::testPlayingSeekSingleAndBurstStress() {
+    ReferenceDeck deck('A');
+    const std::string longWav = (m_tempDir.path() + "/track_seek_stress_44k.wav").toStdString();
+    QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+    QVERIFY(deck.loadTrack(longWav, 48000.0));
+    deck.play();
+
+    std::atomic<bool> stopAudio{false};
+    std::atomic<uint64_t> cbCount{0};
+    std::thread audioThread([&]() {
+        std::vector<double> outL(256, 0.0), outR(256, 0.0);
+        auto nextWake = std::chrono::steady_clock::now();
+        while (!stopAudio.load(std::memory_order_acquire)) {
+            deck.renderBlock(outL.data(), outR.data(), 256);
+            cbCount.fetch_add(1, std::memory_order_relaxed);
+            nextWake += std::chrono::microseconds(5333);
+            std::this_thread::sleep_until(nextWake);
+        }
+    });
+
+    // 1. Single seeks interspersed with playback
+    for (int i = 0; i < 10; ++i) {
+        const int64_t target = static_cast<int64_t>((i * 17640) % 176400);
+        const auto res = deck.seekWithResult(target);
+        QVERIFY(res.success);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+
+    // 2. Rapid consecutive seek burst
+    for (int i = 0; i < 30; ++i) {
+        const int64_t target = static_cast<int64_t>(((i * 11025) + 4410) % 176400);
+        const auto res = deck.seekWithResult(target);
+        QVERIFY(res.success);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stopAudio.store(true, std::memory_order_release);
+    audioThread.join();
+
+    QVERIFY(cbCount.load() > 0);
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    UnderrunSnapshot snap{};
+    QVERIFY(!deck.worker().popUnderrunSnapshot(snap));
+    deck.stop();
+}
+
+void TestUnderrunInvestigation::testConfigureRateDuringPlaybackNoUnderrun() {
+    ReferenceDeck deck('A');
+    const std::string longWav = (m_tempDir.path() + "/track_rate_change_44k.wav").toStdString();
+    QVERIFY(writeTestWav(longWav, 44100.0, 5.0, 440.0));
+    QVERIFY(deck.loadTrack(longWav, 48000.0));
+    deck.play();
+
+    std::atomic<bool> stopAudio{false};
+    std::atomic<uint64_t> cbCount{0};
+    std::thread audioThread([&]() {
+        std::vector<double> outL(256, 0.0), outR(256, 0.0);
+        auto nextWake = std::chrono::steady_clock::now();
+        while (!stopAudio.load(std::memory_order_acquire)) {
+            deck.renderBlock(outL.data(), outR.data(), 256);
+            cbCount.fetch_add(1, std::memory_order_relaxed);
+            nextWake += std::chrono::microseconds(5333);
+            std::this_thread::sleep_until(nextWake);
+        }
+    });
+
+    const std::array<double, 6> rates{96000.0, 44100.0, 48000.0, 88200.0, 44100.0, 48000.0};
+    for (double rate : rates) {
+        deck.configureGraphRate(rate);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    }
+
+    stopAudio.store(true, std::memory_order_release);
+    audioThread.join();
+
+    QVERIFY(cbCount.load() > 0);
+    QCOMPARE(deck.worker().underrunCount(), uint64_t(0));
+    UnderrunSnapshot snap{};
+    QVERIFY(!deck.worker().popUnderrunSnapshot(snap));
     deck.stop();
 }
 

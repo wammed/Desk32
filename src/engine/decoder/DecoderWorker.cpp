@@ -4,6 +4,50 @@
 
 namespace desk32::engine::decoder {
 
+namespace {
+
+/// RAII seqlock guard for worker-side state/ring transitions (Open, Seek, Stop,
+/// CloseTrack, ConfigureRate). Keeps m_stateTransitionSeq odd while active so
+/// readAudioBlock() on the Audio Thread returns silence without counting a
+/// false underrun, and guarantees even parity restoration on all exit paths.
+class StateTransitionGuard {
+public:
+  explicit StateTransitionGuard(std::atomic<uint64_t> &seq,
+                                bool acquireNow = true) noexcept
+      : m_seq(seq) {
+    if (acquireNow) {
+      enter();
+    }
+  }
+
+  ~StateTransitionGuard() noexcept { release(); }
+
+  StateTransitionGuard(const StateTransitionGuard &) = delete;
+  StateTransitionGuard &operator=(const StateTransitionGuard &) = delete;
+
+  void enter() noexcept {
+    if (!m_active) {
+      m_seq.fetch_add(1, std::memory_order_acq_rel);
+      m_active = true;
+    }
+  }
+
+  void release() noexcept {
+    if (m_active) {
+      m_seq.fetch_add(1, std::memory_order_release);
+      m_active = false;
+    }
+  }
+
+  [[nodiscard]] bool isActive() const noexcept { return m_active; }
+
+private:
+  std::atomic<uint64_t> &m_seq;
+  bool m_active = false;
+};
+
+} // namespace
+
 int64_t DecoderWorker::steadyNowNs() noexcept {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -491,7 +535,8 @@ size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
     std::fill_n(outRight + read, frames - read, 0.0);
 
     if (m_stateTransitionSeq.load(std::memory_order_acquire) != transSeqEntry) {
-      // Open state transition started while readAudioBlock() was in flight (TOCTOU guard).
+      // State transition (Open/Seek/Stop/Close/ConfigureRate) started while
+      // readAudioBlock() was in flight (TOCTOU guard).
       return read;
     }
 
@@ -696,7 +741,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::StateCommitStart),
                             std::memory_order_release);
           m_workerOpenTelem.stateCommitStartNs = steadyNowNs();
-          m_stateTransitionSeq.fetch_add(1, std::memory_order_acq_rel);
+          StateTransitionGuard transitionGuard(m_stateTransitionSeq);
 
           m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
           m_isPlaying.store(false, std::memory_order_release);
@@ -750,7 +795,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_committedRequestId.store(cmd.requestId, std::memory_order_release);
           m_lastOpenStatus.store(OpenStatus::Success,
                                  std::memory_order_release);
-          m_stateTransitionSeq.fetch_add(1, std::memory_order_release);
+          transitionGuard.release();
           m_workerOpenTelem.stateCommitEndNs = steadyNowNs();
           committed = true;
         }
@@ -876,7 +921,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::StateCommitStart),
                           std::memory_order_release);
         m_workerOpenTelem.stateCommitStartNs = steadyNowNs();
-        m_stateTransitionSeq.fetch_add(1, std::memory_order_acq_rel);
+        StateTransitionGuard transitionGuard(m_stateTransitionSeq);
 
         m_workerOpenTelem.playingBefore = m_isPlaying.load(std::memory_order_relaxed);
         m_isPlaying.store(false, std::memory_order_release);
@@ -924,7 +969,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
 
         m_committedRequestId.store(cmd.requestId, std::memory_order_release);
         m_lastOpenStatus.store(OpenStatus::Success, std::memory_order_release);
-        m_stateTransitionSeq.fetch_add(1, std::memory_order_release);
+        transitionGuard.release();
         m_workerOpenTelem.stateCommitEndNs = steadyNowNs();
         committed = true;
       }
@@ -967,6 +1012,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     break;
   }
   case WorkerCommandType::CloseTrack: {
+    StateTransitionGuard transitionGuard(m_stateTransitionSeq, false);
     bool skipClose = false;
     {
       std::lock_guard<std::mutex> lock(m_trackMutex);
@@ -977,6 +1023,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         // arrived; skip close
         skipClose = true;
       } else {
+        transitionGuard.enter();
         m_isOpen.store(false, std::memory_order_release);
         m_isPlaying.store(false, std::memory_order_release);
         m_hasDecodeError.store(false, std::memory_order_release);
@@ -996,6 +1043,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
       m_pendingOutOffset = 0;
       m_pendingOutCount = 0;
     }
+    transitionGuard.release();
     if (cmd.openPromise) {
       try {
         cmd.openPromise->set_value(true);
@@ -1010,6 +1058,7 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
       m_seekCompleted.store(cmd.sequence, std::memory_order_release);
       break;
     }
+    StateTransitionGuard transitionGuard(m_stateTransitionSeq);
     m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
     m_pendingOutOffset = 0;
     m_pendingOutCount = 0;
@@ -1017,23 +1066,48 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+#ifdef DESK32_ENABLE_TEST_HOOKS
+    {
+      std::function<void(uint64_t)> inSeekTransitionHookCopy;
+      {
+        std::lock_guard<std::mutex> lock(m_trackMutex);
+        inSeekTransitionHookCopy = m_inSeekTransitionHook;
+      }
+      if (inSeekTransitionHookCopy) {
+        inSeekTransitionHookCopy(cmd.sequence);
+      }
+    }
+#endif
     bool ok = false;
     int64_t actual = cmd.targetFrame;
     if (m_isSynthetic.load(std::memory_order_relaxed)) {
       m_syntheticPos = cmd.targetFrame;
-      for (int i = 0; i < 4; ++i)
+      for (int i = 0; i < 4; ++i) {
         doDecodeChunk();
+        if (transitionGuard.isActive() &&
+            (m_ringBuffer.availableRead() > 0 ||
+             m_isEof.load(std::memory_order_acquire))) {
+          transitionGuard.release();
+        }
+      }
       ok = true;
       actual = cmd.targetFrame;
     } else if (m_decoder) {
       ok = m_decoder->seek(cmd.targetFrame);
       m_resampler.reset();
       if (ok) {
-        for (int i = 0; i < 4; ++i)
+        for (int i = 0; i < 4; ++i) {
           doDecodeChunk();
+          if (transitionGuard.isActive() &&
+              (m_ringBuffer.availableRead() > 0 ||
+               m_isEof.load(std::memory_order_acquire))) {
+            transitionGuard.release();
+          }
+        }
         actual = m_decoder->lastSeekActualFrame();
       }
     }
+    transitionGuard.release();
     m_seekActualFrame.store(actual, std::memory_order_release);
     m_seekSuccess.store(ok, std::memory_order_release);
     m_seekCompleted.store(cmd.sequence, std::memory_order_release);
@@ -1043,7 +1117,8 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     break;
   case WorkerCommandType::Pause:
     break;
-  case WorkerCommandType::Stop:
+  case WorkerCommandType::Stop: {
+    StateTransitionGuard transitionGuard(m_stateTransitionSeq);
     m_ringBuffer.resetProducer(); // P0-04: Producer-owned reset
     m_pendingOutOffset = 0;
     m_pendingOutCount = 0;
@@ -1057,11 +1132,14 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
       m_resampler.reset();
     }
     break;
+  }
   case WorkerCommandType::ConfigureRate: {
+    StateTransitionGuard transitionGuard(m_stateTransitionSeq, false);
     bool shouldPrefill = false;
     {
       std::lock_guard<std::mutex> lock(m_trackMutex);
       if (m_trackInfo.sampleRate > 0.0 && cmd.graphRate > 0.0) {
+        transitionGuard.enter();
         m_resampler.configure(m_trackInfo.sampleRate, cmd.graphRate,
                               m_trackInfo.channels);
         m_ringBuffer.resetProducer();
@@ -1087,8 +1165,14 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     if (shouldPrefill) {
       for (int i = 0; i < 4; ++i) {
         doDecodeChunk();
+        if (transitionGuard.isActive() &&
+            (m_ringBuffer.availableRead() > 0 ||
+             m_isEof.load(std::memory_order_acquire))) {
+          transitionGuard.release();
+        }
       }
     }
+    transitionGuard.release();
   } break;
   default:
     break;
