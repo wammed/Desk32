@@ -60,6 +60,7 @@ public:
     }
 
     Q_INVOKABLE [[nodiscard]] QString sessionId() const { return m_sessionId; }
+    Q_INVOKABLE qint64 totalEventCount();
 
     // QML-invokable APIs
     Q_INVOKABLE void log(

@@ -21,7 +21,190 @@ Item {
     property string statusFilter: "All"
     property string searchFilter: ""
     property int limitCount: 500
+    property int totalStoredCount: 0
+    property string exportScope: "displayed" // "all" | "displayed"
     property string exportFeedbackText: ""
+
+    // Date/Time Filter State (Single Date/Time & Range)
+    property bool dateRangeMode: true        // false: Single Date/Time, true: Range (From ~ To)
+    property bool useLocalTime: false        // false: UTC (default, matches table), true: Local
+    property string dateSingleText: ""
+    property string dateFromText: ""
+    property string dateToText: ""
+    property string activeFromUtc: ""
+    property string activeToUtc: ""
+    property string activeTimePreset: "all"  // "all" | "1h" | "24h" | "today" | "7d" | "custom"
+    property string dateFilterError: ""
+
+    function pad2(n) { return (n < 10 ? "0" : "") + n }
+    function pad3(n) { return (n < 10 ? "00" : (n < 100 ? "0" : "")) + n }
+
+    function formatDateObj(dt, localMode, includeTime) {
+        var y = localMode ? dt.getFullYear() : dt.getUTCFullYear()
+        var mo = (localMode ? dt.getMonth() : dt.getUTCMonth()) + 1
+        var d = localMode ? dt.getDate() : dt.getUTCDate()
+        var datePart = y + "-" + pad2(mo) + "-" + pad2(d)
+        if (!includeTime) return datePart
+        var h = localMode ? dt.getHours() : dt.getUTCHours()
+        var mi = localMode ? dt.getMinutes() : dt.getUTCMinutes()
+        var s = localMode ? dt.getSeconds() : dt.getUTCSeconds()
+        return datePart + " " + pad2(h) + ":" + pad2(mi) + ":" + pad2(s)
+    }
+
+    function formatTimestampForTable(utcStr) {
+        if (!utcStr || utcStr.length === 0) return ""
+        if (!useLocalTime) return utcStr.replace("T", " ").replace("Z", "")
+        var dt = new Date(utcStr)
+        if (isNaN(dt.getTime())) return utcStr.replace("T", " ").replace("Z", "")
+        return dt.getFullYear() + "-" + pad2(dt.getMonth() + 1) + "-" + pad2(dt.getDate())
+             + " " + pad2(dt.getHours()) + ":" + pad2(dt.getMinutes()) + ":" + pad2(dt.getSeconds())
+             + "." + pad3(dt.getMilliseconds())
+    }
+
+    // Parse "YYYY-MM-DD", "YYYY-MM-DD HH", "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS[.sss]" (with - or /, space or T, optional Z)
+    function parseDateTimeBound(raw, isUpperBound, localMode) {
+        var s = (raw || "").trim()
+        if (s.length === 0) return { valid: true, utc: "" }
+
+        var explicitUtc = /[zZ]$/.test(s)
+        var core = explicitUtc ? s.slice(0, -1).trim() : s
+        var re = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})(?:[T\s]+(\d{1,2})(?::(\d{1,2})(?::(\d{1,2})(?:\.(\d{1,3}))?)?)?)?$/
+        var m = re.exec(core)
+        if (!m) return { valid: false, utc: "" }
+
+        var yr = parseInt(m[1], 10)
+        var mo = parseInt(m[2], 10)
+        var dy = parseInt(m[3], 10)
+        var hasH = m[4] !== undefined
+        var hasM = m[5] !== undefined
+        var hasS = m[6] !== undefined
+        var hasMs = m[7] !== undefined
+
+        var hh = hasH ? parseInt(m[4], 10) : (isUpperBound ? 23 : 0)
+        var mi = hasM ? parseInt(m[5], 10) : (isUpperBound ? 59 : 0)
+        var ss = hasS ? parseInt(m[6], 10) : (isUpperBound ? 59 : 0)
+        var ms = hasMs ? parseInt((m[7] + "000").slice(0, 3), 10) : (isUpperBound ? 999 : 0)
+
+        if (mo < 1 || mo > 12 || dy < 1 || dy > 31 || hh < 0 || hh > 23 || mi < 0 || mi > 59 || ss < 0 || ss > 59) {
+            return { valid: false, utc: "" }
+        }
+
+        // Validate real calendar day (rejects e.g. Feb 30)
+        var check = new Date(Date.UTC(yr, mo - 1, dy, 0, 0, 0, 0))
+        if (check.getUTCFullYear() !== yr || (check.getUTCMonth() + 1) !== mo || check.getUTCDate() !== dy) {
+            return { valid: false, utc: "" }
+        }
+
+        var dt
+        if (localMode && !explicitUtc) {
+            dt = new Date(yr, mo - 1, dy, hh, mi, ss, ms)
+        } else {
+            dt = new Date(Date.UTC(yr, mo - 1, dy, hh, mi, ss, ms))
+        }
+        if (isNaN(dt.getTime())) return { valid: false, utc: "" }
+
+        var iso = dt.getUTCFullYear() + "-" + pad2(dt.getUTCMonth() + 1) + "-" + pad2(dt.getUTCDate())
+                + "T" + pad2(dt.getUTCHours()) + ":" + pad2(dt.getUTCMinutes()) + ":" + pad2(dt.getUTCSeconds())
+                + "." + pad3(dt.getUTCMilliseconds()) + "Z"
+        return { valid: true, utc: iso }
+    }
+
+    function applyDateFilter(triggerRefresh) {
+        if (!dateRangeMode) {
+            var singleTrim = (dateSingleText || "").trim()
+            if (singleTrim.length === 0) {
+                dateFilterError = ""
+                activeFromUtc = ""
+                activeToUtc = ""
+                if (activeTimePreset === "custom") activeTimePreset = "all"
+                if (triggerRefresh) refresh()
+                return true
+            }
+            var lo = parseDateTimeBound(singleTrim, false, useLocalTime)
+            var hi = parseDateTimeBound(singleTrim, true, useLocalTime)
+            if (!lo.valid || !hi.valid) {
+                dateFilterError = qsTr("Format: YYYY-MM-DD [HH[:MM[:SS]]]")
+                return false
+            }
+            dateFilterError = ""
+            activeFromUtc = lo.utc
+            activeToUtc = hi.utc
+            if (triggerRefresh) refresh()
+            return true
+        } else {
+            var pFrom = parseDateTimeBound(dateFromText, false, useLocalTime)
+            var pTo = parseDateTimeBound(dateToText, true, useLocalTime)
+            if (!pFrom.valid || !pTo.valid) {
+                dateFilterError = qsTr("Format: YYYY-MM-DD [HH[:MM[:SS]]]")
+                return false
+            }
+            if (pFrom.utc.length > 0 && pTo.utc.length > 0 && pFrom.utc > pTo.utc) {
+                dateFilterError = qsTr("Invalid range: FROM is later than TO")
+                return false
+            }
+            dateFilterError = ""
+            activeFromUtc = pFrom.utc
+            activeToUtc = pTo.utc
+            if (activeFromUtc.length === 0 && activeToUtc.length === 0 && activeTimePreset === "custom") {
+                activeTimePreset = "all"
+            }
+            if (triggerRefresh) refresh()
+            return true
+        }
+    }
+
+    function syncDateInputsFromState() {
+        if (typeof dateSingleField !== "undefined" && dateSingleField.text !== dateSingleText)
+            dateSingleField.text = dateSingleText
+        if (typeof dateFromField !== "undefined" && dateFromField.text !== dateFromText)
+            dateFromField.text = dateFromText
+        if (typeof dateToField !== "undefined" && dateToField.text !== dateToText)
+            dateToField.text = dateToText
+    }
+
+    function applyTimePreset(presetId) {
+        activeTimePreset = presetId
+        dateFilterError = ""
+        if (presetId === "all") {
+            dateSingleText = ""
+            dateFromText = ""
+            dateToText = ""
+            activeFromUtc = ""
+            activeToUtc = ""
+            syncDateInputsFromState()
+            refresh()
+            return
+        }
+        var now = new Date()
+        if (presetId === "today") {
+            dateRangeMode = false
+            dateSingleText = formatDateObj(now, useLocalTime, false)
+            syncDateInputsFromState()
+            applyDateFilter(true)
+            return
+        }
+        dateRangeMode = true
+        var deltaMs = 0
+        if (presetId === "1h") deltaMs = 3600 * 1000
+        else if (presetId === "24h") deltaMs = 24 * 3600 * 1000
+        else if (presetId === "7d") deltaMs = 7 * 24 * 3600 * 1000
+        var startDt = new Date(now.getTime() - deltaMs)
+        dateFromText = formatDateObj(startDt, useLocalTime, true)
+        dateToText = formatDateObj(now, useLocalTime, true)
+        syncDateInputsFromState()
+        applyDateFilter(true)
+    }
+
+    function activeFilterSummary() {
+        var parts = []
+        parts.push(categoryFilter === "All" ? qsTr("Cat: All") : qsTr("Cat: %1").arg(categoryFilter))
+        if (statusFilter !== "All") parts.push(qsTr("Status: %1").arg(statusFilter))
+        if (playbackOnlyMode) parts.push(qsTr("Playback"))
+        if (activeFromUtc.length > 0 || activeToUtc.length > 0) parts.push(qsTr("Time Filtered"))
+        if (searchFilter.trim().length > 0) parts.push(qsTr("Search"))
+        parts.push(qsTr("Limit: %1").arg(limitCount))
+        return parts.join(" • ")
+    }
 
     function formatPrettyJson(raw) {
         if (!raw || raw.length === 0) return "{}"
@@ -115,11 +298,14 @@ Item {
         if (categoryFilter !== "All") f.category = categoryFilter
         if (statusFilter !== "All") f.status = statusFilter
         if (searchFilter.trim().length > 0) f.searchText = searchFilter.trim()
+        if (activeFromUtc.length > 0) f.fromUtc = activeFromUtc
+        if (activeToUtc.length > 0) f.toUtc = activeToUtc
         return f
     }
 
     function refresh() {
         rawLogs = LogService.fetchLogs(buildFilterMap()) || []
+        totalStoredCount = LogService.totalEventCount()
         rebuildTreeRows()
         if (!selectedLog && rawLogs.length > 0) {
             selectEvent(rawLogs[0])
@@ -128,6 +314,13 @@ Item {
 
     Component.onCompleted: refresh()
     onVisibleChanged: if (visible) refresh()
+
+    Timer {
+        id: dateFilterDebounce
+        interval: 280
+        repeat: false
+        onTriggered: logViewRoot.applyDateFilter(true)
+    }
 
     Timer {
         id: logRefreshDebounce
@@ -198,95 +391,502 @@ Item {
             spacing: 8
 
         // =====================================================================
-        // TOP FILTER & AUDIT TOOLBAR
+        // TOP FILTER & AUDIT TOOLBAR (2 ROWS: PRIMARY FILTERS + DATE/TIME RANGE)
         // =====================================================================
         BrushedMetalPanel {
             Layout.fillWidth: true
-            Layout.preferredHeight: 60
+            Layout.preferredHeight: 96
             baseTint: "#14181f"
             borderColor: "#333c4a"
             showScrews: true
             cornerRadius: 5
 
-            RowLayout {
+            ColumnLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 14
                 anchors.rightMargin: 14
-                spacing: 8
+                anchors.topMargin: 8
+                anchors.bottomMargin: 8
+                spacing: 6
 
-                Label {
-                    text: qsTr("AUDIT LOGS")
-                    font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#E8BA6B"
-                }
-
-                ConsoleComboBox {
-                    Layout.preferredWidth: 146
-                    model: ["All", "Session", "AudioEngine", "Deck", "Transport", "FolderSession", "Playback", "DSP", "ExternalInsert", "Render", "Workspace", "MasterControl", "Preset", "Settings"]
-                    onActivated: {
-                        logViewRoot.categoryFilter = currentText
-                        logViewRoot.refresh()
-                    }
-                }
-
-                ConsoleComboBox {
-                    Layout.preferredWidth: 112
-                    model: ["All", "Success", "Info", "Warning", "Failed"]
-                    onActivated: {
-                        logViewRoot.statusFilter = currentText
-                        logViewRoot.refresh()
-                    }
-                }
-
-                ConsoleButton {
-                    text: qsTr("PLAYBACK HIST")
-                    implicitWidth: 118; implicitHeight: 30; fontSize: 10
-                    highlighted: logViewRoot.playbackOnlyMode
-                    accentColor: "#33E3FF"
-                    onClicked: {
-                        logViewRoot.playbackOnlyMode = !logViewRoot.playbackOnlyMode
-                        logViewRoot.refresh()
-                    }
-                }
-
-                TextField {
+                // ROW 1: Category, Status, Playback History, Search, Row Limit, Refresh, Export Menu
+                RowLayout {
                     Layout.fillWidth: true
-                    implicitHeight: 30
-                    placeholderText: qsTr("Search message, target, or operation ID...")
-                    color: "#DCE6F0"
-                    placeholderTextColor: "#5C6B7C"
-                    font.pixelSize: 11
-                    leftPadding: 8; rightPadding: 8
-                    background: Rectangle {
-                        radius: 4
-                        color: "#080B10"
-                        border.color: parent.activeFocus ? "#33E3FF" : "#2E3846"
+                    spacing: 8
+
+                    Label {
+                        text: qsTr("AUDIT LOGS")
+                        font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#E8BA6B"
                     }
-                    onTextChanged: {
-                        logViewRoot.searchFilter = text
-                        logViewRoot.refresh()
+
+                    ConsoleComboBox {
+                        Layout.preferredWidth: 146
+                        model: ["All", "Session", "AudioEngine", "Deck", "Transport", "FolderSession", "Playback", "DSP", "ExternalInsert", "Render", "Workspace", "MasterControl", "Preset", "Settings"]
+                        onActivated: {
+                            logViewRoot.categoryFilter = currentText
+                            logViewRoot.refresh()
+                        }
+                    }
+
+                    ConsoleComboBox {
+                        Layout.preferredWidth: 112
+                        model: ["All", "Success", "Info", "Warning", "Failed"]
+                        onActivated: {
+                            logViewRoot.statusFilter = currentText
+                            logViewRoot.refresh()
+                        }
+                    }
+
+                    ConsoleButton {
+                        text: qsTr("PLAYBACK HIST")
+                        implicitWidth: 118; implicitHeight: 30; fontSize: 10
+                        highlighted: logViewRoot.playbackOnlyMode
+                        accentColor: "#33E3FF"
+                        onClicked: {
+                            logViewRoot.playbackOnlyMode = !logViewRoot.playbackOnlyMode
+                            logViewRoot.refresh()
+                        }
+                    }
+
+                    TextField {
+                        Layout.fillWidth: true
+                        implicitHeight: 30
+                        placeholderText: qsTr("Search message, target, or operation ID...")
+                        color: "#DCE6F0"
+                        placeholderTextColor: "#5C6B7C"
+                        font.pixelSize: 11
+                        leftPadding: 8; rightPadding: 8
+                        background: Rectangle {
+                            radius: 4
+                            color: "#080B10"
+                            border.color: parent.activeFocus ? "#33E3FF" : "#2E3846"
+                        }
+                        onTextChanged: {
+                            logViewRoot.searchFilter = text
+                            logViewRoot.refresh()
+                        }
+                    }
+
+                    ConsoleComboBox {
+                        Layout.preferredWidth: 112
+                        model: ["200", "500", "1000"]
+                        currentIndex: 1
+                        onActivated: {
+                            logViewRoot.limitCount = parseInt(currentText, 10) || 500
+                            logViewRoot.refresh()
+                        }
+                    }
+
+                    ConsoleButton {
+                        text: qsTr("REFRESH")
+                        implicitWidth: 84; implicitHeight: 30; fontSize: 10; accentColor: "#00E5FF"
+                        onClicked: logViewRoot.refresh()
+                    }
+
+                    ConsoleButton {
+                        id: exportJsonlBtn
+                        text: qsTr("EXPORT JSONL ▾")
+                        implicitWidth: 138; implicitHeight: 30; fontSize: 10; accentColor: "#00E676"
+                        highlighted: exportMenuPopup.visible
+                        onClicked: {
+                            logViewRoot.totalStoredCount = LogService.totalEventCount()
+                            if (exportMenuPopup.visible) {
+                                exportMenuPopup.close()
+                            } else {
+                                exportMenuPopup.open()
+                            }
+                        }
+
+                        Popup {
+                            id: exportMenuPopup
+                            y: exportJsonlBtn.height + 4
+                            x: exportJsonlBtn.width - width
+                            width: 340
+                            padding: 6
+                            modal: false
+                            focus: true
+                            closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+
+                            background: Rectangle {
+                                radius: 5
+                                color: "#0D1117"
+                                border.color: "#3A4859"
+                                border.width: 1
+                            }
+
+                            contentItem: ColumnLayout {
+                                spacing: 4
+
+                                Label {
+                                    Layout.fillWidth: true
+                                    leftPadding: 6
+                                    topPadding: 2
+                                    bottomPadding: 2
+                                    text: qsTr("SELECT JSONL EXPORT SCOPE")
+                                    font.family: "Monospace"
+                                    font.pixelSize: 9
+                                    font.bold: true
+                                    color: "#7F94A8"
+                                }
+
+                                // Option 1: All Stored Logs
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: 50
+                                    radius: 4
+                                    color: allExportHover.containsMouse ? "#162634" : "#11161E"
+                                    border.color: allExportHover.containsMouse ? "#00E676" : "#25303E"
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 8
+
+                                        Rectangle {
+                                            width: 4; height: 30; radius: 2
+                                            color: "#00E676"
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: qsTr("All Stored Logs (%1)").arg(logViewRoot.totalStoredCount)
+                                                font.family: "Monospace"
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#E4F2EC"
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: qsTr("Export all retained logs in the database")
+                                                font.pixelSize: 10
+                                                color: "#88A0B2"
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: allExportHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            exportMenuPopup.close()
+                                            logViewRoot.exportScope = "all"
+                                            exportJsonlDlg.open()
+                                        }
+                                    }
+                                }
+
+                                // Option 2: Currently Displayed Logs (Row Limit & Filtered Category/Time/Search)
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    implicitHeight: 50
+                                    radius: 4
+                                    color: dispExportHover.containsMouse ? "#162634" : "#11161E"
+                                    border.color: dispExportHover.containsMouse ? "#33E3FF" : "#25303E"
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 8
+
+                                        Rectangle {
+                                            width: 4; height: 30; radius: 2
+                                            color: "#33E3FF"
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 2
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: qsTr("Displayed Logs (%1)").arg(logViewRoot.rawLogs.length)
+                                                font.family: "Monospace"
+                                                font.pixelSize: 11
+                                                font.bold: true
+                                                color: "#E2F4FA"
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                Layout.fillWidth: true
+                                                text: logViewRoot.activeFilterSummary()
+                                                font.family: "Monospace"
+                                                font.pixelSize: 9
+                                                color: "#7FA9BD"
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: dispExportHover
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            exportMenuPopup.close()
+                                            logViewRoot.exportScope = "displayed"
+                                            exportJsonlDlg.open()
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
-                ConsoleComboBox {
-                    Layout.preferredWidth: 112
-                    model: ["200", "500", "1000"]
-                    currentIndex: 1
-                    onActivated: {
-                        logViewRoot.limitCount = parseInt(currentText, 10) || 500
-                        logViewRoot.refresh()
+                // ROW 2: Date & Time Filter (Presets + Single Date/Time or Range From~To + UTC/LOCAL)
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Label {
+                        text: qsTr("DATE / TIME")
+                        font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"
                     }
-                }
 
-                ConsoleButton {
-                    text: qsTr("REFRESH")
-                    implicitWidth: 84; implicitHeight: 30; fontSize: 10; accentColor: "#00E5FF"
-                    onClicked: logViewRoot.refresh()
-                }
+                    // Quick Time Range Presets
+                    ConsoleButton {
+                        text: qsTr("ALL")
+                        implicitWidth: 42; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.activeTimePreset === "all" && logViewRoot.activeFromUtc.length === 0 && logViewRoot.activeToUtc.length === 0
+                        accentColor: "#33E3FF"
+                        onClicked: logViewRoot.applyTimePreset("all")
+                    }
+                    ConsoleButton {
+                        text: qsTr("1H")
+                        implicitWidth: 38; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.activeTimePreset === "1h"
+                        accentColor: "#33E3FF"
+                        onClicked: logViewRoot.applyTimePreset("1h")
+                    }
+                    ConsoleButton {
+                        text: qsTr("24H")
+                        implicitWidth: 44; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.activeTimePreset === "24h"
+                        accentColor: "#33E3FF"
+                        onClicked: logViewRoot.applyTimePreset("24h")
+                    }
+                    ConsoleButton {
+                        text: qsTr("TODAY")
+                        implicitWidth: 54; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.activeTimePreset === "today"
+                        accentColor: "#33E3FF"
+                        onClicked: logViewRoot.applyTimePreset("today")
+                    }
+                    ConsoleButton {
+                        text: qsTr("7D")
+                        implicitWidth: 38; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.activeTimePreset === "7d"
+                        accentColor: "#33E3FF"
+                        onClicked: logViewRoot.applyTimePreset("7d")
+                    }
 
-                ConsoleButton {
-                    text: qsTr("EXPORT JSONL...")
-                    implicitWidth: 126; implicitHeight: 30; fontSize: 10; accentColor: "#00E676"
-                    onClicked: exportJsonlDlg.open()
+                    Rectangle { Layout.preferredWidth: 1; Layout.preferredHeight: 18; color: "#2D3745" }
+
+                    // Single Date/Time vs Range Switcher
+                    ConsoleButton {
+                        text: qsTr("SINGLE")
+                        implicitWidth: 62; implicitHeight: 26; fontSize: 9
+                        highlighted: !logViewRoot.dateRangeMode
+                        accentColor: "#E8BA6B"
+                        toolTipText: qsTr("Filter by a single date or timestamp (e.g. 2026-11-28 or 2026-11-28 08:30)")
+                        onClicked: {
+                            if (logViewRoot.dateRangeMode) {
+                                logViewRoot.dateRangeMode = false
+                                if (logViewRoot.dateSingleText.length === 0 && logViewRoot.dateFromText.length > 0) {
+                                    logViewRoot.dateSingleText = logViewRoot.dateFromText
+                                    logViewRoot.syncDateInputsFromState()
+                                }
+                                logViewRoot.activeTimePreset = "custom"
+                                logViewRoot.applyDateFilter(true)
+                            }
+                        }
+                    }
+                    ConsoleButton {
+                        text: qsTr("RANGE")
+                        implicitWidth: 60; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.dateRangeMode
+                        accentColor: "#E8BA6B"
+                        toolTipText: qsTr("Filter by a start/end date-time range (From ~ To)")
+                        onClicked: {
+                            if (!logViewRoot.dateRangeMode) {
+                                logViewRoot.dateRangeMode = true
+                                if (logViewRoot.dateFromText.length === 0 && logViewRoot.dateSingleText.length > 0) {
+                                    logViewRoot.dateFromText = logViewRoot.dateSingleText
+                                    logViewRoot.dateToText = logViewRoot.dateSingleText
+                                    logViewRoot.syncDateInputsFromState()
+                                }
+                                logViewRoot.activeTimePreset = "custom"
+                                logViewRoot.applyDateFilter(true)
+                            }
+                        }
+                    }
+
+                    // Single Date/Time Input
+                    TextField {
+                        id: dateSingleField
+                        visible: !logViewRoot.dateRangeMode
+                        Layout.preferredWidth: 196
+                        implicitHeight: 26
+                        text: logViewRoot.dateSingleText
+                        placeholderText: qsTr("YYYY-MM-DD [HH:MM[:SS]]")
+                        color: "#DCE6F0"
+                        placeholderTextColor: "#546373"
+                        font.family: "Monospace"
+                        font.pixelSize: 10
+                        leftPadding: 8; rightPadding: 8
+                        background: Rectangle {
+                            radius: 4
+                            color: "#080B10"
+                            border.color: logViewRoot.dateFilterError.length > 0
+                                          ? "#FFB300"
+                                          : (parent.activeFocus ? "#33E3FF" : "#2E3846")
+                        }
+                        onTextEdited: {
+                            logViewRoot.dateSingleText = text
+                            logViewRoot.activeTimePreset = text.trim().length > 0 ? "custom" : "all"
+                            dateFilterDebounce.restart()
+                        }
+                        onAccepted: {
+                            dateFilterDebounce.stop()
+                            logViewRoot.dateSingleText = text
+                            logViewRoot.applyDateFilter(true)
+                        }
+                    }
+
+                    // Range FROM ~ TO Inputs
+                    TextField {
+                        id: dateFromField
+                        visible: logViewRoot.dateRangeMode
+                        Layout.preferredWidth: 184
+                        implicitHeight: 26
+                        text: logViewRoot.dateFromText
+                        placeholderText: qsTr("From: YYYY-MM-DD HH:MM")
+                        color: "#DCE6F0"
+                        placeholderTextColor: "#546373"
+                        font.family: "Monospace"
+                        font.pixelSize: 10
+                        leftPadding: 8; rightPadding: 8
+                        background: Rectangle {
+                            radius: 4
+                            color: "#080B10"
+                            border.color: logViewRoot.dateFilterError.length > 0
+                                          ? "#FFB300"
+                                          : (parent.activeFocus ? "#33E3FF" : "#2E3846")
+                        }
+                        onTextEdited: {
+                            logViewRoot.dateFromText = text
+                            logViewRoot.activeTimePreset = (text.trim().length > 0 || logViewRoot.dateToText.trim().length > 0) ? "custom" : "all"
+                            dateFilterDebounce.restart()
+                        }
+                        onAccepted: {
+                            dateFilterDebounce.stop()
+                            logViewRoot.dateFromText = text
+                            logViewRoot.applyDateFilter(true)
+                        }
+                    }
+
+                    Label {
+                        visible: logViewRoot.dateRangeMode
+                        text: "~"
+                        font.family: "Monospace"; font.pixelSize: 12; font.bold: true; color: "#7F94A8"
+                    }
+
+                    TextField {
+                        id: dateToField
+                        visible: logViewRoot.dateRangeMode
+                        Layout.preferredWidth: 184
+                        implicitHeight: 26
+                        text: logViewRoot.dateToText
+                        placeholderText: qsTr("To: YYYY-MM-DD HH:MM")
+                        color: "#DCE6F0"
+                        placeholderTextColor: "#546373"
+                        font.family: "Monospace"
+                        font.pixelSize: 10
+                        leftPadding: 8; rightPadding: 8
+                        background: Rectangle {
+                            radius: 4
+                            color: "#080B10"
+                            border.color: logViewRoot.dateFilterError.length > 0
+                                          ? "#FFB300"
+                                          : (parent.activeFocus ? "#33E3FF" : "#2E3846")
+                        }
+                        onTextEdited: {
+                            logViewRoot.dateToText = text
+                            logViewRoot.activeTimePreset = (logViewRoot.dateFromText.trim().length > 0 || text.trim().length > 0) ? "custom" : "all"
+                            dateFilterDebounce.restart()
+                        }
+                        onAccepted: {
+                            dateFilterDebounce.stop()
+                            logViewRoot.dateToText = text
+                            logViewRoot.applyDateFilter(true)
+                        }
+                    }
+
+                    ConsoleButton {
+                        text: logViewRoot.useLocalTime ? qsTr("LOCAL") : qsTr("UTC")
+                        implicitWidth: 56; implicitHeight: 26; fontSize: 9
+                        highlighted: logViewRoot.useLocalTime
+                        accentColor: "#33E3FF"
+                        toolTipText: qsTr("Toggle UTC / Local timezone for date-time filter and timestamp column")
+                        onClicked: {
+                            logViewRoot.useLocalTime = !logViewRoot.useLocalTime
+                            if (logViewRoot.activeTimePreset === "1h" || logViewRoot.activeTimePreset === "24h"
+                                || logViewRoot.activeTimePreset === "today" || logViewRoot.activeTimePreset === "7d") {
+                                logViewRoot.applyTimePreset(logViewRoot.activeTimePreset)
+                            } else {
+                                logViewRoot.applyDateFilter(true)
+                            }
+                        }
+                    }
+
+                    ConsoleButton {
+                        text: qsTr("APPLY")
+                        implicitWidth: 56; implicitHeight: 26; fontSize: 9; accentColor: "#00E5FF"
+                        onClicked: {
+                            dateFilterDebounce.stop()
+                            logViewRoot.applyDateFilter(true)
+                        }
+                    }
+
+                    ConsoleButton {
+                        text: qsTr("CLEAR")
+                        implicitWidth: 56; implicitHeight: 26; fontSize: 9; accentColor: "#9AA9B8"
+                        enabled: logViewRoot.activeFromUtc.length > 0 || logViewRoot.activeToUtc.length > 0
+                                 || logViewRoot.dateSingleText.length > 0
+                                 || logViewRoot.dateFromText.length > 0
+                                 || logViewRoot.dateToText.length > 0
+                        onClicked: {
+                            dateFilterDebounce.stop()
+                            logViewRoot.applyTimePreset("all")
+                        }
+                    }
+
+                    Label {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideRight
+                        font.family: "Monospace"
+                        font.pixelSize: 9
+                        color: logViewRoot.dateFilterError.length > 0 ? "#FFB300" : "#6E859A"
+                        text: {
+                            if (logViewRoot.dateFilterError.length > 0) return logViewRoot.dateFilterError
+                            if (logViewRoot.activeFromUtc.length > 0 || logViewRoot.activeToUtc.length > 0) {
+                                var fTxt = logViewRoot.activeFromUtc.length > 0 ? logViewRoot.activeFromUtc.replace("T", " ").replace(".000Z", "Z") : "*"
+                                var tTxt = logViewRoot.activeToUtc.length > 0 ? logViewRoot.activeToUtc.replace("T", " ").replace(".999Z", "Z") : "*"
+                                return qsTr("UTC: %1 .. %2").arg(fTxt).arg(tTxt)
+                            }
+                            return ""
+                        }
+                    }
                 }
             }
         }
@@ -330,7 +930,7 @@ Item {
                             anchors.fill: parent
                             anchors.leftMargin: 10; anchors.rightMargin: 20
                             spacing: 8
-                            Label { Layout.fillWidth: false; Layout.preferredWidth: 160; Layout.minimumWidth: 160; Layout.maximumWidth: 160; text: qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
+                            Label { Layout.fillWidth: false; Layout.preferredWidth: 160; Layout.minimumWidth: 160; Layout.maximumWidth: 160; text: logViewRoot.useLocalTime ? qsTr("TIMESTAMP (LOCAL)") : qsTr("TIMESTAMP (UTC)"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
                             Label { Layout.fillWidth: false; Layout.preferredWidth: 104; Layout.minimumWidth: 104; Layout.maximumWidth: 104; text: qsTr("CATEGORY"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
                             Label { Layout.fillWidth: false; Layout.preferredWidth: 136; Layout.minimumWidth: 136; Layout.maximumWidth: 136; text: qsTr("OPERATION"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
                             Label { Layout.fillWidth: false; Layout.preferredWidth: 72;  Layout.minimumWidth: 72;  Layout.maximumWidth: 72;  text: qsTr("STATUS"); font.family: "Monospace"; font.pixelSize: 10; font.bold: true; color: "#7F94A8"; elide: Text.ElideRight }
@@ -410,7 +1010,7 @@ Item {
                                         Label {
                                             Layout.fillWidth: true
                                             Layout.minimumWidth: 0
-                                            text: (ev.timestampUtc || "").replace("T", " ").replace("Z", "")
+                                            text: logViewRoot.formatTimestampForTable(ev.timestampUtc)
                                             font.family: "Monospace"; font.pixelSize: 10; color: "#90A4B8"
                                             elide: Text.ElideRight
                                         }
@@ -624,8 +1224,9 @@ Item {
             RowLayout {
                 anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 12; spacing: 14
                 Label {
-                    text: qsTr("DISPLAYED: %1 EVENTS (%2 TREE ROWS)   |   RETENTION POLICY: 180 DAYS / 300,000 ROOT OPERATIONS   |   SESSION: %3")
+                    text: qsTr("DISPLAYED: %1 / TOTAL: %2 EVENTS (%3 TREE ROWS)   |   RETENTION POLICY: 180 DAYS / 300,000 ROOT OPERATIONS   |   SESSION: %4")
                           .arg(logViewRoot.rawLogs.length)
+                          .arg(logViewRoot.totalStoredCount)
                           .arg(logViewRoot.treeRows.length)
                           .arg(LogService.sessionId())
                     font.family: "Monospace"; font.pixelSize: 10; color: "#8899AA"
@@ -643,15 +1244,27 @@ Item {
 
     FileDialog {
         id: exportJsonlDlg
-        title: qsTr("Export Filtered Audit Logs as JSON Lines (.jsonl)")
+        title: logViewRoot.exportScope === "all"
+               ? qsTr("Export All Stored Audit Logs as JSON Lines (.jsonl)")
+               : qsTr("Export Displayed Audit Logs as JSON Lines (.jsonl)")
         fileMode: FileDialog.SaveFile
         nameFilters: ["JSON Lines (*.jsonl)", "All Files (*)"]
         defaultSuffix: "jsonl"
         onAccepted: {
             var p = decodeURIComponent(selectedFile.toString().replace(/^file:\/\//, ""))
             if (p.length > 0) {
-                var ok = LogService.exportFilteredToJsonl(p, logViewRoot.buildFilterMap())
-                logViewRoot.exportFeedbackText = ok ? qsTr("Exported JSONL: %1").arg(p) : qsTr("Export failed")
+                var isAll = (logViewRoot.exportScope === "all")
+                var ok = isAll
+                         ? LogService.exportToJsonl(p)
+                         : LogService.exportFilteredToJsonl(p, logViewRoot.buildFilterMap())
+                if (ok) {
+                    var countTxt = isAll ? logViewRoot.totalStoredCount : logViewRoot.rawLogs.length
+                    logViewRoot.exportFeedbackText = isAll
+                        ? qsTr("Exported ALL (%1): %2").arg(countTxt).arg(p)
+                        : qsTr("Exported DISPLAYED (%1): %2").arg(countTxt).arg(p)
+                } else {
+                    logViewRoot.exportFeedbackText = qsTr("Export failed")
+                }
             }
         }
     }

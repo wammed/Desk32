@@ -26,6 +26,7 @@ private slots:
     void testExportLatestEventsLimit();
     void testSys05OperationRetentionAndCascadePurge();
     void testXdgStatePathJsonlFilterParityAndOrphanPurge();
+    void testDateTimeFilterAndExportScope();
     void cleanupTestCase();
 
 private:
@@ -702,6 +703,97 @@ void TestLogService::testXdgStatePathJsonlFilterParityAndOrphanPurge()
     QCOMPARE(repo.queryEvents(remF).size(), 1u);
 
     repo.close();
+}
+
+void TestLogService::testDateTimeFilterAndExportScope()
+{
+    const QString dbPath = m_tempDir.path() + "/test_datetime_scope.db";
+    {
+        LogRepository seedRepo("SeedDateTimeScopeConn");
+        QVERIFY(seedRepo.open(dbPath));
+
+        auto makeEv = [](const char* ts, const char* cat, const char* msg) {
+            LogEvent ev = LogEvent::create(LogLevel::Success, cat, msg, "{}", "Op", "System", "", 0, 1.0);
+            ev.timestampUtc = ts;
+            return ev;
+        };
+
+        std::vector<LogEvent> rows = {
+            makeEv("2026-11-25T09:15:10.123Z", "Deck", "Day25 Morning"),
+            makeEv("2026-11-26T14:30:00.500Z", "DSP", "Day26 Afternoon"),
+            makeEv("2026-11-26T14:30:45.900Z", "Deck", "Day26 Afternoon 2"),
+            makeEv("2026-11-27T08:00:00.000Z", "Render", "Day27 Morning"),
+            makeEv("2026-11-27T23:59:59.999Z", "Deck", "Day27 EndOfDay"),
+            makeEv("2026-11-28T01:00:00.000Z", "Session", "Day28 Early"),
+        };
+        QVERIFY(seedRepo.insertBatch(rows));
+        seedRepo.close();
+    }
+
+    LogService service;
+    QVERIFY(service.start(dbPath));
+    QCOMPARE(service.totalEventCount(), qint64(6));
+
+    // 1. Single date filter (YYYY-MM-DD -> full day 00:00:00.000Z .. 23:59:59.999Z)
+    {
+        QVariantMap f;
+        f["fromUtc"] = QStringLiteral("2026-11-27");
+        f["toUtc"] = QStringLiteral("2026-11-27");
+        const QVariantList res = service.fetchLogs(f);
+        QCOMPARE(res.size(), 2);
+    }
+
+    // 2. Minute-precision date-time filter with slash separator and space
+    {
+        QVariantMap f;
+        f["fromUtc"] = QStringLiteral("2026/11/26 14:30");
+        f["toUtc"] = QStringLiteral("2026/11/26 14:30");
+        const QVariantList res = service.fetchLogs(f);
+        QCOMPARE(res.size(), 2);
+    }
+
+    // 3. Open-ended range (fromUtc only)
+    {
+        QVariantMap f;
+        f["fromUtc"] = QStringLiteral("2026-11-27 00:00:00");
+        const QVariantList res = service.fetchLogs(f);
+        QCOMPARE(res.size(), 3);
+    }
+
+    // 4. Range + Category + Row Limit -> Displayed export vs All Stored export
+    QVariantMap displayedFilter;
+    displayedFilter["category"] = QStringLiteral("Deck");
+    displayedFilter["fromUtc"] = QStringLiteral("2026-11-25");
+    displayedFilter["toUtc"] = QStringLiteral("2026-11-27");
+    displayedFilter["limit"] = 2;
+
+    const QVariantList displayedRows = service.fetchLogs(displayedFilter);
+    QCOMPARE(displayedRows.size(), 2); // latest 2 Deck events in range: Day27 EndOfDay & Day26 Afternoon 2
+
+    const QString allPath = m_tempDir.path() + "/export_all_scope.jsonl";
+    const QString dispPath = m_tempDir.path() + "/export_displayed_scope.jsonl";
+
+    QVERIFY(service.exportToJsonl(allPath));
+    QVERIFY(service.exportFilteredToJsonl(dispPath, displayedFilter));
+
+    {
+        QFile fAll(allPath);
+        QVERIFY(fAll.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = fAll.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        QCOMPARE(lines.size(), 6);
+    }
+    {
+        QFile fDisp(dispPath);
+        QVERIFY(fDisp.open(QIODevice::ReadOnly | QIODevice::Text));
+        QList<QByteArray> lines = fDisp.readAll().split('\n');
+        lines.removeAll(QByteArray());
+        QCOMPARE(lines.size(), 2);
+        QCOMPARE(QJsonDocument::fromJson(lines[0]).object()["message"].toString(), QString("Day26 Afternoon 2"));
+        QCOMPARE(QJsonDocument::fromJson(lines[1]).object()["message"].toString(), QString("Day27 EndOfDay"));
+    }
+
+    service.stop();
 }
 
 void TestLogService::cleanupTestCase()

@@ -250,7 +250,14 @@ bool LogService::exportJsonl(const QString& filePath, const LogFilter& filter) {
 
 int64_t LogService::countEvents() {
     if (!m_queryRepo) return 0;
+    if (m_running.load(std::memory_order_relaxed) && m_queue.size() > 0) {
+        flush();
+    }
     return m_queryRepo->countEvents();
+}
+
+qint64 LogService::totalEventCount() {
+    return static_cast<qint64>(countEvents());
 }
 
 int64_t LogService::countOperations() {
