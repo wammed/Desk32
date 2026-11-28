@@ -2619,6 +2619,31 @@ PRESERVE</source>
         <translation>マスターチェーン DSP を有効化</translation>
     </message>
     <message>
+        <location filename="../qml/RenderPanel.qml" line="266"/>
+        <source>Render DSP: DISABLED (Master Chain DSP unchecked)</source>
+        <translation>Render DSP: 無効（マスターチェーン DSP オフ）</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="268"/>
+        <source>Render DSP: BYPASSED (GLOBAL BYPASS is ON)</source>
+        <translation>Render DSP: バイパス中（GLOBAL BYPASS が ON です）</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="270"/>
+        <source>Render DSP: SYNC OFF (Enable &apos;Sync Master DSP → Render&apos; in Settings)</source>
+        <translation>Render DSP: 同期オフ（設定で「マスター DSP → Render 同期」を有効にしてください）</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="272"/>
+        <source>Active Render DSP: %1</source>
+        <translation>Render 有効 DSP: %1</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="273"/>
+        <source>Active Render DSP: NONE (All Master DSP nodes OFF — dry output)</source>
+        <translation>Render 有効 DSP: なし（全マスター DSP ノード OFF — 原音出力）</translation>
+    </message>
+    <message>
         <location filename="../qml/RenderPanel.qml" line="252"/>
         <source>Output Workspace: %1</source>
         <translation>出力ワークスペース: %1</translation>

@@ -26,6 +26,25 @@ Rectangle {
 
     property string albumFolder: ""
     property string auditionDeck: "B"
+    property int renderDspSummaryTick: 0
+
+    readonly property var renderDspSummary: {
+        var _t = renderDspSummaryTick
+        return EngineController.getRenderDspSummary()
+    }
+
+    Connections {
+        target: EngineController
+        function onPeqParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onGeqParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onFilterParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onCompressorParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onLimiterParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onReverbParametersChanged() { renderRoot.renderDspSummaryTick++ }
+        function onGlobalDspBypassChanged() { renderRoot.renderDspSummaryTick++ }
+        function onDspPresetStateChanged() { renderRoot.renderDspSummaryTick++ }
+        function onRenderStateChanged() { renderRoot.renderDspSummaryTick++ }
+    }
 
     readonly property var bitDepthLabels: [qsTr("16-bit PCM"), qsTr("24-bit PCM"), qsTr("32-bit IEEE Float")]
     readonly property var rateValues: [44100, 48000, 88200, 96000, 176400, 192000]
@@ -225,6 +244,42 @@ Rectangle {
                                     id: masterDspCheck
                                     text: qsTr("Enable Master Chain DSP")
                                     checked: true
+                                }
+                            }
+
+                            // Active Render DSP Status Strip (shows which Master DSPs will be applied on Render)
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 30
+                                height: 30
+                                radius: 4
+                                readonly property var summary: renderRoot.renderDspSummary
+                                readonly property bool dspOn: masterDspCheck.checked
+                                readonly property bool warnState: dspOn && summary && (summary.globalBypass || !summary.syncEnabled)
+                                readonly property bool hasActive: dspOn && !warnState && summary && summary.activeCount > 0
+                                color: warnState ? "#2a2410" : (hasActive ? "#0b1e26" : "#0c1016")
+                                border.color: warnState ? "#FFB300" : (hasActive ? "#00E5FF60" : "#25303d")
+                                Label {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 10
+                                    verticalAlignment: Text.AlignVCenter
+                                    elide: Text.ElideRight
+                                    font.family: "Monospace"
+                                    font.pixelSize: 10
+                                    font.bold: true
+                                    color: parent.warnState ? "#FFD54F" : (parent.hasActive ? "#5BE7FF" : "#7A8998")
+                                    text: {
+                                        if (!parent.dspOn)
+                                            return qsTr("Render DSP: DISABLED (Master Chain DSP unchecked)")
+                                        if (parent.summary && parent.summary.globalBypass)
+                                            return qsTr("Render DSP: BYPASSED (GLOBAL BYPASS is ON)")
+                                        if (parent.summary && !parent.summary.syncEnabled)
+                                            return qsTr("Render DSP: SYNC OFF (Enable 'Sync Master DSP → Render' in Settings)")
+                                        if (parent.summary && parent.summary.activeCount > 0)
+                                            return qsTr("Active Render DSP: %1").arg(parent.summary.activeNodes.join("  •  "))
+                                        return qsTr("Active Render DSP: NONE (All Master DSP nodes OFF — dry output)")
+                                    }
                                 }
                             }
 

@@ -23,6 +23,7 @@
 #include "core/log/LogService.hpp"
 #include "core/log/LogErrorCodes.hpp"
 #include "engine/workspace/WorkspaceManager.hpp"
+#include "engine/preset/PresetManager.hpp"
 #include <sys/stat.h>
 #include <sys/xattr.h>
 #include <QCryptographicHash>
@@ -269,6 +270,9 @@ private slots:
 
     // 31. Phase 4 Addendum: All 7 DSP in/out trims & PEQ Preamp sync to RenderEngine & WAV output verification
     void testDspTrimsAndPeqPreampRenderSync();
+
+    // 32. Full Render DSP Audit: HPF Vocal Cut (60/120/1kHz RMS), LPF, Reverb wet preservation, Global Bypass, Session 18dB/Decay round-trip
+    void testAllSevenDspRenderRmsAndStateIntegrity();
 
 private:
     struct CleanupEvaluation {
@@ -2756,6 +2760,243 @@ void TestPhase4ExportRender::testDspTrimsAndPeqPreampRenderSync()
     ctrl.applyPeqPreset("Monitor Flat");
     ctrl.setDspNodeBypass("PEQ", true);
     ctrl.stop("A");
+}
+
+void TestPhase4ExportRender::testAllSevenDspRenderRmsAndStateIntegrity()
+{
+    QTemporaryDir tmp;
+    QVERIFY(tmp.isValid());
+    const QString wsDir = tmp.filePath("ws_render_audit");
+    QDir().mkpath(wsDir);
+    QString wsErr;
+    auto& wsMgr = desk32::engine::workspace::WorkspaceManager::instance();
+    QVERIFY2(wsMgr.registerAndOpenWorkspace(wsDir, wsErr), qPrintable(wsErr));
+
+    EngineController& ctrl = EngineController::instance();
+    RenderEngine& engine = RenderEngine::instance();
+    QVERIFY(ctrl.initialize(true));
+    desk32::engine::preset::PresetManager::instance().setCustomRootPath(tmp.filePath("presets_audit"));
+
+    auto writeSineWav = [&](const QString& filePath, double freqHz, double amp, uint32_t frames = 24000) {
+        QFile wf(filePath);
+        QVERIFY(wf.open(QIODevice::WriteOnly));
+        const uint32_t dataSz = frames * 2 * sizeof(float);
+        const uint32_t riffSz = 36 + dataSz;
+        const uint16_t fmtTag = 3;
+        const uint16_t ch = 2;
+        const uint32_t sr = 48000;
+        const uint32_t byteRate = sr * 8;
+        const uint16_t align = 8;
+        const uint16_t bps = 32;
+        QByteArray hdr(44, 0);
+        std::memcpy(hdr.data() + 0, "RIFF", 4);
+        std::memcpy(hdr.data() + 4, &riffSz, 4);
+        std::memcpy(hdr.data() + 8, "WAVEfmt ", 8);
+        uint32_t sc1 = 16;
+        std::memcpy(hdr.data() + 16, &sc1, 4);
+        std::memcpy(hdr.data() + 20, &fmtTag, 2);
+        std::memcpy(hdr.data() + 22, &ch, 2);
+        std::memcpy(hdr.data() + 24, &sr, 4);
+        std::memcpy(hdr.data() + 28, &byteRate, 4);
+        std::memcpy(hdr.data() + 32, &align, 2);
+        std::memcpy(hdr.data() + 34, &bps, 2);
+        std::memcpy(hdr.data() + 36, "data", 4);
+        std::memcpy(hdr.data() + 40, &dataSz, 4);
+        wf.write(hdr);
+        std::vector<float> s(frames * 2);
+        for (uint32_t i = 0; i < frames; ++i) {
+            const float v = static_cast<float>(amp * std::sin(2.0 * 3.14159265358979323846 * freqHz * i / 48000.0));
+            s[i * 2] = v;
+            s[i * 2 + 1] = v;
+        }
+        wf.write(reinterpret_cast<const char*>(s.data()), static_cast<qsizetype>(dataSz));
+        wf.close();
+    };
+
+    auto renderAndMeasureRmsDb = [&](const QString& wavPath, size_t skipFrames = 4800) -> double {
+        if (!ctrl.loadTrack("A", wavPath)) return -999.0;
+        QSignalSpy doneSpy(&engine, &RenderEngine::renderTaskFinished);
+        const QString tid = ctrl.startTrackRender("A", 2 /*Float32*/, 0, 48000.0, false, true);
+        if (tid.isEmpty() || !doneSpy.wait(10000)) return -999.0;
+        const QStringList files = ctrl.renderOutputFiles();
+        if (files.size() != 1) return -999.0;
+        FFmpegAudioDecoder dec;
+        if (!dec.open(files[0].toStdString())) return -999.0;
+        std::vector<double> rL(24000), rR(24000);
+        const size_t got = dec.readFrames(rL.data(), rR.data(), 24000);
+        ctrl.resetRenderStatus();
+        ctrl.stop("A");
+        double sum = 0.0;
+        size_t cnt = 0;
+        for (size_t i = std::min(skipFrames, got); i < got; ++i) {
+            sum += rL[i] * rL[i];
+            ++cnt;
+        }
+        return (cnt > 0) ? 10.0 * std::log10(std::max(1e-20, sum / static_cast<double>(cnt))) : -999.0;
+    };
+
+    const QString wav60 = wsDir + "/sine60.wav";
+    const QString wav120 = wsDir + "/sine120.wav";
+    const QString wav1k = wsDir + "/sine1k.wav";
+    const QString wav15k = wsDir + "/sine15k.wav";
+    writeSineWav(wav60, 60.0, 0.0625);
+    writeSineWav(wav120, 120.0, 0.0625);
+    writeSineWav(wav1k, 1000.0, 0.0625);
+    writeSineWav(wav15k, 15000.0, 0.0625);
+    wsMgr.refreshIndexAfterInternalWrite();
+
+    // 1. HPF "Vocal Cut" (120 Hz, 18 dB/oct, Q 0.80) via Per-DSP apply + HPF ON
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("hpf"), QStringLiteral("Vocal Cut")));
+    ctrl.setHpfNodeEnabled(true);
+    {
+        const QVariantMap summary = ctrl.getRenderDspSummary();
+        QCOMPARE(summary["activeCount"].toInt(), 1);
+        QVERIFY(summary["activeNodes"].toStringList().first().contains(QStringLiteral("HPF 120Hz/18dB")));
+    }
+    const double rms60 = renderAndMeasureRmsDb(wav60);
+    const double rms120 = renderAndMeasureRmsDb(wav120);
+    const double rms1k = renderAndMeasureRmsDb(wav1k);
+    QVERIFY2(rms60 > -900.0 && rms120 > -900.0 && rms1k > -900.0,
+             qPrintable(QString("Render failed: rms60=%1 rms120=%2 rms1k=%3").arg(rms60).arg(rms120).arg(rms1k)));
+    const double rel60 = rms60 - rms1k;
+    const double rel120 = rms120 - rms1k;
+    QVERIFY2(rel60 < -14.0 && rel60 > -22.0,
+             qPrintable(QString("HPF Vocal Cut 60Hz rel 1kHz expected -14..-22 dB, got %1 dB").arg(rel60)));
+    QVERIFY2(rel120 < -2.5 && rel120 > -6.5,
+             qPrintable(QString("HPF Vocal Cut 120Hz rel 1kHz expected -2.5..-6.5 dB, got %1 dB").arg(rel120)));
+
+    // 2. Save Global preset with Vocal Cut, reset to Unity, reload Global, verify identical Render attenuation
+    QVERIFY(ctrl.saveGlobalDspPreset(QStringLiteral("VocalCutGlobalTest"), true));
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("VocalCutGlobalTest")));
+    const double rms60Global = renderAndMeasureRmsDb(wav60);
+    const double rms1kGlobal = renderAndMeasureRmsDb(wav1k);
+    QVERIFY(rms60Global > -900.0 && rms1kGlobal > -900.0);
+    QVERIFY2(std::abs((rms60Global - rms1kGlobal) - rel60) < 0.2,
+             qPrintable(QString("Global VocalCut rel60 mismatch: %1 vs %2").arg(rms60Global - rms1kGlobal).arg(rel60)));
+
+    // 3. Global Bypass ON must bypass offline Render as well
+    ctrl.setGlobalDspBypass(true);
+    QCOMPARE(ctrl.getRenderDspSummary()["globalBypass"].toBool(), true);
+    const double rms60Byp = renderAndMeasureRmsDb(wav60);
+    const double rms1kByp = renderAndMeasureRmsDb(wav1k);
+    QVERIFY(rms60Byp > -900.0 && rms1kByp > -900.0);
+    QVERIFY2(std::abs(rms60Byp - rms1kByp) < 0.1,
+             qPrintable(QString("Global Bypass render should be flat, got diff %1 dB").arg(rms60Byp - rms1kByp)));
+    ctrl.setGlobalDspBypass(false);
+
+    // 4. LPF "Night" (7.5 kHz, 12 dB/oct)
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("lpf"), QStringLiteral("Night")));
+    ctrl.setLpfNodeEnabled(true);
+    const double rms15k = renderAndMeasureRmsDb(wav15k);
+    const double rms1kLpf = renderAndMeasureRmsDb(wav1k);
+    QVERIFY(rms15k > -900.0 && rms1kLpf > -900.0);
+    QVERIFY2((rms15k - rms1kLpf) < -12.0,
+             qPrintable(QString("LPF Night 15kHz rel 1kHz expected < -12 dB, got %1 dB").arg(rms15k - rms1kLpf)));
+
+    // 4b. PEQ (+6 dB @ 1 kHz, Preamp -3 dB -> net +3 dB) & GEQ (+6 dB @ 1 kHz)
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    const double rms1kDry = renderAndMeasureRmsDb(wav1k);
+    QVERIFY(rms1kDry > -900.0);
+    ctrl.setPeqBand(false, 0, 1000.0, 6.0, 1.0, 0, true);
+    ctrl.setPeqBand(true, 0, 1000.0, 6.0, 1.0, 0, true);
+    ctrl.setPeqPreampDb(-3.0);
+    ctrl.setDspNodeBypass(QStringLiteral("PEQ"), false);
+    const double rms1kPeq = renderAndMeasureRmsDb(wav1k);
+    QVERIFY2(std::abs((rms1kPeq - rms1kDry) - 3.0) < 0.5,
+             qPrintable(QString("PEQ +6dB -3dB preamp expected +3.0 dB, got %1 dB").arg(rms1kPeq - rms1kDry)));
+
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    ctrl.setGeqBandGain(18, 6.0); // 1 kHz band (ISO index 18)
+    ctrl.setDspNodeBypass(QStringLiteral("GEQ"), false);
+    const double rms1kGeq = renderAndMeasureRmsDb(wav1k);
+    QVERIFY2(std::abs((rms1kGeq - rms1kDry) - 6.0) < 1.0,
+             qPrintable(QString("GEQ +6dB @ 1kHz expected ~+6 dB, got %1 dB").arg(rms1kGeq - rms1kDry)));
+
+    // 4c. Compressor & Limiter on 0.5 amplitude (-9 dBFS RMS) 1 kHz tone
+    const QString wav1kLoud = wsDir + "/sine1k_loud.wav";
+    writeSineWav(wav1kLoud, 1000.0, 0.5);
+    wsMgr.refreshIndexAfterInternalWrite();
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    const double rmsLoudDry = renderAndMeasureRmsDb(wav1kLoud);
+    ctrl.setCompressorParams(-24.0, 4.0, 5.0, 50.0, 0.0, 0.0);
+    ctrl.setDspNodeBypass(QStringLiteral("Compressor"), false);
+    const double rmsLoudComp = renderAndMeasureRmsDb(wav1kLoud);
+    QVERIFY2((rmsLoudComp - rmsLoudDry) < -8.0,
+             qPrintable(QString("Compressor expected > 8 dB GR, got %1 dB").arg(rmsLoudComp - rmsLoudDry)));
+
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    ctrl.setLimiterParams(-12.0, 50.0, 1.0);
+    ctrl.setDspNodeBypass(QStringLiteral("Limiter"), false);
+    const double rmsLoudLim = renderAndMeasureRmsDb(wav1kLoud);
+    QVERIFY2((rmsLoudLim - rmsLoudDry) < -4.0,
+             qPrintable(QString("Limiter -12 dB expected > 4 dB attenuation, got %1 dB").arg(rmsLoudLim - rmsLoudDry)));
+
+    // 4d. Reverb Hall end-to-end Render tail energy (100 ms burst + 400 ms silence)
+    const QString wavBurst = wsDir + "/burst1k.wav";
+    {
+        QFile wf(wavBurst);
+        QVERIFY(wf.open(QIODevice::WriteOnly));
+        const uint32_t frames = 24000;
+        const uint32_t dataSz = frames * 2 * sizeof(float);
+        const uint32_t riffSz = 36 + dataSz;
+        const uint16_t fmtTag = 3, ch = 2, align = 8, bps = 32;
+        const uint32_t sr = 48000, byteRate = sr * 8, sc1 = 16;
+        QByteArray hdr(44, 0);
+        std::memcpy(hdr.data() + 0, "RIFF", 4);
+        std::memcpy(hdr.data() + 4, &riffSz, 4);
+        std::memcpy(hdr.data() + 8, "WAVEfmt ", 8);
+        std::memcpy(hdr.data() + 16, &sc1, 4);
+        std::memcpy(hdr.data() + 20, &fmtTag, 2);
+        std::memcpy(hdr.data() + 22, &ch, 2);
+        std::memcpy(hdr.data() + 24, &sr, 4);
+        std::memcpy(hdr.data() + 28, &byteRate, 4);
+        std::memcpy(hdr.data() + 32, &align, 2);
+        std::memcpy(hdr.data() + 34, &bps, 2);
+        std::memcpy(hdr.data() + 36, "data", 4);
+        std::memcpy(hdr.data() + 40, &dataSz, 4);
+        wf.write(hdr);
+        std::vector<float> s(frames * 2, 0.0f);
+        for (uint32_t i = 0; i < 4800; ++i) {
+            const float v = static_cast<float>(0.3 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * i / 48000.0));
+            s[i * 2] = v;
+            s[i * 2 + 1] = v;
+        }
+        wf.write(reinterpret_cast<const char*>(s.data()), static_cast<qsizetype>(dataSz));
+        wf.close();
+    }
+    wsMgr.refreshIndexAfterInternalWrite();
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    const double tailDry = renderAndMeasureRmsDb(wavBurst, 12000);
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("reverb"), QStringLiteral("Hall")));
+    ctrl.setDspNodeBypass(QStringLiteral("Reverb"), false);
+    const double tailWet = renderAndMeasureRmsDb(wavBurst, 12000);
+    QVERIFY2(tailDry < -120.0 && tailWet > -55.0,
+             qPrintable(QString("Reverb Hall tail expected dry<-120 wet>-55, got dry=%1 wet=%2").arg(tailDry).arg(tailWet)));
+
+    // 5. Reverb wetLevel must NOT be zeroed by getReverbParams() while bypassed, and session state preserves 18dB slope + decay
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("reverb"), QStringLiteral("Hall")));
+    QVERIFY(ctrl.isDspNodeBypassed(QStringLiteral("Reverb")));
+    QVERIFY2(std::abs(ctrl.getReverbParams().value(QStringLiteral("wetLevel")).toDouble() - 0.20) < 0.01,
+             "getReverbParams().wetLevel must report configured m_uiReverb wetLevel (0.20) even while bypassed");
+
+    // Verify 18 dB/oct slope & explicit Reverb decay survive session save/restore
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("hpf"), QStringLiteral("Vocal Cut")));
+    ctrl.setHpfNodeEnabled(true);
+    ctrl.setDspNodeBypass(QStringLiteral("Reverb"), false);
+    const QString sessPath = tmp.filePath("session_audit.json");
+    QVERIFY(ctrl.saveSessionState(sessPath));
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    QVERIFY(ctrl.restoreSessionState(sessPath));
+    QCOMPARE(ctrl.getFilterParams().value(QStringLiteral("hpfSlopeDbOct")).toInt(), 18);
+    QVERIFY(std::abs(ctrl.getReverbParams().value(QStringLiteral("decaySeconds")).toDouble() - 2.5) < 0.05);
+    QVERIFY(std::abs(ctrl.getReverbParams().value(QStringLiteral("wetLevel")).toDouble() - 0.20) < 0.01);
+
+    QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
+    desk32::engine::preset::PresetManager::instance().setCustomRootPath(QString());
 }
 
 QTEST_GUILESS_MAIN(TestPhase4ExportRender)

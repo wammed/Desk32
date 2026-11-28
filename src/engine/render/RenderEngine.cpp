@@ -1170,8 +1170,10 @@ bool RenderEngine::renderSingleFile(const QString& inputFilePath,
         }
     }
 
-    // RenderChain setup: configured strictly from job's immutable snapshot (P0-03)
-    RenderChain chain;
+    // RenderChain setup: heap-allocated (~1.67 MB due to reverb delay lines) and configured
+    // strictly from job's immutable snapshot (P0-03)
+    auto chainPtr = std::make_unique<RenderChain>();
+    RenderChain& chain = *chainPtr;
     if (settings.enableMasterDsp) {
         chain.applySnapshot(dspSnapshot, targetRate);
         if (!settings.includePeq) chain.peq().setEnabled(false);

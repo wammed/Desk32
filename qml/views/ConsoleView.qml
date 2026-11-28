@@ -3258,14 +3258,28 @@ Item {
                                     }
                                     Item { Layout.fillWidth: true }
                                     ConsoleButton {
-                                        text: consoleRoot.dspFilterBypassed ? qsTr("OFF") : qsTr("ON")
+                                        readonly property bool filterAnyActive: !consoleRoot.dspFilterBypassed && (consoleRoot.dspHpfEnabled || consoleRoot.dspLpfEnabled)
+                                        text: filterAnyActive ? qsTr("ON") : qsTr("OFF")
                                         implicitWidth: 68; implicitHeight: 26; fontSize: 10
-                                        showLed: true; ledColor: consoleRoot.dspFilterBypassed ? "#4A5462" : "#00E676"
+                                        showLed: true; ledColor: filterAnyActive ? "#00E676" : "#4A5462"
                                         accentColor: "#48D8FF"
-                                        highlighted: !consoleRoot.dspFilterBypassed
+                                        highlighted: filterAnyActive
                                         enabled: !consoleRoot.isDirect
                                         toolTipText: qsTr("Toggle HPF/LPF Module ON / OFF")
-                                        onClicked: EngineController.setDspNodeBypass("Filter", !consoleRoot.dspFilterBypassed)
+                                        onClicked: {
+                                            if (filterAnyActive) {
+                                                EngineController.setDspNodeBypass("Filter", true)
+                                            } else if (consoleRoot.dspHpfEnabled || consoleRoot.dspLpfEnabled) {
+                                                EngineController.setDspNodeBypass("Filter", false)
+                                            } else {
+                                                var ind = EngineController.dspPresetIndicators
+                                                if (ind && ind["lpf"] && !ind["hpf"]) {
+                                                    EngineController.setLpfNodeEnabled(true)
+                                                } else {
+                                                    EngineController.setHpfNodeEnabled(true)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -3312,9 +3326,12 @@ Item {
                                             ctx.stroke()
 
                                             var pts = EngineController.getFilterCurve(96)
+                                            var fltByp = consoleRoot.dspFilterBypassed || consoleRoot.isDirect
                                             if (pts && pts.length > 1) {
-                                                ctx.strokeStyle = "#48D8FF"
-                                                ctx.lineWidth = 2.0
+                                                ctx.save()
+                                                if (fltByp && ctx.setLineDash) ctx.setLineDash([4, 3])
+                                                ctx.strokeStyle = fltByp ? "rgba(72, 216, 255, 0.45)" : "#48D8FF"
+                                                ctx.lineWidth = fltByp ? 1.5 : 2.0
                                                 ctx.beginPath()
                                                 for (var i = 0; i < pts.length; ++i) {
                                                     var x = (i / (pts.length - 1)) * width
@@ -3324,6 +3341,7 @@ Item {
                                                     else ctx.lineTo(x, y)
                                                 }
                                                 ctx.stroke()
+                                                ctx.restore()
                                             }
                                         }
                                     }
@@ -3372,13 +3390,14 @@ Item {
                                                 }
                                             }
                                             ConsoleButton {
+                                                readonly property bool hpfEffectiveOn: !consoleRoot.dspFilterBypassed && consoleRoot.dspHpfEnabled
                                                 Layout.fillWidth: true
                                                 implicitHeight: 30
-                                                text: consoleRoot.dspHpfEnabled ? qsTr("ON") : qsTr("OFF")
+                                                text: hpfEffectiveOn ? qsTr("ON") : qsTr("OFF")
                                                 fontSize: 9
-                                                highlighted: consoleRoot.dspHpfEnabled
+                                                highlighted: hpfEffectiveOn
                                                 enabled: !consoleRoot.isDirect
-                                                onClicked: EngineController.setHpfNodeEnabled(!consoleRoot.dspHpfEnabled)
+                                                onClicked: EngineController.setHpfNodeEnabled(!hpfEffectiveOn)
                                             }
                                             ConsoleButton {
                                                 Layout.fillWidth: true
@@ -3465,13 +3484,14 @@ Item {
                                                 }
                                             }
                                             ConsoleButton {
+                                                readonly property bool lpfEffectiveOn: !consoleRoot.dspFilterBypassed && consoleRoot.dspLpfEnabled
                                                 Layout.fillWidth: true
                                                 implicitHeight: 30
-                                                text: consoleRoot.dspLpfEnabled ? qsTr("ON") : qsTr("OFF")
+                                                text: lpfEffectiveOn ? qsTr("ON") : qsTr("OFF")
                                                 fontSize: 9
-                                                highlighted: consoleRoot.dspLpfEnabled
+                                                highlighted: lpfEffectiveOn
                                                 enabled: !consoleRoot.isDirect
-                                                onClicked: EngineController.setLpfNodeEnabled(!consoleRoot.dspLpfEnabled)
+                                                onClicked: EngineController.setLpfNodeEnabled(!lpfEffectiveOn)
                                             }
                                             ConsoleButton {
                                                 Layout.fillWidth: true

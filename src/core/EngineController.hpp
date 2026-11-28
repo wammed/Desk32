@@ -476,6 +476,7 @@ public:
     [[nodiscard]] Q_INVOKABLE bool isRenderNodeEnabled(const QString& nodeName) const;
     Q_INVOKABLE void setSyncMasterDspToRender(bool sync);
     [[nodiscard]] bool syncMasterDspToRenderEnabled() const noexcept;
+    Q_INVOKABLE QVariantMap getRenderDspSummary() const;
     Q_INVOKABLE QVariantMap verifyRenderTapConsistency();
     Q_INVOKABLE QString startTrackRender(const QString& deckId, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);
     Q_INVOKABLE QString startAlbumRender(const QString& folderPath, int bitDepth = 1, int rateMode = 0, double customRate = 48000.0, bool applyDither = true, bool enableDsp = true);

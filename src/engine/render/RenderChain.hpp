@@ -97,7 +97,15 @@ struct RenderDspSnapshot {
 /// - Completely decoupled from real-time live playback state
 class RenderChain {
 public:
-    RenderChain() = default;
+    RenderChain() {
+        m_peq.setEnabled(false);
+        m_geq.setEnabled(false);
+        m_filter.setHpfEnabled(false);
+        m_filter.setLpfEnabled(false);
+        m_comp.setEnabled(false);
+        m_limiter.setEnabled(false);
+        m_reverb.setEnabled(false);
+    }
     ~RenderChain() = default;
 
     RenderChain(const RenderChain&) = delete;
@@ -109,12 +117,21 @@ public:
 
     void configure(double sampleRate) {
         m_sampleRate = sampleRate;
+        const bool compEn = m_comp.isEnabled();
+        const bool limEn = m_limiter.isEnabled();
+        const bool revEn = m_reverb.isEnabled();
         m_peq.configure(sampleRate);
         m_geq.configure(sampleRate);
         m_filter.configure(sampleRate);
-        m_comp.configure(sampleRate);
-        m_limiter.configure(sampleRate);
-        m_reverb.configure(sampleRate);
+        m_comp.configure(sampleRate, m_comp.thresholdDb(), m_comp.ratio(),
+                         m_comp.attackMs(), m_comp.releaseMs(),
+                         m_comp.makeupGainDb(), m_comp.kneeDb(), compEn);
+        m_limiter.configure(sampleRate, m_limiter.ceilingDb(),
+                            m_limiter.releaseMs(), m_limiter.lookaheadMs(), limEn);
+        m_reverb.configure(sampleRate, m_reverb.roomSize(), m_reverb.damping(),
+                           m_reverb.wetLevel(), m_reverb.predelayMs(),
+                           m_reverb.isTailPreserving(), revEn,
+                           m_reverb.usesExplicitDecay() ? m_reverb.decaySeconds() : -1.0);
     }
 
     void reset() {

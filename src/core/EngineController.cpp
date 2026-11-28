@@ -501,6 +501,9 @@ bool EngineController::initialize(bool offlineMode) {
   m_gainSmootherL.reset(m_masterGainL.load(std::memory_order_relaxed));
   m_gainSmootherR.reset(m_masterGainR.load(std::memory_order_relaxed));
 
+  // Synchronize initial Master DSP state (all bypassed) into offline RenderEngine template
+  syncMasterDspToRenderEngine();
+
   // 5. Initialize Active Audio Backend (PipeWire default or saved JACK)
   const bool hasSettings = SettingsManager::instance().isLoaded();
   QString initBackend = QStringLiteral("PipeWire");
@@ -3019,6 +3022,9 @@ void EngineController::setGlobalDspBypass(bool bypass) {
 
   // Section 10.2.3 & 5.9: Global DSP Bypass is temporary and does NOT destroy
   // individual DSP node ON/OFF states!
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
   emit globalDspBypassChanged(bypass);
   emit diagnosticsChanged();
   emit peqParametersChanged();
@@ -4683,8 +4689,7 @@ QVariantMap EngineController::getReverbParams() {
   map["roomSize"] = m_uiReverb.roomSize();
   map["damping"] = m_uiReverb.damping();
   map["decaySeconds"] = m_uiReverb.decaySeconds();
-  map["wetLevel"] = m_pipeline ? m_pipeline->currentTelemetry().reverbWetLevel
-                               : m_uiReverb.wetLevel();
+  map["wetLevel"] = m_uiReverb.wetLevel();
   map["predelayMs"] = m_uiReverb.predelayMs();
   map["tailPreserving"] = m_uiReverb.isTailPreserving();
   map["enabled"] = m_uiReverb.isEnabled();
@@ -6445,6 +6450,10 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
   }
   if (obj.contains("reverb")) {
     const QJsonObject rev = obj["reverb"].toObject();
+    const double decaySec =
+        rev.contains("decay_seconds")
+            ? rev["decay_seconds"].toDouble(-1.0)
+            : (rev.contains("decay_s") ? rev["decay_s"].toDouble(-1.0) : -1.0);
     setReverbParams(
         rev.contains("room_size") ? rev["room_size"].toDouble(0.7)
                                   : rev["roomSize"].toDouble(0.7),
@@ -6455,7 +6464,8 @@ bool EngineController::applyMasterDspJson(const QJsonObject &obj) {
         rev.contains("predelay_ms") ? rev["predelay_ms"].toDouble(0.0)
                                     : rev["predelayMs"].toDouble(0.0),
         rev.contains("tail_preserving") ? rev["tail_preserving"].toBool(true)
-                                        : rev["tailPreserving"].toBool(true));
+                                        : rev["tailPreserving"].toBool(true),
+        decaySec);
     if (rev.contains("enabled")) {
       setDspNodeBypass("Reverb", !rev["enabled"].toBool());
     } else if (rev.contains("bypassed")) {
@@ -6745,17 +6755,11 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
       flt["enabled"] = !m_filterBypassed.load(std::memory_order_relaxed);
       flt["hpf_enabled"] = m_uiFilter.isHpfEnabled();
       flt["hpf_frequency"] = m_uiFilter.hpfFrequency();
-      flt["hpf_slope"] =
-          m_uiFilter.hpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB
-              ? 1
-              : 0;
+      flt["hpf_slope"] = static_cast<int>(m_uiFilter.hpfSlope());
       flt["hpf_q"] = m_uiFilter.hpfQ();
       flt["lpf_enabled"] = m_uiFilter.isLpfEnabled();
       flt["lpf_frequency"] = m_uiFilter.lpfFrequency();
-      flt["lpf_slope"] =
-          m_uiFilter.lpfSlope() == HighLowPassFilter::FilterSlope::Slope24dB
-              ? 1
-              : 0;
+      flt["lpf_slope"] = static_cast<int>(m_uiFilter.lpfSlope());
       flt["lpf_q"] = m_uiFilter.lpfQ();
       obj["filter"] = flt;
     }
@@ -6767,6 +6771,9 @@ EngineController::captureCurrentStateAsPreset(const QString &category) {
       rev["wet_level"] = m_uiReverb.wetLevel();
       rev["predelay_ms"] = m_uiReverb.predelayMs();
       rev["tail_preserving"] = m_uiReverb.isTailPreserving();
+      if (m_uiReverb.usesExplicitDecay()) {
+        rev["decay_seconds"] = m_uiReverb.decaySeconds();
+      }
       obj["reverb"] = rev;
     }
   }
@@ -6839,6 +6846,52 @@ bool EngineController::syncMasterDspToRenderEnabled() const noexcept {
   return m_syncMasterDspToRender.load(std::memory_order_relaxed);
 }
 
+QVariantMap EngineController::getRenderDspSummary() const {
+  const bool syncOn = m_syncMasterDspToRender.load(std::memory_order_relaxed);
+  const bool globalByp = m_globalDspBypass.load(std::memory_order_relaxed);
+  QStringList activeNodes;
+
+  const bool peqOn = !globalByp && m_renderIncludePeq.load(std::memory_order_relaxed) &&
+                     !m_peqBypassed.load(std::memory_order_relaxed) &&
+                     !m_peqGlobalBypass.load(std::memory_order_relaxed);
+  const bool geqOn = !globalByp && m_renderIncludeGeq.load(std::memory_order_relaxed) &&
+                     !m_geqBypassed.load(std::memory_order_relaxed) &&
+                     !m_geqGlobalBypass.load(std::memory_order_relaxed);
+  const bool fltOn = !globalByp && m_renderIncludeFilter.load(std::memory_order_relaxed) &&
+                     !m_filterBypassed.load(std::memory_order_relaxed);
+  const bool hpfOn = fltOn && m_uiFilter.isHpfEnabled();
+  const bool lpfOn = fltOn && m_uiFilter.isLpfEnabled();
+  const bool compOn = !globalByp && m_renderIncludeCompressor.load(std::memory_order_relaxed) &&
+                      !m_compBypassed.load(std::memory_order_relaxed);
+  const bool revOn = !globalByp && m_renderIncludeReverb.load(std::memory_order_relaxed) &&
+                     !m_reverbBypassed.load(std::memory_order_relaxed);
+  const bool limOn = !globalByp && m_renderIncludeLimiter.load(std::memory_order_relaxed) &&
+                     !m_limiterBypassed.load(std::memory_order_relaxed);
+
+  if (peqOn) activeNodes.append(QStringLiteral("PEQ"));
+  if (geqOn) activeNodes.append(QStringLiteral("GEQ"));
+  if (hpfOn) {
+    activeNodes.append(QString("HPF %1Hz/%2dB")
+                           .arg(qRound(m_uiFilter.hpfFrequency()))
+                           .arg(HighLowPassFilter::slopeToDbPerOct(m_uiFilter.hpfSlope())));
+  }
+  if (lpfOn) {
+    activeNodes.append(QString("LPF %1Hz/%2dB")
+                           .arg(qRound(m_uiFilter.lpfFrequency()))
+                           .arg(HighLowPassFilter::slopeToDbPerOct(m_uiFilter.lpfSlope())));
+  }
+  if (compOn) activeNodes.append(QStringLiteral("COMP"));
+  if (revOn) activeNodes.append(QStringLiteral("REV"));
+  if (limOn) activeNodes.append(QStringLiteral("LIM"));
+
+  QVariantMap out;
+  out["syncEnabled"] = syncOn;
+  out["globalBypass"] = globalByp;
+  out["activeNodes"] = activeNodes;
+  out["activeCount"] = activeNodes.size();
+  return out;
+}
+
 QVariantMap EngineController::verifyRenderTapConsistency() {
   syncMasterDspToRenderEngine();
   const double sr = graphSampleRate() > 0.0 ? graphSampleRate() : 48000.0;
@@ -6856,10 +6909,10 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
     auto lock = m_renderEngine.lockTemplateChain();
     snap = m_renderEngine.templateChain().createSnapshot();
   }
-  engine::render::RenderChain renderChain;
-  renderChain.applySnapshot(snap, sr);
+  auto renderChainPtr = std::make_unique<engine::render::RenderChain>();
+  renderChainPtr->applySnapshot(snap, sr);
   std::vector<double> rndL = srcL, rndR = srcR;
-  renderChain.process(rndL.data(), rndR.data(), N);
+  renderChainPtr->process(rndL.data(), rndR.data(), N);
 
   // 2. Real cloned AudioPipeline Master Chain (honoring Global Bypass, skipping
   // External Insert per §6.6)
@@ -7066,7 +7119,8 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
       liveChain->process(liveL.data(), liveR.data(), N);
     }
   } else {
-    engine::render::RenderChain mirrorChain;
+    auto mirrorChainPtr = std::make_unique<engine::render::RenderChain>();
+    auto &mirrorChain = *mirrorChainPtr;
     mirrorChain.configure(sr);
     mirrorChain.setEnabled(!m_globalDspBypass.load(std::memory_order_relaxed));
     mirrorChain.copyParametersFrom(m_uiPeq, m_uiGeq, m_uiFilter, m_uiComp,
@@ -7130,6 +7184,7 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
 void EngineController::syncMasterDspToRenderEngine() {
   auto lock = m_renderEngine.lockTemplateChain();
   auto &tc = m_renderEngine.templateChain();
+  tc.setEnabled(!m_globalDspBypass.load(std::memory_order_relaxed));
   tc.copyParametersFrom(m_uiPeq, m_uiGeq, m_uiFilter, m_uiComp, m_uiReverb,
                         m_uiLimiter);
 

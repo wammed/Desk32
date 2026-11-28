@@ -2551,6 +2551,31 @@ PRESERVE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
+        <location filename="../qml/RenderPanel.qml" line="266"/>
+        <source>Render DSP: DISABLED (Master Chain DSP unchecked)</source>
+        <translation>Render DSP: DISABLED (Master Chain DSP unchecked)</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="268"/>
+        <source>Render DSP: BYPASSED (GLOBAL BYPASS is ON)</source>
+        <translation>Render DSP: BYPASSED (GLOBAL BYPASS is ON)</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="270"/>
+        <source>Render DSP: SYNC OFF (Enable &apos;Sync Master DSP → Render&apos; in Settings)</source>
+        <translation>Render DSP: SYNC OFF (Enable &apos;Sync Master DSP → Render&apos; in Settings)</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="272"/>
+        <source>Active Render DSP: %1</source>
+        <translation>Active Render DSP: %1</translation>
+    </message>
+    <message>
+        <location filename="../qml/RenderPanel.qml" line="273"/>
+        <source>Active Render DSP: NONE (All Master DSP nodes OFF — dry output)</source>
+        <translation>Active Render DSP: NONE (All Master DSP nodes OFF — dry output)</translation>
+    </message>
+    <message>
         <location filename="../qml/RenderPanel.qml" line="252"/>
         <source>Output Workspace: %1</source>
         <translation type="unfinished"></translation>
