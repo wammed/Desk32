@@ -521,6 +521,11 @@ OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2889"/>
+        <source>PREAMP</source>
+        <translation>PREAMP</translation>
+    </message>
+    <message>
         <location filename="../qml/views/ConsoleView.qml" line="2922"/>
         <source>RIGHT CHANNEL</source>
         <translation type="unfinished"></translation>

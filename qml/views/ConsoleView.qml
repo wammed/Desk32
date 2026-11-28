@@ -271,6 +271,10 @@ Item {
             peqBandTypeIndex = b.type !== undefined ? b.type : 0
             peqBandEnabledState = !!b.enabled
         }
+        if (!peqPreampKnob.isDragging)
+            peqPreampKnob.value = consoleRoot.peqEditListening
+                                  ? EngineController.getListeningPreampDb()
+                                  : EngineController.getPeqPreampDb()
         if (!peqInTrimKnob.isDragging)
             peqInTrimKnob.value = consoleRoot.peqEditListening ? 0.0 : EngineController.getDspTrim("peq", false)
         if (!peqOutTrimKnob.isDragging)
@@ -2547,16 +2551,20 @@ Item {
                                 anchors.margins: 12
                                 spacing: 14
 
-                                // 1. Left Wide Mini Monitor + 2x3 Filter Type Buttons
+                                // 1. Left Landscape Mini Monitor + 2x3 Filter Type Buttons
                                 ColumnLayout {
                                     Layout.fillWidth: false
-                                    Layout.preferredWidth: 388
+                                    Layout.preferredWidth: 316
                                     Layout.fillHeight: true
-                                    spacing: 8
+                                    spacing: 10
+
+                                    Item { Layout.fillHeight: true }
 
                                     Rectangle {
                                         Layout.fillWidth: true
-                                        Layout.fillHeight: true
+                                        Layout.preferredHeight: 224
+                                        Layout.maximumHeight: 224
+                                        Layout.minimumHeight: 160
                                         radius: 4
                                         color: "#06090e"
                                         border.color: "#223442"
@@ -2687,9 +2695,11 @@ Item {
                                             }
                                         }
                                     }
+
+                                    Item { Layout.fillHeight: true }
                                 }
 
-                                // 2. Center-Right Column: Prominent SELECTED BAND INSPECTOR Header directly above 3 Large Knobs
+                                // 2. Center-Right Column: Prominent SELECTED BAND INSPECTOR Header directly above 4 Large Knobs
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
@@ -2820,11 +2830,27 @@ Item {
                                         }
                                     }
 
-                                    // 3 Large Knobs spread evenly across full width under SELECTED BAND INSPECTOR
+                                    // 4 Large Knobs spread evenly across full width under SELECTED BAND INSPECTOR
                                     RowLayout {
                                         Layout.fillWidth: true
                                         Layout.fillHeight: true
-                                        spacing: 16
+                                        spacing: 10
+
+                                        ConsoleKnob {
+                                            id: peqPreampKnob
+                                            Layout.fillWidth: true
+                                            Layout.alignment: Qt.AlignVCenter
+                                            labelText: qsTr("PREAMP")
+                                            minValue: -24.0; maxValue: 24.0; defaultValue: 0.0; logarithmic: false; bipolar: true
+                                            unitSuffix: " dB"; decimals: 1; knobDiameter: 94
+                                            arcColor: consoleRoot.peqEditListening ? "#4CE0B3" : "#33E3FF"
+                                            enabled: !consoleRoot.isDirect
+                                            onValueEdited: function(v) {
+                                                value = v
+                                                if (consoleRoot.peqEditListening) EngineController.setListeningPreampDb(v)
+                                                else EngineController.setPeqPreampDb(v)
+                                            }
+                                        }
 
                                         ConsoleKnob {
                                             id: peqFreqKnob

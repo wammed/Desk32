@@ -785,6 +785,14 @@ private:
                         break;
                     }
                 }
+            } else if (params.peqPreampModified) {
+                for (size_t i = 0; i < master->nodeCount(); ++i) {
+                    if (auto* peqNode = dynamic_cast<ParametricEqNode*>(master->node(i))) {
+                        peqNode->setPreampDb(params.peqPreampDb, smoothSamples == 0);
+                        appliedAny = true;
+                        break;
+                    }
+                }
             }
 
             // 3. Filter parameters: O(1) bulk assignment of precalculated coefficients (P0-27)
@@ -854,6 +862,14 @@ private:
                             params.listeningRightEnabled,
                             smoothSamples
                         );
+                        listenNode->setPreampDb(params.listeningPreampDb, smoothSamples == 0);
+                        appliedAny = true;
+                        break;
+                    }
+                }
+            } else if (params.listeningPreampModified) {
+                for (size_t i = 0; i < listening->nodeCount(); ++i) {
+                    if (auto* listenNode = dynamic_cast<ParametricEqNode*>(listening->node(i))) {
                         listenNode->setPreampDb(params.listeningPreampDb, smoothSamples == 0);
                         appliedAny = true;
                         break;

@@ -79,6 +79,8 @@ struct ContinuousDspParameters {
     // Preset input Preamp (dB) - isolated per PEQ / Listening Correction
     float peqPreampDb = 0.0f;
     float listeningPreampDb = 0.0f;
+    bool peqPreampModified = false;
+    bool listeningPreampModified = false;
 
     // Per-DSP Input / Output Trim (dB, ±12.0 dB, default 0.0 dB, excluded from bypass & presets)
     std::array<float, static_cast<size_t>(DspTrimTarget::Count)> inputTrimDb{};
@@ -161,10 +163,12 @@ public:
         m_staging.geqModifiedMask = 0xFFFFFFFF;
         m_staging.peqLeftModifiedMask = 0x00FFFFFF;
         m_staging.peqRightModifiedMask = 0x00FFFFFF;
+        m_staging.peqPreampModified = true;
         m_staging.filterModified = true;
         m_staging.trimModifiedMask = 0xFFFFFFFFu;
         if (m_listeningPresetConfigured) {
             m_staging.listeningModified = true;
+            m_staging.listeningPreampModified = true;
         }
         publishStaging();
     }
@@ -200,7 +204,7 @@ public:
         float clamped = std::clamp(preampDb, -24.0f, 24.0f);
         if (std::abs(clamped) < 1e-6f) clamped = 0.0f;
         m_staging.peqPreampDb = clamped;
-        m_staging.peqLeftModifiedMask |= 1u;
+        m_staging.peqPreampModified = true;
         publishStaging();
     }
 
@@ -210,7 +214,7 @@ public:
         float clamped = std::clamp(preampDb, -24.0f, 24.0f);
         if (std::abs(clamped) < 1e-6f) clamped = 0.0f;
         m_staging.listeningPreampDb = clamped;
-        m_staging.listeningModified = true;
+        m_staging.listeningPreampModified = true;
         m_listeningPresetConfigured = true;
         publishStaging();
     }
@@ -361,6 +365,7 @@ public:
         float clampedPre = std::clamp(preampDb, -24.0f, 24.0f);
         if (std::abs(clampedPre) < 1e-6f) clampedPre = 0.0f;
         m_staging.peqPreampDb = clampedPre;
+        m_staging.peqPreampModified = true;
 
         for (size_t b = 0; b < 24; ++b) {
             const auto& l = leftBands[b];
@@ -452,6 +457,7 @@ public:
 
         m_listeningPresetConfigured = true;
         m_staging.listeningPreampDb = 0.0f;
+        m_staging.listeningPreampModified = true;
         m_staging.listeningModified = true;
         publishStaging();
         return true;
@@ -510,6 +516,7 @@ public:
         float clampedPre = std::clamp(preampDb, -24.0f, 24.0f);
         if (std::abs(clampedPre) < 1e-6f) clampedPre = 0.0f;
         m_staging.listeningPreampDb = clampedPre;
+        m_staging.listeningPreampModified = true;
         for (size_t b = 0; b < ParametricEQ::BANDS_PER_CHANNEL; ++b) {
             const auto& l = leftBands[b];
             const double lFreq = std::clamp(l.frequency, 10.0, std::min(24000.0, m_sampleRate * 0.48));
@@ -668,8 +675,10 @@ private:
             m_staging.geqModifiedMask = 0;
             m_staging.peqLeftModifiedMask = 0;
             m_staging.peqRightModifiedMask = 0;
+            m_staging.peqPreampModified = false;
             m_staging.filterModified = false;
             m_staging.listeningModified = false;
+            m_staging.listeningPreampModified = false;
             m_staging.trimModifiedMask = 0;
         }
         m_staging.epoch = m_epoch.load(std::memory_order_relaxed);

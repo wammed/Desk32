@@ -378,7 +378,9 @@ public:
     Q_INVOKABLE QVariantMap getAllDspTrims() const;
     Q_INVOKABLE void resetAllDspTrims();
     Q_INVOKABLE double getPeqPreampDb() const noexcept { return m_uiPeq.preampDb(); }
+    Q_INVOKABLE void setPeqPreampDb(double preampDb);
     Q_INVOKABLE double getListeningPreampDb() const noexcept { return m_uiListeningCorrection.preampDb(); }
+    Q_INVOKABLE void setListeningPreampDb(double preampDb);
 
     // Listening Correction Presets & Per-Band Control (Section 5.10)
     Q_INVOKABLE QStringList availableListeningPresets();

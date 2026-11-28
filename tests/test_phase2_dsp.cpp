@@ -4775,6 +4775,22 @@ void TestPhase2Dsp::testDspInputOutputTrimsPresetRulesAndPreamp() {
   ctrl.applyPeqPreset("Monitor Flat");
   QCOMPARE(ctrl.getPeqPreampDb(), 0.0);
 
+  // Manual PEQ / Listening Preamp setters (isolated, clamped to ±24 dB)
+  ctrl.setPeqPreampDb(-7.5);
+  QCOMPARE(ctrl.getPeqPreampDb(), -7.5);
+  QCOMPARE(ctrl.getListeningPreampDb(), 0.0);
+  ctrl.setPeqPreampDb(99.0);
+  QCOMPARE(ctrl.getPeqPreampDb(), 24.0);
+  ctrl.setPeqPreampDb(-99.0);
+  QCOMPARE(ctrl.getPeqPreampDb(), -24.0);
+  ctrl.setListeningPreampDb(-3.2);
+  QCOMPARE(ctrl.getListeningPreampDb(), -3.2);
+  QCOMPARE(ctrl.getPeqPreampDb(), -24.0);
+  ctrl.setPeqPreampDb(0.0);
+  ctrl.setListeningPreampDb(0.0);
+  QCOMPARE(ctrl.getPeqPreampDb(), 0.0);
+  QCOMPARE(ctrl.getListeningPreampDb(), 0.0);
+
   // (c) >16-band truncation & unsupported filter type rejection + report +
   // LogService
   QVariantMap badPreset;

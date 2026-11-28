@@ -527,6 +527,11 @@ OFF</translation>
         <translation>Q値</translation>
     </message>
     <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2889"/>
+        <source>PREAMP</source>
+        <translation>プリアンプ</translation>
+    </message>
+    <message>
         <location filename="../qml/views/ConsoleView.qml" line="2922"/>
         <source>RIGHT CHANNEL</source>
         <translation>右チャンネル (R)</translation>

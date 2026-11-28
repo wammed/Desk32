@@ -4368,6 +4368,41 @@ void EngineController::setPeqBandEnabled(bool isRightChannel, int bandIndex,
   emit peqParametersChanged();
 }
 
+void EngineController::setPeqPreampDb(double preampDb) {
+  double clamped = std::clamp(preampDb, -24.0, 24.0);
+  if (std::abs(clamped) < 1e-6) {
+    clamped = 0.0;
+  }
+  m_uiPeq.setPreampDb(clamped);
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().setPeqPreampDb(static_cast<float>(clamped));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+  notifyManualDspParamChanged();
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+}
+
+void EngineController::setListeningPreampDb(double preampDb) {
+  double clamped = std::clamp(preampDb, -24.0, 24.0);
+  if (std::abs(clamped) < 1e-6) {
+    clamped = 0.0;
+  }
+  m_uiListeningCorrection.setPreampDb(clamped);
+  if (m_pipeline) {
+    m_pipeline->paramMailbox().setListeningPreampDb(
+        static_cast<float>(clamped));
+    m_pipeline->invalidateLevel1Measurement();
+  }
+  m_listeningPresetName = QStringLiteral("Custom");
+  emit listeningPresetChanged(m_listeningPresetName);
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+}
+
 QVariantList EngineController::getPeqCurve(bool isRightChannel, int numPoints) {
   QVariantList list;
   if (numPoints < 2)
