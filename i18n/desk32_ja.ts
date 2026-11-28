@@ -478,8 +478,13 @@ OFF</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2743"/>
-        <source>Switch between Master PEQ and Listening Correction PEQ</source>
-        <translation>マスター PEQ とリスニング補正 PEQ を切替</translation>
+        <source>Select Master PEQ (Mastering Chain)</source>
+        <translation>マスター PEQ（マスタリングチェーン）を選択</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
+        <source>Select Listening Correction PEQ (Monitor Path only)</source>
+        <translation>リスニング補正 PEQ（モニター経路のみ）を選択</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2756"/>
@@ -492,14 +497,34 @@ OFF</translation>
         <translation>PEQ プリセット表示: OFF</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
-        <source>EQ BYPASSED</source>
-        <translation>EQ バイパス中</translation>
+        <location filename="../qml/views/ConsoleView.qml" line="2814"/>
+        <source>EQ OFF</source>
+        <translation>EQ OFF</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2814"/>
         <source>EQ ACTIVE</source>
         <translation>EQ 有効</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2823"/>
+        <source>PEQ DSP Node ON / OFF (saved in Global presets)</source>
+        <translation>PEQ DSP ノード ON / OFF（グローバルプリセットに保存）</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2828"/>
+        <source>BYPASSED</source>
+        <translation>バイパス中</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2828"/>
+        <source>BYPASS</source>
+        <translation>バイパス</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2835"/>
+        <source>Temporary PEQ Global Bypass (excluded from presets and modified state)</source>
+        <translation>一時 PEQ バイパス（プリセットおよび変更状態の対象外）</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2777"/>
@@ -507,9 +532,14 @@ OFF</translation>
         <translation>バンド </translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2803"/>
-        <source>ACTIVE</source>
-        <translation>有効</translation>
+        <location filename="../qml/views/ConsoleView.qml" line="2861"/>
+        <source>BAND ACTIVE</source>
+        <translation>バンド有効</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2861"/>
+        <source>BAND OFF</source>
+        <translation>バンド OFF</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2833"/>

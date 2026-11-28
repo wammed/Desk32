@@ -503,6 +503,7 @@ void TestDspPresets::testP3GlobalAndPerDspApplicationAndExclusions() {
     ctrl.setDspTrim(QStringLiteral("compressor"), true, -3.0);
     ctrl.setMasterGain(0.75);
     ctrl.setGeqGlobalBypass(true);
+    ctrl.setPeqGlobalBypass(true);
     ctrl.setListeningPreset(QStringLiteral("Harman Target"));
 
     // 1. Apply Global "Vocal Forward"
@@ -532,6 +533,7 @@ void TestDspPresets::testP3GlobalAndPerDspApplicationAndExclusions() {
     QCOMPARE(ctrl.getDspTrim(QStringLiteral("compressor"), true), -3.0);
     QVERIFY(std::abs(ctrl.masterGain() - 0.75) < 1e-6);
     QCOMPARE(ctrl.isGeqGlobalBypass(), true);
+    QCOMPARE(ctrl.isPeqGlobalBypass(), true);
     QCOMPARE(ctrl.listeningPresetName(), QStringLiteral("Harman Target"));
 
     // 2. Apply Per-DSP HPF "Vocal Cut" (18 dB/oct) — node ON/OFF & other DSPs must remain untouched
@@ -552,7 +554,17 @@ void TestDspPresets::testP3GlobalAndPerDspApplicationAndExclusions() {
     QCOMPARE(revAfter.value(QStringLiteral("predelayMs")).toDouble(), 35.0);
     QCOMPARE(revAfter.value(QStringLiteral("roomSize")).toDouble(), 0.85);
 
-    // 4. Apply Global "Unity" — all 7 nodes OFF, all defaults restored, Trim/Master/LC/GEQ Global Bypass unchanged
+    // 3b. Apply Per-DSP PEQ "Unity" while PEQ node is ON — stays ON, all bands OFF, Preamp 0.0 dB
+    QVERIFY(!ctrl.isDspNodeBypassed(QStringLiteral("PEQ")));
+    QVERIFY(ctrl.applyPerDspPreset(QStringLiteral("peq"), QStringLiteral("Unity")));
+    QVERIFY(!ctrl.isDspNodeBypassed(QStringLiteral("PEQ")));
+    QCOMPARE(ctrl.getPeqPreampDb(), 0.0);
+    for (int b = 0; b < 16; ++b) {
+        QCOMPARE(ctrl.getPeqBand(false, b).value(QStringLiteral("enabled")).toBool(), false);
+        QCOMPARE(ctrl.getPeqBand(true, b).value(QStringLiteral("enabled")).toBool(), false);
+    }
+
+    // 4. Apply Global "Unity" — all 7 nodes OFF, all defaults restored, Trim/Master/LC/GEQ+PEQ Global Bypass unchanged
     QVERIFY(ctrl.applyGlobalDspPreset(QStringLiteral("Unity")));
     QVERIFY(ctrl.isDspNodeBypassed(QStringLiteral("PEQ")));
     QVERIFY(ctrl.isDspNodeBypassed(QStringLiteral("GEQ")));
@@ -563,6 +575,7 @@ void TestDspPresets::testP3GlobalAndPerDspApplicationAndExclusions() {
     QCOMPARE(ctrl.getFilterParams().value(QStringLiteral("lpfEnabled")).toBool(), false);
     QCOMPARE(ctrl.getDspTrim(QStringLiteral("peq"), false), 2.5);
     QCOMPARE(ctrl.isGeqGlobalBypass(), true);
+    QCOMPARE(ctrl.isPeqGlobalBypass(), true);
     QCOMPARE(ctrl.listeningPresetName(), QStringLiteral("Harman Target"));
 }
 

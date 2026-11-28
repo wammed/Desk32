@@ -1205,7 +1205,7 @@ Item {
                                                 if (consoleRoot.showGeqOverlayOnPeq) {
                                                     drawEqCurve(EngineController.getGeqCurve(180), "rgba(120, 208, 255, 0.45)", null, 1.4, true)
                                                 }
-                                                var peqByp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || consoleRoot.isDirect)
+                                                var peqByp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || EngineController.peqGlobalBypass || consoleRoot.isDirect)
                                                 var drawBoth = (consoleRoot.monitorChannelMode === 0)
                                                 var showL = drawBoth || consoleRoot.monitorChannelMode === 1 || (consoleRoot.monitorChannelMode === 3 && !consoleRoot.peqRightChannel)
                                                 var showR = drawBoth || consoleRoot.monitorChannelMode === 2 || (consoleRoot.monitorChannelMode === 3 && consoleRoot.peqRightChannel)
@@ -2614,7 +2614,7 @@ Item {
                                                 var pts = consoleRoot.peqEditListening
                                                           ? EngineController.getListeningCurve(consoleRoot.peqRightChannel, 120)
                                                           : EngineController.getPeqCurve(consoleRoot.peqRightChannel, 120)
-                                                var byp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || consoleRoot.isDirect)
+                                                var byp = !consoleRoot.peqEditListening && (EngineController.peqBypassed || EngineController.peqGlobalBypass || consoleRoot.isDirect)
                                                 var strokeCol = consoleRoot.peqEditListening
                                                                 ? "#4CE0B3"
                                                                 : (consoleRoot.peqRightChannel ? "#F2C97D" : "#33E3FF")
@@ -2705,10 +2705,10 @@ Item {
                                     Layout.fillHeight: true
                                     spacing: 10
 
-                                    // Prominent Inspector Header Block directly above the 3 knobs
+                                    // Prominent Inspector Header Block directly above the 4 knobs
                                     Rectangle {
                                         Layout.fillWidth: true
-                                        Layout.preferredHeight: 74
+                                        Layout.preferredHeight: 88
                                         radius: 5
                                         color: "#06090e"
                                         border.color: "#294658"
@@ -2726,14 +2726,59 @@ Item {
                                             glassSheenOpacity: 0.065
                                         }
 
-                                        ColumnLayout {
+                                        RowLayout {
                                             anchors.fill: parent
                                             anchors.margins: 8
-                                            spacing: 4
+                                            spacing: 10
 
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 8
+                                            // Left: Permanent 2-row MASTER PEQ / LISTENING PEQ selector
+                                            ColumnLayout {
+                                                Layout.fillWidth: false
+                                                Layout.preferredWidth: 132
+                                                Layout.fillHeight: true
+                                                spacing: 4
+
+                                                ConsoleButton {
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: 32
+                                                    text: qsTr("MASTER PEQ")
+                                                    fontSize: 9
+                                                    showLed: true
+                                                    ledColor: !consoleRoot.peqEditListening ? "#33E3FF" : "#2D3743"
+                                                    accentColor: "#33E3FF"
+                                                    highlighted: !consoleRoot.peqEditListening
+                                                    toolTipText: qsTr("Select Master PEQ (Mastering Chain)")
+                                                    onClicked: consoleRoot.peqEditListening = false
+                                                }
+                                                ConsoleButton {
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: 32
+                                                    text: qsTr("LISTENING PEQ")
+                                                    fontSize: 9
+                                                    showLed: true
+                                                    ledColor: consoleRoot.peqEditListening ? "#F5B841" : "#2D3743"
+                                                    accentColor: "#F5B841"
+                                                    highlighted: consoleRoot.peqEditListening
+                                                    toolTipText: qsTr("Select Listening Correction PEQ (Monitor Path only)")
+                                                    onClicked: consoleRoot.peqEditListening = true
+                                                }
+                                            }
+
+                                            // Engraved vertical separator
+                                            Rectangle {
+                                                Layout.preferredWidth: 1
+                                                Layout.fillHeight: true
+                                                Layout.topMargin: 2
+                                                Layout.bottomMargin: 2
+                                                color: "#223442"
+                                            }
+
+                                            // Middle: Title & Selected Band Readout
+                                            ColumnLayout {
+                                                Layout.fillWidth: false
+                                                Layout.fillHeight: true
+                                                spacing: 4
+
                                                 Label {
                                                     text: qsTr("SELECTED BAND INSPECTOR")
                                                     font.family: "Monospace"
@@ -2742,45 +2787,8 @@ Item {
                                                     font.letterSpacing: 1.4
                                                     color: "#8EC3D6"
                                                 }
-                                                Item { Layout.fillWidth: true }
-                                                ConsoleButton {
-                                                    text: consoleRoot.peqEditListening ? qsTr("LISTENING PEQ") : qsTr("MASTER PEQ")
-                                                    implicitWidth: 118
-                                                    implicitHeight: 24
-                                                    fontSize: 9
-                                                    accentColor: consoleRoot.peqEditListening ? "#F5B841" : "#33E3FF"
-                                                    highlighted: true
-                                                    toolTipText: qsTr("Switch between Master PEQ and Listening Correction PEQ")
-                                                    onClicked: consoleRoot.peqEditListening = !consoleRoot.peqEditListening
-                                                }
-                                                // Mastering PEQ Preset-Applied Indicator ONLY (§11.1)
-                                                Rectangle {
-                                                    visible: !consoleRoot.peqEditListening
-                                                    readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["peq"])
-                                                    implicitWidth: 10
-                                                    implicitHeight: 10
-                                                    radius: 5
-                                                    color: presetOn ? "#00E5FF" : "#2D3743"
-                                                    border.color: presetOn ? "#8DF2FF" : "#445160"
-                                                    ToolTip.visible: peqIndMa.containsMouse
-                                                    ToolTip.text: presetOn ? qsTr("PEQ Preset Applied") : qsTr("PEQ Preset Indicator: OFF")
-                                                    MouseArea { id: peqIndMa; anchors.fill: parent; hoverEnabled: true }
-                                                }
-                                                ConsoleButton {
-                                                    text: EngineController.peqBypassed ? qsTr("EQ BYPASSED") : qsTr("EQ ACTIVE")
-                                                    implicitWidth: 88
-                                                    implicitHeight: 24
-                                                    fontSize: 9
-                                                    visible: !consoleRoot.peqEditListening
-                                                    highlighted: !EngineController.peqBypassed
-                                                    enabled: !consoleRoot.isDirect
-                                                    onClicked: EngineController.setDspNodeBypass("PEQ", !EngineController.peqBypassed)
-                                                }
-                                            }
 
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 8
+                                                Item { Layout.fillHeight: true }
 
                                                 Label {
                                                     text: (consoleRoot.peqRightChannel ? "[R-CH] " : "[L-CH] ")
@@ -2790,40 +2798,99 @@ Item {
                                                     font.bold: true
                                                     color: consoleRoot.peqRightChannel ? "#F2C97D" : "#5BE7FF"
                                                 }
+                                            }
 
-                                                Item { Layout.fillWidth: true }
+                                            Item { Layout.fillWidth: true }
 
-                                                ConsoleButton {
-                                                    text: "<"
-                                                    implicitWidth: 32; implicitHeight: 30; fontSize: 12
-                                                    onClicked: {
-                                                        consoleRoot.selectedPeqBand = (consoleRoot.selectedPeqBand + 15) % 16
-                                                        consoleRoot.refreshPeqInspector()
+                                            // Right: 2-row aligned EQ Node + Bypass (top) & Band Nav + Active (bottom)
+                                            ColumnLayout {
+                                                Layout.fillWidth: false
+                                                Layout.fillHeight: true
+                                                spacing: 6
+
+                                                // Row 1: Mastering PEQ Preset LED + EQ ACTIVE/OFF + BYPASS/BYPASSED
+                                                RowLayout {
+                                                    Layout.alignment: Qt.AlignRight
+                                                    spacing: 6
+                                                    opacity: consoleRoot.peqEditListening ? 0.0 : 1.0
+
+                                                    // Mastering PEQ Preset-Applied Indicator ONLY (§11.1)
+                                                    Rectangle {
+                                                        readonly property bool presetOn: !!(EngineController.dspPresetIndicators && EngineController.dspPresetIndicators["peq"])
+                                                        implicitWidth: 10
+                                                        implicitHeight: 10
+                                                        radius: 5
+                                                        color: presetOn ? "#00E5FF" : "#2D3743"
+                                                        border.color: presetOn ? "#8DF2FF" : "#445160"
+                                                        ToolTip.visible: !consoleRoot.peqEditListening && peqIndMa.containsMouse
+                                                        ToolTip.text: presetOn ? qsTr("PEQ Preset Applied") : qsTr("PEQ Preset Indicator: OFF")
+                                                        MouseArea { id: peqIndMa; anchors.fill: parent; hoverEnabled: true; enabled: !consoleRoot.peqEditListening }
+                                                    }
+
+                                                    ConsoleButton {
+                                                        text: EngineController.peqBypassed ? qsTr("EQ OFF") : qsTr("EQ ACTIVE")
+                                                        implicitWidth: 112
+                                                        implicitHeight: 30
+                                                        fontSize: 10
+                                                        showLed: true
+                                                        ledColor: !EngineController.peqBypassed ? "#33E3FF" : "#444"
+                                                        accentColor: "#33E3FF"
+                                                        highlighted: !EngineController.peqBypassed
+                                                        enabled: !consoleRoot.isDirect && !consoleRoot.peqEditListening
+                                                        toolTipText: qsTr("PEQ DSP Node ON / OFF (saved in Global presets)")
+                                                        onClicked: EngineController.setDspNodeBypass("PEQ", !EngineController.peqBypassed)
+                                                    }
+
+                                                    ConsoleButton {
+                                                        text: EngineController.peqGlobalBypass ? qsTr("BYPASSED") : qsTr("BYPASS")
+                                                        implicitWidth: 96
+                                                        implicitHeight: 30
+                                                        fontSize: 10
+                                                        accentColor: "#F5B841"
+                                                        highlighted: EngineController.peqGlobalBypass
+                                                        enabled: !consoleRoot.isDirect && !consoleRoot.peqEditListening
+                                                        toolTipText: qsTr("Temporary PEQ Global Bypass (excluded from presets and modified state)")
+                                                        onClicked: EngineController.setPeqGlobalBypass(!EngineController.peqGlobalBypass)
                                                     }
                                                 }
-                                                ConsoleButton {
-                                                    text: ">"
-                                                    implicitWidth: 32; implicitHeight: 30; fontSize: 12
-                                                    onClicked: {
-                                                        consoleRoot.selectedPeqBand = (consoleRoot.selectedPeqBand + 1) % 16
-                                                        consoleRoot.refreshPeqInspector()
-                                                    }
-                                                }
-                                                ConsoleButton {
-                                                    text: consoleRoot.peqBandEnabledState ? qsTr("ACTIVE") : qsTr("OFF")
-                                                    implicitWidth: 96; implicitHeight: 30; fontSize: 11
-                                                    showLed: true
-                                                    ledColor: consoleRoot.peqBandEnabledState ? "#00E676" : "#444"
-                                                    highlighted: consoleRoot.peqBandEnabledState
-                                                    enabled: !consoleRoot.isDirect
-                                                    onClicked: {
-                                                        consoleRoot.peqBandEnabledState = !consoleRoot.peqBandEnabledState
-                                                        if (consoleRoot.peqEditListening) {
-                                                            EngineController.setListeningBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand, peqFreqKnob.value, peqGainKnob.value, peqQKnob.value, consoleRoot.peqBandTypeIndex, consoleRoot.peqBandEnabledState)
-                                                        } else {
-                                                            EngineController.setPeqBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand, peqFreqKnob.value, peqGainKnob.value, peqQKnob.value, consoleRoot.peqBandTypeIndex, consoleRoot.peqBandEnabledState)
+
+                                                // Row 2: Band < > + BAND ACTIVE/OFF
+                                                RowLayout {
+                                                    Layout.alignment: Qt.AlignRight
+                                                    spacing: 6
+
+                                                    ConsoleButton {
+                                                        text: "<"
+                                                        implicitWidth: 32; implicitHeight: 30; fontSize: 12
+                                                        onClicked: {
+                                                            consoleRoot.selectedPeqBand = (consoleRoot.selectedPeqBand + 15) % 16
+                                                            consoleRoot.refreshPeqInspector()
                                                         }
-                                                        consoleRoot.peqGridTick++
+                                                    }
+                                                    ConsoleButton {
+                                                        text: ">"
+                                                        implicitWidth: 32; implicitHeight: 30; fontSize: 12
+                                                        onClicked: {
+                                                            consoleRoot.selectedPeqBand = (consoleRoot.selectedPeqBand + 1) % 16
+                                                            consoleRoot.refreshPeqInspector()
+                                                        }
+                                                    }
+                                                    ConsoleButton {
+                                                        text: consoleRoot.peqBandEnabledState ? qsTr("BAND ACTIVE") : qsTr("BAND OFF")
+                                                        implicitWidth: 138; implicitHeight: 30; fontSize: 10
+                                                        showLed: true
+                                                        ledColor: consoleRoot.peqBandEnabledState ? "#00E676" : "#444"
+                                                        highlighted: consoleRoot.peqBandEnabledState
+                                                        enabled: !consoleRoot.isDirect
+                                                        onClicked: {
+                                                            consoleRoot.peqBandEnabledState = !consoleRoot.peqBandEnabledState
+                                                            if (consoleRoot.peqEditListening) {
+                                                                EngineController.setListeningBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand, peqFreqKnob.value, peqGainKnob.value, peqQKnob.value, consoleRoot.peqBandTypeIndex, consoleRoot.peqBandEnabledState)
+                                                            } else {
+                                                                EngineController.setPeqBand(consoleRoot.peqRightChannel, consoleRoot.selectedPeqBand, peqFreqKnob.value, peqGainKnob.value, peqQKnob.value, consoleRoot.peqBandTypeIndex, consoleRoot.peqBandEnabledState)
+                                                            }
+                                                            consoleRoot.peqGridTick++
+                                                        }
                                                     }
                                                 }
                                             }

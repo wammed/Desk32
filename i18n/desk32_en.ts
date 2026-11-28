@@ -472,8 +472,13 @@ OFF</source>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2743"/>
-        <source>Switch between Master PEQ and Listening Correction PEQ</source>
-        <translation type="unfinished"></translation>
+        <source>Select Master PEQ (Mastering Chain)</source>
+        <translation>Select Master PEQ (Mastering Chain)</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
+        <source>Select Listening Correction PEQ (Monitor Path only)</source>
+        <translation>Select Listening Correction PEQ (Monitor Path only)</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2756"/>
@@ -486,14 +491,34 @@ OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
-        <source>EQ BYPASSED</source>
-        <translation type="unfinished"></translation>
+        <location filename="../qml/views/ConsoleView.qml" line="2814"/>
+        <source>EQ OFF</source>
+        <translation>EQ OFF</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2814"/>
         <source>EQ ACTIVE</source>
-        <translation type="unfinished"></translation>
+        <translation>EQ ACTIVE</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2823"/>
+        <source>PEQ DSP Node ON / OFF (saved in Global presets)</source>
+        <translation>PEQ DSP Node ON / OFF (saved in Global presets)</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2828"/>
+        <source>BYPASSED</source>
+        <translation>BYPASSED</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2828"/>
+        <source>BYPASS</source>
+        <translation>BYPASS</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2835"/>
+        <source>Temporary PEQ Global Bypass (excluded from presets and modified state)</source>
+        <translation>Temporary PEQ Global Bypass (excluded from presets and modified state)</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2777"/>
@@ -501,9 +526,14 @@ OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2803"/>
-        <source>ACTIVE</source>
-        <translation type="unfinished">ACTIVE</translation>
+        <location filename="../qml/views/ConsoleView.qml" line="2861"/>
+        <source>BAND ACTIVE</source>
+        <translation>BAND ACTIVE</translation>
+    </message>
+    <message>
+        <location filename="../qml/views/ConsoleView.qml" line="2861"/>
+        <source>BAND OFF</source>
+        <translation>BAND OFF</translation>
     </message>
     <message>
         <location filename="../qml/views/ConsoleView.qml" line="2833"/>

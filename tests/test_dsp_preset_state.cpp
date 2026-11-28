@@ -200,11 +200,19 @@ void TestDspPresetState::testExclusionsDoNotAffectIndicatorsOrModified() {
     QVERIFY(ctrl.isDspPresetApplied(QStringLiteral("peq")));
     QVERIFY(ctrl.isDspPresetApplied(QStringLiteral("geq")));
 
-    // 2. GEQ Global Bypass (temporary bypass) must not touch indicators or modified
+    // 2. GEQ & PEQ Global Bypass (temporary bypass) must not touch indicators or modified
     ctrl.setGeqGlobalBypass(true);
     QCOMPARE(ctrl.isGlobalPresetModified(), false);
     QVERIFY(ctrl.isDspPresetApplied(QStringLiteral("geq")));
     ctrl.setGeqGlobalBypass(false);
+    QCOMPARE(ctrl.isGlobalPresetModified(), false);
+
+    ctrl.setPeqGlobalBypass(true);
+    QCOMPARE(ctrl.isPeqGlobalBypass(), true);
+    QCOMPARE(ctrl.isGlobalPresetModified(), false);
+    QVERIFY(ctrl.isDspPresetApplied(QStringLiteral("peq")));
+    ctrl.setPeqGlobalBypass(false);
+    QCOMPARE(ctrl.isPeqGlobalBypass(), false);
     QCOMPARE(ctrl.isGlobalPresetModified(), false);
 
     // 3. Trim & Master controls must not touch indicators or modified

@@ -91,6 +91,7 @@ class EngineController : public QObject {
     Q_PROPERTY(bool geqBypassed READ isGeqBypassed WRITE setGeqBypassed NOTIFY geqParametersChanged)
     Q_PROPERTY(bool geqGlobalBypass READ isGeqGlobalBypass WRITE setGeqGlobalBypass NOTIFY geqParametersChanged)
     Q_PROPERTY(bool peqBypassed READ isPeqBypassed WRITE setPeqBypassed NOTIFY peqParametersChanged)
+    Q_PROPERTY(bool peqGlobalBypass READ isPeqGlobalBypass WRITE setPeqGlobalBypass NOTIFY peqParametersChanged)
 
     // Spec v3.8.3 §11.1 / P5: Canonical DSP Preset State (Application Controller owned)
     Q_PROPERTY(QString activeGlobalPresetId READ activeGlobalPresetId NOTIFY dspPresetStateChanged)
@@ -394,6 +395,8 @@ public:
     Q_INVOKABLE bool isGeqGlobalBypass() const noexcept;
     Q_INVOKABLE void setGeqGlobalBypass(bool bypass);
     Q_INVOKABLE void setPeqBypassed(bool bypass);
+    Q_INVOKABLE bool isPeqGlobalBypass() const noexcept;
+    Q_INVOKABLE void setPeqGlobalBypass(bool bypass);
     Q_INVOKABLE void setHpfNodeEnabled(bool enabled);
     Q_INVOKABLE void setLpfNodeEnabled(bool enabled);
     Q_INVOKABLE bool resyncDspNodeBypass(const QString& nodeName);
@@ -567,6 +570,7 @@ private:
     void applyLimiterPresetData(const engine::preset::LimiterPresetData& lim);
     void applyReverbPresetData(const engine::preset::ReverbPresetData& rev);
     void applyGeqEffectiveBypassToPipeline();
+    void applyPeqEffectiveBypassToPipeline();
     void notifyManualDspParamChanged();
     void notifyDspNodeBypassChanged();
     bool applyValidatedDspPresetDocument(const engine::preset::DspPresetDocument& doc,
@@ -620,6 +624,7 @@ private:
 
     // Node bypass state tracking for Control Thread / UI display
     std::atomic<bool> m_peqBypassed{true};
+    std::atomic<bool> m_peqGlobalBypass{false}; // Temporary PEQ bypass (excluded from presets, mirrors GEQ)
     std::atomic<bool> m_geqBypassed{true};
     std::atomic<bool> m_geqGlobalBypass{false}; // Spec §11.1 temporary GEQ bypass (excluded from presets)
     std::atomic<bool> m_filterBypassed{true};

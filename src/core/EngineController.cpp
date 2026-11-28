@@ -199,6 +199,7 @@ bool EngineController::initialize(bool offlineMode) {
   m_offlineMode = offlineMode;
   // Reset bypass states to defaults matching node construction
   m_peqBypassed.store(true, std::memory_order_relaxed);
+  m_peqGlobalBypass.store(false, std::memory_order_relaxed);
   m_geqBypassed.store(true, std::memory_order_relaxed);
   m_geqGlobalBypass.store(false, std::memory_order_relaxed);
   m_filterBypassed.store(true, std::memory_order_relaxed);
@@ -5086,7 +5087,9 @@ void EngineController::setDspNodeBypass(const QString &nodeName, bool bypass) {
   const bool effectiveBypass =
       (nodeName == "GEQ")
           ? (bypass || m_geqGlobalBypass.load(std::memory_order_relaxed))
-          : bypass;
+          : ((nodeName == "PEQ")
+                 ? (bypass || m_peqGlobalBypass.load(std::memory_order_relaxed))
+                 : bypass);
 
   if (m_pipeline) {
     engine::dsp::DspCommand cmd;
@@ -5113,7 +5116,7 @@ void EngineController::setDspNodeBypass(const QString &nodeName, bool bypass) {
   bool isChainNode = false;
   if (nodeName == "PEQ") {
     m_peqBypassed.store(bypass, std::memory_order_relaxed);
-    m_uiPeq.setEnabled(!bypass);
+    m_uiPeq.setEnabled(!effectiveBypass);
     isChainNode = true;
   } else if (nodeName == "GEQ") {
     m_geqBypassed.store(bypass, std::memory_order_relaxed);
@@ -5163,7 +5166,13 @@ bool EngineController::resyncDspNodeBypass(const QString &nodeName) {
     return false;
   }
 
-  const bool state = isDspNodeBypassed(nodeName);
+  const bool rawState = isDspNodeBypassed(nodeName);
+  const bool state =
+      (nodeName == "GEQ")
+          ? (rawState || m_geqGlobalBypass.load(std::memory_order_relaxed))
+          : ((nodeName == "PEQ")
+                 ? (rawState || m_peqGlobalBypass.load(std::memory_order_relaxed))
+                 : rawState);
   engine::dsp::DspCommand cmd;
   cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
   cmd.index = nodeIndex;
@@ -6886,7 +6895,8 @@ QVariantMap EngineController::verifyRenderTapConsistency() {
                 : peq->outputTrimDb(),
             true);
         if (hasPendingControlUpdates) {
-          peq->setBypassed(m_peqBypassed.load(std::memory_order_relaxed));
+          peq->setBypassed(m_peqBypassed.load(std::memory_order_relaxed) ||
+                           m_peqGlobalBypass.load(std::memory_order_relaxed));
           std::array<BiquadCoefficients, ParametricEQ::BANDS_PER_CHANNEL> lc{},
               rc{};
           std::array<bool, ParametricEQ::BANDS_PER_CHANNEL> le{}, re{};
@@ -7123,7 +7133,8 @@ void EngineController::syncMasterDspToRenderEngine() {
   tc.copyParametersFrom(m_uiPeq, m_uiGeq, m_uiFilter, m_uiComp, m_uiReverb,
                         m_uiLimiter);
 
-  const bool peqOn = !m_peqBypassed.load(std::memory_order_relaxed);
+  const bool peqOn = !m_peqBypassed.load(std::memory_order_relaxed) &&
+                     !m_peqGlobalBypass.load(std::memory_order_relaxed);
   const bool geqOn = !m_geqBypassed.load(std::memory_order_relaxed) &&
                      !m_geqGlobalBypass.load(std::memory_order_relaxed);
   const bool fltOn = !m_filterBypassed.load(std::memory_order_relaxed);
@@ -8011,6 +8022,44 @@ void EngineController::setGeqGlobalBypass(bool bypass) {
       "DSP", "GeqGlobalBypass", "Success",
       QString("GEQ Global Bypass %1").arg(bypass ? "Engaged" : "Disengaged"),
       "DSPNode", "GEQ");
+}
+
+bool EngineController::isPeqGlobalBypass() const noexcept {
+  return m_peqGlobalBypass.load(std::memory_order_relaxed);
+}
+
+void EngineController::applyPeqEffectiveBypassToPipeline() {
+  const bool effectiveBypass =
+      m_peqBypassed.load(std::memory_order_relaxed) ||
+      m_peqGlobalBypass.load(std::memory_order_relaxed);
+  m_uiPeq.setEnabled(!effectiveBypass);
+  if (m_pipeline) {
+    engine::dsp::DspCommand cmd;
+    cmd.type = engine::dsp::DspCommandType::SetNodeBypass;
+    cmd.index = m_masterNodeIndices[0].load(std::memory_order_relaxed);
+    cmd.subIndex = 0;
+    cmd.boolFlag1 = effectiveBypass ? 1 : 0;
+    (void)m_pipeline->paramQueue().push(cmd);
+  }
+  if (m_syncMasterDspToRender.load(std::memory_order_relaxed)) {
+    syncMasterDspToRenderEngine();
+  }
+}
+
+void EngineController::setPeqGlobalBypass(bool bypass) {
+  const bool prev = m_peqGlobalBypass.exchange(bypass, std::memory_order_relaxed);
+  if (prev == bypass) {
+    return;
+  }
+  // Temporary PEQ bypass independent of DSP node ON/OFF,
+  // excluded from presets, preset-applied indicators, and Global `modified` diff.
+  applyPeqEffectiveBypassToPipeline();
+  emit peqParametersChanged();
+  emit diagnosticsChanged();
+  log::LogService::instance().log(
+      "DSP", "PeqGlobalBypass", "Success",
+      QString("PEQ Global Bypass %1").arg(bypass ? "Engaged" : "Disengaged"),
+      "DSPNode", "PEQ");
 }
 
 void EngineController::setHpfNodeEnabled(bool enabled) {
