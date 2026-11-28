@@ -326,8 +326,17 @@ void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
     ctrl.setListeningPreset(QStringLiteral("Acoustic Clarity"));
     ctrl.setExternalInsertPosition(2);
     ctrl.setExternalInsertDisconnectPolicy(1);
+    ctrl.setMasterGainL(0.65);
+    ctrl.setMasterGainR(0.85);
+    ctrl.setMasterBalance(-0.35);
+    sm.setMasterLinkLR(false, false);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("A"), -3.5);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("B"), 4.2);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("C"), -1.0);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("D"), 2.5);
+    QVERIFY(sm.save()); // Flush debounced console control writes like aboutToQuit
 
-    // Reload from disk into fresh SettingsManager state
+    // Reload from disk into fresh SettingsManager state and simulate restart restore
     sm.setConfigFilePathForTesting(cfgPath);
     QVERIFY(sm.load());
     QCOMPARE(sm.languagePreference(), QStringLiteral("ja"));
@@ -343,6 +352,40 @@ void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
     QCOMPARE(sm.value(QStringLiteral("audio.jack.auto_connect")).toBool(), false);
     QCOMPARE(sm.value(QStringLiteral("audio.alsa.device")).toString(), QStringLiteral("hw:1,0"));
     QCOMPARE(sm.value(QStringLiteral("audio.alsa.exclusive_hw_direct")).toBool(), true);
+    QVERIFY(std::abs(sm.masterGainL() - 0.65) < 1e-6);
+    QVERIFY(std::abs(sm.masterGainR() - 0.85) < 1e-6);
+    QVERIFY(std::abs(sm.masterBalance() - (-0.35)) < 1e-6);
+    QCOMPARE(sm.masterLinkLR(), false);
+    QVERIFY(std::abs(sm.deckTrimDb('A') - (-3.5)) < 1e-6);
+    QVERIFY(std::abs(sm.deckTrimDb('B') - 4.2) < 1e-6);
+    QVERIFY(std::abs(sm.deckTrimDb('C') - (-1.0)) < 1e-6);
+    QVERIFY(std::abs(sm.deckTrimDb('D') - 2.5) < 1e-6);
+
+    // Scramble runtime controller values, then verify applyInitialSettingsIfLoaded restores them
+    ctrl.setMasterGain(1.0);
+    ctrl.setMasterBalance(0.0);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("A"), 0.0);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("B"), 0.0);
+    // Re-load saved file so scrambled setMasterGain doesn't overwrite in-memory sm
+    sm.setConfigFilePathForTesting(cfgPath);
+    QVERIFY(sm.load());
+    ctrl.applyInitialSettingsIfLoaded();
+    QVERIFY(std::abs(ctrl.masterGainL() - 0.65) < 1e-6);
+    QVERIFY(std::abs(ctrl.masterGainR() - 0.85) < 1e-6);
+    QVERIFY(std::abs(ctrl.masterBalance() - (-0.35)) < 1e-6);
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("A")) - (-3.5)) < 1e-6);
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("B")) - 4.2) < 1e-6);
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("C")) - (-1.0)) < 1e-6);
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("D")) - 2.5) < 1e-6);
+
+    // Empty-deck session save/restore must also preserve Deck Trim
+    const QString sessPath = m_tempDir->path() + "/empty_deck_trim_session.json";
+    QVERIFY(ctrl.saveSessionState(sessPath));
+    ctrl.setDeckLevelMatchDb(QStringLiteral("A"), 0.0);
+    ctrl.setDeckLevelMatchDb(QStringLiteral("D"), 0.0);
+    QVERIFY(ctrl.restoreSessionState(sessPath));
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("A")) - (-3.5)) < 1e-6);
+    QVERIFY(std::abs(ctrl.getDeckLevelMatchDb(QStringLiteral("D")) - 2.5) < 1e-6);
 
     // Corrupt JSON fallback safety
     {
@@ -365,6 +408,11 @@ void TestOutputDeviceUi::testSettingsManagerPersistenceAndIntegration()
     ctrl.setListeningPreset(QStringLiteral("Monitor Flat"));
     ctrl.setExternalInsertPosition(4);
     ctrl.setExternalInsertDisconnectPolicy(0);
+    ctrl.setMasterGain(1.0);
+    ctrl.setMasterBalance(0.0);
+    for (const QString& did : {QStringLiteral("A"), QStringLiteral("B"), QStringLiteral("C"), QStringLiteral("D")}) {
+        ctrl.setDeckLevelMatchDb(did, 0.0);
+    }
 }
 
 void TestOutputDeviceUi::testDeckStateContractFolderSessionAndSeek()

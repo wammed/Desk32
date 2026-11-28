@@ -26,7 +26,7 @@ Item {
     }
     property int monitorViewMode: 0        // 0: AUTO, 1: WAVE+SPEC, 2: WAVE ONLY, 3: SPEC+EQ
     property int monitorChannelMode: 0     // 0: L+R, 1: L, 2: R, 3: AUTO
-    property bool linkMasterLR: true
+    property bool linkMasterLR: SettingsManager.masterLinkLR
 
     // 32-PEQ Tab State
     property bool peqEditListening: false  // Q-08: Master PEQ vs Listening Correction PEQ switcher
@@ -89,6 +89,7 @@ Item {
     }
 
     function filterTypeName(t) {
+        var _lang = LanguageManager.currentLanguage
         switch (t) {
         case 0: return qsTr("BELL")
         case 1: return qsTr("LO-SHELF")
@@ -1626,7 +1627,10 @@ Item {
                                         ledColor: consoleRoot.linkMasterLR ? "#00E5FF" : "#444"
                                         highlighted: consoleRoot.linkMasterLR
                                         enabled: !consoleRoot.isDirect
-                                        onClicked: consoleRoot.linkMasterLR = !consoleRoot.linkMasterLR
+                                        onClicked: {
+                                            consoleRoot.linkMasterLR = !consoleRoot.linkMasterLR
+                                            SettingsManager.masterLinkLR = consoleRoot.linkMasterLR
+                                        }
                                     }
 
                                     Rectangle {

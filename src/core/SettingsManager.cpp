@@ -10,6 +10,7 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringList>
+#include <algorithm>
 
 namespace desk32::core {
 
@@ -74,6 +75,16 @@ QJsonObject SettingsManager::buildDefaultRoot()
     render.insert(QStringLiteral("default_apply_dither"), true);
     render.insert(QStringLiteral("sync_master_dsp"), true);
 
+    QJsonObject console;
+    console.insert(QStringLiteral("master_gain_l"), 1.0);
+    console.insert(QStringLiteral("master_gain_r"), 1.0);
+    console.insert(QStringLiteral("master_balance"), 0.0);
+    console.insert(QStringLiteral("master_link_lr"), true);
+    console.insert(QStringLiteral("deck_trim_a_db"), 0.0);
+    console.insert(QStringLiteral("deck_trim_b_db"), 0.0);
+    console.insert(QStringLiteral("deck_trim_c_db"), 0.0);
+    console.insert(QStringLiteral("deck_trim_d_db"), 0.0);
+
     QJsonObject root;
     root.insert(QStringLiteral("format_version"), kSettingsFormatVersion);
     root.insert(QStringLiteral("general"), general);
@@ -81,6 +92,7 @@ QJsonObject SettingsManager::buildDefaultRoot()
     root.insert(QStringLiteral("dsp"), dsp);
     root.insert(QStringLiteral("external_insert"), extInsert);
     root.insert(QStringLiteral("render"), render);
+    root.insert(QStringLiteral("console"), console);
     return root;
 }
 
@@ -427,6 +439,46 @@ int SettingsManager::externalInsertDisconnectPolicy() const
     return value(QStringLiteral("external_insert.disconnect_policy"), 0).toInt();
 }
 
+namespace {
+QString deckTrimKeyForChar(char deckId)
+{
+    switch (deckId) {
+    case 'A': case 'a': return QStringLiteral("console.deck_trim_a_db");
+    case 'B': case 'b': return QStringLiteral("console.deck_trim_b_db");
+    case 'C': case 'c': return QStringLiteral("console.deck_trim_c_db");
+    case 'D': case 'd': return QStringLiteral("console.deck_trim_d_db");
+    default: return QString();
+    }
+}
+} // namespace
+
+double SettingsManager::masterGainL() const
+{
+    return std::clamp(value(QStringLiteral("console.master_gain_l"), 1.0).toDouble(), 0.0, 2.0);
+}
+
+double SettingsManager::masterGainR() const
+{
+    return std::clamp(value(QStringLiteral("console.master_gain_r"), 1.0).toDouble(), 0.0, 2.0);
+}
+
+double SettingsManager::masterBalance() const
+{
+    return std::clamp(value(QStringLiteral("console.master_balance"), 0.0).toDouble(), -1.0, 1.0);
+}
+
+bool SettingsManager::masterLinkLR() const
+{
+    return value(QStringLiteral("console.master_link_lr"), true).toBool();
+}
+
+double SettingsManager::deckTrimDb(char deckId) const
+{
+    const QString key = deckTrimKeyForChar(deckId);
+    if (key.isEmpty()) return 0.0;
+    return std::clamp(value(key, 0.0).toDouble(), -24.0, 24.0);
+}
+
 void SettingsManager::setLanguagePreference(const QString& lang)
 {
     const QString norm = (lang == QStringLiteral("ja") || lang == QStringLiteral("en"))
@@ -514,6 +566,37 @@ void SettingsManager::setExternalInsertPosition(int positionIndex)
 void SettingsManager::setExternalInsertDisconnectPolicy(int policy)
 {
     setDottedAndPersist(QStringLiteral("external_insert.disconnect_policy"), policy);
+}
+
+void SettingsManager::setMasterGainL(double gain, bool autoSave)
+{
+    const double clamped = std::clamp(gain, 0.0, 2.0);
+    setValue(QStringLiteral("console.master_gain_l"), clamped, autoSave);
+}
+
+void SettingsManager::setMasterGainR(double gain, bool autoSave)
+{
+    const double clamped = std::clamp(gain, 0.0, 2.0);
+    setValue(QStringLiteral("console.master_gain_r"), clamped, autoSave);
+}
+
+void SettingsManager::setMasterBalance(double balance, bool autoSave)
+{
+    const double clamped = std::clamp(balance, -1.0, 1.0);
+    setValue(QStringLiteral("console.master_balance"), clamped, autoSave);
+}
+
+void SettingsManager::setMasterLinkLR(bool linked, bool autoSave)
+{
+    setValue(QStringLiteral("console.master_link_lr"), linked, autoSave);
+}
+
+void SettingsManager::setDeckTrimDb(char deckId, double db, bool autoSave)
+{
+    const QString key = deckTrimKeyForChar(deckId);
+    if (key.isEmpty()) return;
+    const double clamped = std::clamp(db, -24.0, 24.0);
+    setValue(key, clamped, autoSave);
 }
 
 } // namespace desk32::core

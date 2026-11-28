@@ -859,6 +859,17 @@ bool EngineController::initialize(bool offlineMode) {
           .arg(m_activeAudioBackend),
       "System", m_activeAudioBackend);
 
+  if (!m_settingsSaveDebounceTimer) {
+    m_settingsSaveDebounceTimer = new QTimer(this);
+    m_settingsSaveDebounceTimer->setSingleShot(true);
+    m_settingsSaveDebounceTimer->setInterval(250);
+    connect(m_settingsSaveDebounceTimer, &QTimer::timeout, this, []() {
+      if (SettingsManager::instance().isLoaded()) {
+        SettingsManager::instance().save();
+      }
+    });
+  }
+
   applyInitialSettingsIfLoaded();
 
   return true;
@@ -1174,6 +1185,17 @@ bool EngineController::setAudioBackend(const QString &backendName) {
   return ok;
 }
 
+void EngineController::scheduleDeferredSettingsSave() {
+  if (!SettingsManager::instance().isLoaded()) {
+    return;
+  }
+  if (m_settingsSaveDebounceTimer && QCoreApplication::instance()) {
+    m_settingsSaveDebounceTimer->start();
+  } else {
+    SettingsManager::instance().save();
+  }
+}
+
 void EngineController::applyInitialSettingsIfLoaded() {
   auto &sm = SettingsManager::instance();
   if (!sm.isLoaded()) {
@@ -1194,6 +1216,22 @@ void EngineController::applyInitialSettingsIfLoaded() {
   setReverbLimits(sm.reverbMaxTailSeconds(), sm.reverbMaxProcessingMs());
   setExternalInsertPosition(sm.externalInsertPosition());
   setExternalInsertDisconnectPolicy(sm.externalInsertDisconnectPolicy());
+
+  // Restore persisted Console Controls (Master Fader L/R, Balance, Deck A-D Trim)
+  const double savedGainL = sm.masterGainL();
+  const double savedGainR = sm.masterGainR();
+  const double savedBal = sm.masterBalance();
+  setMasterGainL(savedGainL);
+  setMasterGainR(savedGainR);
+  setMasterBalance(savedBal);
+  const double balGainL = (savedBal > 0.0) ? std::max(0.0, 1.0 - savedBal) : 1.0;
+  const double balGainR = (savedBal < 0.0) ? std::max(0.0, 1.0 + savedBal) : 1.0;
+  m_gainSmootherL.reset(savedGainL * balGainL);
+  m_gainSmootherR.reset(savedGainR * balGainR);
+
+  for (char cid : {'A', 'B', 'C', 'D'}) {
+    setDeckLevelMatchDb(QString(cid), sm.deckTrimDb(cid));
+  }
 
   m_applyingInitialSettings = false;
 }
@@ -3084,6 +3122,10 @@ void EngineController::setMasterBalance(double balance) {
   const double prev =
       m_masterBalance.exchange(clamped, std::memory_order_relaxed);
   if (std::abs(prev - clamped) > 1e-6) {
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setMasterBalance(clamped, false);
+      scheduleDeferredSettingsSave();
+    }
     emit masterBalanceChanged(clamped);
     emit diagnosticsChanged();
   }
@@ -3105,11 +3147,16 @@ void EngineController::setMonitorDimEnabled(bool dim) {
 }
 
 void EngineController::setMasterGain(double gain) {
-  double clamped = std::clamp(gain, 0.0, 2.0);
-  double prev = m_masterGain.exchange(clamped);
-  m_masterGainL.store(clamped, std::memory_order_relaxed);
-  m_masterGainR.store(clamped, std::memory_order_relaxed);
-  if (prev != clamped) {
+  const double clamped = std::clamp(gain, 0.0, 2.0);
+  const double prev = m_masterGain.exchange(clamped);
+  const double prevL = m_masterGainL.exchange(clamped, std::memory_order_relaxed);
+  const double prevR = m_masterGainR.exchange(clamped, std::memory_order_relaxed);
+  if (prev != clamped || prevL != clamped || prevR != clamped) {
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setMasterGainL(clamped, false);
+      SettingsManager::instance().setMasterGainR(clamped, false);
+      scheduleDeferredSettingsSave();
+    }
     emit masterGainChanged(clamped);
     emit masterGainLChanged(clamped);
     emit masterGainRChanged(clamped);
@@ -3118,11 +3165,15 @@ void EngineController::setMasterGain(double gain) {
 }
 
 void EngineController::setMasterGainL(double gain) {
-  double clamped = std::clamp(gain, 0.0, 2.0);
-  double prev = m_masterGainL.exchange(clamped, std::memory_order_relaxed);
+  const double clamped = std::clamp(gain, 0.0, 2.0);
+  const double prev = m_masterGainL.exchange(clamped, std::memory_order_relaxed);
   if (prev != clamped) {
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setMasterGainL(clamped, false);
+      scheduleDeferredSettingsSave();
+    }
     emit masterGainLChanged(clamped);
-    double avg =
+    const double avg =
         (clamped + m_masterGainR.load(std::memory_order_relaxed)) * 0.5;
     m_masterGain.store(avg, std::memory_order_relaxed);
     emit masterGainChanged(avg);
@@ -3131,11 +3182,15 @@ void EngineController::setMasterGainL(double gain) {
 }
 
 void EngineController::setMasterGainR(double gain) {
-  double clamped = std::clamp(gain, 0.0, 2.0);
-  double prev = m_masterGainR.exchange(clamped, std::memory_order_relaxed);
+  const double clamped = std::clamp(gain, 0.0, 2.0);
+  const double prev = m_masterGainR.exchange(clamped, std::memory_order_relaxed);
   if (prev != clamped) {
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setMasterGainR(clamped, false);
+      scheduleDeferredSettingsSave();
+    }
     emit masterGainRChanged(clamped);
-    double avg =
+    const double avg =
         (m_masterGainL.load(std::memory_order_relaxed) + clamped) * 0.5;
     m_masterGain.store(avg, std::memory_order_relaxed);
     emit masterGainChanged(avg);
@@ -3528,7 +3583,12 @@ void EngineController::setDeckLevelMatchDb(const QString &deckId,
   char id = deckId.toUpper().at(0).toLatin1();
   auto *d = m_deckManager->deck(id);
   if (d) {
-    d->setLevelMatchGainDb(gainDb);
+    const double clampedDb = std::clamp(gainDb, -24.0, 24.0);
+    d->setLevelMatchGainDb(clampedDb);
+    if (SettingsManager::instance().isLoaded() && !m_applyingInitialSettings) {
+      SettingsManager::instance().setDeckTrimDb(id, clampedDb, false);
+      scheduleDeferredSettingsSave();
+    }
     emit deckStateChanged(deckId);
     emit diagnosticsChanged();
   }
@@ -7423,18 +7483,24 @@ bool EngineController::saveSessionState(const QString &filePath) const {
   if (m_deckManager) {
     for (char cid : {'A', 'B', 'C', 'D'}) {
       if (const auto *d = m_deckManager->deck(cid)) {
-        if (!d->isOpen() || d->trackInfo().path.empty())
+        const bool hasTrack = d->isOpen() && !d->trackInfo().path.empty();
+        const bool hasNonDefaultTrim = std::abs(d->levelMatchGainDb()) > 1e-6;
+        if (!hasTrack && !hasNonDefaultTrim && !d->isLocked() &&
+            d->offsetFrames() == 0) {
           continue;
+        }
         QJsonObject dobj;
         dobj["deck"] = QString(cid);
-        dobj["path"] = QString::fromStdString(d->trackInfo().path);
-        dobj["frame"] = static_cast<qint64>(d->playhead());
+        dobj["path"] =
+            hasTrack ? QString::fromStdString(d->trackInfo().path) : QString();
+        dobj["frame"] = hasTrack ? static_cast<qint64>(d->playhead()) : 0;
         dobj["level_match_db"] = d->levelMatchGainDb();
         dobj["offset_frames"] = static_cast<qint64>(d->offsetFrames());
         dobj["locked"] = d->isLocked();
-        dobj["folder_mode"] = d->folderSession().isActive();
+        dobj["folder_mode"] = hasTrack && d->folderSession().isActive();
         dobj["folder_path"] =
-            QString::fromStdString(d->folderSession().folderPath());
+            hasTrack ? QString::fromStdString(d->folderSession().folderPath())
+                     : QString();
         decksArr.append(dobj);
       }
     }
@@ -7521,8 +7587,10 @@ bool EngineController::restoreSessionState(const QString &filePath) {
       continue;
     const QJsonObject dobj = dv.toObject();
     const QString dId = dobj["deck"].toString();
+    if (dId.isEmpty())
+      continue;
     const QString path = dobj["path"].toString();
-    if (!dId.isEmpty() && !path.isEmpty() && QFileInfo::exists(path)) {
+    if (!path.isEmpty() && QFileInfo::exists(path)) {
       if (loadTrack(dId, path)) {
         if (dobj["folder_mode"].toBool(false)) {
           startFolderSessionFromDeck(dId);
@@ -7531,11 +7599,11 @@ bool EngineController::restoreSessionState(const QString &filePath) {
         if (frame > 0) {
           seek(dId, frame);
         }
-        setDeckLevelMatchDb(dId, dobj["level_match_db"].toDouble(0.0));
-        setDeckOffsetFrames(dId, dobj["offset_frames"].toInteger(0));
-        setDeckLocked(dId, dobj["locked"].toBool(false));
       }
     }
+    setDeckLevelMatchDb(dId, dobj["level_match_db"].toDouble(0.0));
+    setDeckOffsetFrames(dId, dobj["offset_frames"].toInteger(0));
+    setDeckLocked(dId, dobj["locked"].toBool(false));
   }
   const QString activeD = root["active_deck"].toString();
   if (!activeD.isEmpty()) {

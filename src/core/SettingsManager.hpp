@@ -39,6 +39,12 @@ class SettingsManager : public QObject {
     Q_PROPERTY(int externalInsertPosition READ externalInsertPosition WRITE setExternalInsertPosition NOTIFY settingsChanged)
     Q_PROPERTY(int externalInsertDisconnectPolicy READ externalInsertDisconnectPolicy WRITE setExternalInsertDisconnectPolicy NOTIFY settingsChanged)
 
+    // Console Controls Persistence (Master Fader L/R, Balance, Link L/R, Deck A-D Trim)
+    Q_PROPERTY(double masterGainL READ masterGainL WRITE setMasterGainL NOTIFY settingsChanged)
+    Q_PROPERTY(double masterGainR READ masterGainR WRITE setMasterGainR NOTIFY settingsChanged)
+    Q_PROPERTY(double masterBalance READ masterBalance WRITE setMasterBalance NOTIFY settingsChanged)
+    Q_PROPERTY(bool masterLinkLR READ masterLinkLR WRITE setMasterLinkLR NOTIFY settingsChanged)
+
 public:
     static SettingsManager& instance();
 
@@ -96,6 +102,12 @@ public:
     [[nodiscard]] int externalInsertPosition() const;
     [[nodiscard]] int externalInsertDisconnectPolicy() const;
 
+    [[nodiscard]] double masterGainL() const;
+    [[nodiscard]] double masterGainR() const;
+    [[nodiscard]] double masterBalance() const;
+    [[nodiscard]] bool masterLinkLR() const;
+    [[nodiscard]] double deckTrimDb(char deckId) const;
+
     // Typed Setters (auto-save when loaded)
     void setLanguagePreference(const QString& lang);
     void setFullscreenOnStartup(bool fullscreen);
@@ -114,6 +126,12 @@ public:
     void setListeningPreset(const QString& presetName);
     void setExternalInsertPosition(int positionIndex);
     void setExternalInsertDisconnectPolicy(int policy);
+
+    void setMasterGainL(double gain, bool autoSave = true);
+    void setMasterGainR(double gain, bool autoSave = true);
+    void setMasterBalance(double balance, bool autoSave = true);
+    void setMasterLinkLR(bool linked, bool autoSave = true);
+    void setDeckTrimDb(char deckId, double db, bool autoSave = true);
 
 signals:
     void configFilePathChanged();

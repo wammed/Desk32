@@ -196,6 +196,7 @@ Item {
     }
 
     function activeFilterSummary() {
+        var _lang = LanguageManager.currentLanguage
         var parts = []
         parts.push(categoryFilter === "All" ? qsTr("Cat: All") : qsTr("Cat: %1").arg(categoryFilter))
         if (statusFilter !== "All") parts.push(qsTr("Status: %1").arg(statusFilter))

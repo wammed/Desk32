@@ -41,20 +41,30 @@ void LanguageManager::applyLanguageInternal(const QString &langCode,
   if (!m_app)
     return;
 
-  if (m_translator.isEmpty() == false) {
+  const QString normalized =
+      (langCode.compare(QStringLiteral("ja"), Qt::CaseInsensitive) == 0)
+          ? QStringLiteral("ja")
+          : QStringLiteral("en");
+
+  if (m_translatorInstalled) {
     m_app->removeTranslator(&m_translator);
+    m_translatorInstalled = false;
   }
 
-  const QString qmFile = QString("desk32_%1").arg(langCode);
-  if (m_translator.load(qmFile, ":/i18n")) {
-    m_app->installTranslator(&m_translator);
-  } else if (m_translator.load(qmFile, "i18n")) {
-    m_app->installTranslator(&m_translator);
+  if (normalized != QStringLiteral("en")) {
+    const QString qmFile = QStringLiteral("desk32_%1").arg(normalized);
+    if (m_translator.load(qmFile, QStringLiteral(":/i18n")) ||
+        m_translator.load(qmFile, QStringLiteral("i18n"))) {
+      m_app->installTranslator(&m_translator);
+      m_translatorInstalled = true;
+    } else {
+      qWarning() << "LanguageManager: Failed to load translation file" << qmFile;
+    }
   }
 
-  m_currentLanguage = langCode;
+  m_currentLanguage = normalized;
   if (persist && desk32::core::SettingsManager::instance().isLoaded()) {
-    desk32::core::SettingsManager::instance().setLanguagePreference(langCode);
+    desk32::core::SettingsManager::instance().setLanguagePreference(normalized);
   }
   if (m_engine) {
     m_engine->retranslate();

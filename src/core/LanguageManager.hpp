@@ -29,6 +29,7 @@ private:
     QGuiApplication* m_app = nullptr;
     QQmlEngine* m_engine = nullptr;
     QTranslator m_translator;
+    bool m_translatorInstalled = false;
     QString m_currentLanguage = "en";
 };
 

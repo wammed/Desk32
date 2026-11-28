@@ -198,6 +198,10 @@ int main(int argc, char *argv[]) {
   // Initialize Engine Controller & Subsystems (skip audio init during headless prototype screenshot)
   if (!(prototypeMode && !screenshotPath.isEmpty())) {
     desk32::core::EngineController::instance().initialize(offlineMode);
+    if (screenshotPath.isEmpty() && !prototypeMode &&
+        desk32::core::SettingsManager::instance().restoreSessionOnStartup()) {
+      desk32::core::EngineController::instance().restoreSessionState();
+    }
   }
 
   if (fellBackToOpenGL) {
@@ -317,7 +321,13 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, []() {
+  QObject::connect(&app, &QCoreApplication::aboutToQuit, &app, [screenshotPath, prototypeMode]() {
+    if (screenshotPath.isEmpty() && !prototypeMode) {
+      if (desk32::core::SettingsManager::instance().isLoaded()) {
+        desk32::core::SettingsManager::instance().save();
+      }
+      desk32::core::EngineController::instance().saveSessionState();
+    }
     desk32::engine::render::RenderEngine::instance().stop();
     desk32::engine::render::RenderSequenceManager::instance().close();
     desk32::engine::workspace::WorkspaceManager::instance()

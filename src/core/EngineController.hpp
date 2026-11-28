@@ -488,6 +488,7 @@ public:
     Q_INVOKABLE QString defaultSessionStatePath() const;
     Q_INVOKABLE bool saveSessionState(const QString& filePath = QString()) const;
     Q_INVOKABLE bool restoreSessionState(const QString& filePath = QString());
+    void applyInitialSettingsIfLoaded();
 
     // Direct access to nodes and engine components for testing
     [[nodiscard]] std::shared_ptr<engine::insert::ExternalInsertNode> insertNode() const noexcept { return m_insertNode; }
@@ -594,7 +595,6 @@ private:
     void syncExternalInsertBypassToPipeline(bool bypass);
     void pollHardwareCalibrationProbe();
     void finishHardwareCalibration(bool restoreBypass, bool cancelSession = false);
-    void applyInitialSettingsIfLoaded();
     bool setupAudioBackend(const QString& backendName, bool fallbackToOfflineOnStartFailure, bool preserveTargetDevice);
 
     std::unique_ptr<engine::deck::DeckManager> m_deckManager;
@@ -671,6 +671,7 @@ private:
     void emitDspNodeSignal(const QString& nodeName);
     bool findDspNode(const QString& nodeName, uint8_t& outChain, uint8_t& outIndex) const noexcept;
     void updateSourceBitDepthFromActiveDeck();
+    void scheduleDeferredSettingsSave();
 
     std::atomic<double> m_reverbMaxTailRetentionSeconds{5.0};
     std::atomic<double> m_reverbMaxProcessingTimeMs{0.0};
@@ -708,6 +709,7 @@ private:
     uint32_t m_lastGraphBufferFrames{0};
     int m_lastDirectModeStatus{-1};
     int m_lastLoggedBitPerfectModeState{-1};
+    QTimer* m_settingsSaveDebounceTimer{nullptr};
     int m_healthCheckTick{0};
     std::array<uint64_t, 4> m_lastDeckUnderruns{0, 0, 0, 0};
     size_t m_lastDroppedLogCount{0};

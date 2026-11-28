@@ -64,6 +64,7 @@ BrushedMetalPanel {
     }
 
     function statusLabelText() {
+        var _lang = LanguageManager.currentLanguage
         if (isErrorStopped) return qsTr("ERR")
         if (isPlaying) return qsTr("PLAY")
         if (isPaused) return qsTr("PAUSE")
@@ -633,7 +634,7 @@ BrushedMetalPanel {
                     text: qsTr("Folder")
                     fontSize: 9
                     leftPadding: 4; rightPadding: 4
-                    implicitWidth: 42; implicitHeight: 22
+                    implicitWidth: 50; implicitHeight: 22
                     enabled: !cardRoot.isLocked
                     highlighted: cardRoot.folderActive
                     accentColor: "#F5B841"
