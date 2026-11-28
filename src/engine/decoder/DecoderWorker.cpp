@@ -393,6 +393,8 @@ void DecoderWorker::stop() noexcept {
   {
     std::lock_guard<std::mutex> lock(m_cmdMutex);
     m_isPlaying.store(false, std::memory_order_release);
+    m_playheadAnchorFrame.store(0, std::memory_order_release);
+    m_graphFramesConsumed.store(0, std::memory_order_release);
     m_playhead.store(0, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
     m_eofDelivered.store(false, std::memory_order_release);
@@ -438,7 +440,7 @@ SeekResult DecoderWorker::seekWithResult(int64_t targetFrame) noexcept {
   // Determine whether targetFrame falls within currently buffered PCM range
   const int64_t beforePlayhead = m_playhead.load(std::memory_order_acquire);
   const size_t availOutFrames = m_ringBuffer.availableRead();
-  const double gRate = m_graphRate.load(std::memory_order_acquire);
+  const double gRate = m_activeGraphRate.load(std::memory_order_acquire);
   const double tRate = info.sampleRate;
   const int64_t availTrackFrames =
       (gRate > 0.0 && tRate > 0.0)
@@ -451,6 +453,8 @@ SeekResult DecoderWorker::seekWithResult(int64_t targetFrame) noexcept {
   uint64_t seq = 0;
   {
     std::lock_guard<std::mutex> lock(m_cmdMutex);
+    m_playheadAnchorFrame.store(targetFrame, std::memory_order_release);
+    m_graphFramesConsumed.store(0, std::memory_order_release);
     m_playhead.store(targetFrame, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
     m_eofDelivered.store(false, std::memory_order_release);
@@ -582,7 +586,27 @@ size_t DecoderWorker::readAudioBlock(double *outLeft, double *outRight,
     }
   }
 
-  m_playhead.fetch_add(static_cast<int64_t>(read), std::memory_order_relaxed);
+  if (read > 0) {
+    const uint64_t consumed =
+        m_graphFramesConsumed.fetch_add(static_cast<uint64_t>(read),
+                                        std::memory_order_relaxed) +
+        static_cast<uint64_t>(read);
+    const double srcSr = m_sourceSampleRate.load(std::memory_order_relaxed);
+    const double graphSr = m_activeGraphRate.load(std::memory_order_relaxed);
+    const int64_t anchor =
+        m_playheadAnchorFrame.load(std::memory_order_relaxed);
+    int64_t sourceAdvance = static_cast<int64_t>(consumed);
+    if (srcSr > 0.0 && graphSr > 0.0 && std::abs(srcSr - graphSr) > 0.5) {
+      sourceAdvance = static_cast<int64_t>(
+          std::llround(static_cast<double>(consumed) * (srcSr / graphSr)));
+    }
+    int64_t nextPlayhead = anchor + sourceAdvance;
+    const int64_t totalF = m_sourceTotalFrames.load(std::memory_order_relaxed);
+    if (totalF > 0 && nextPlayhead > totalF) {
+      nextPlayhead = totalF;
+    }
+    m_playhead.store(nextPlayhead, std::memory_order_release);
+  }
   return read;
 }
 
@@ -786,7 +810,16 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_resampler.configure(info.sampleRate, cmd.graphRate, info.channels);
           m_workerOpenTelem.resamplerConfigEndNs = steadyNowNs();
           m_isSynthetic.store(false, std::memory_order_release);
+          m_sourceSampleRate.store(info.sampleRate, std::memory_order_release);
+          m_sourceTotalFrames.store(
+              static_cast<int64_t>(std::max<int64_t>(0, info.totalFrames)),
+              std::memory_order_release);
           m_graphRate.store(cmd.graphRate, std::memory_order_release);
+          m_activeGraphRate.store(
+              m_resampler.isBypass() ? info.sampleRate : cmd.graphRate,
+              std::memory_order_release);
+          m_playheadAnchorFrame.store(0, std::memory_order_release);
+          m_graphFramesConsumed.store(0, std::memory_order_release);
           m_playhead.store(0, std::memory_order_release);
           m_isOpen.store(true, std::memory_order_release);
           m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::AfterPlayCleared),
@@ -961,7 +994,14 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
         m_trackInfo = tInfo;
         m_metadata = std::make_shared<metadata::TrackMetadata>(std::move(meta));
         m_isSynthetic.store(true, std::memory_order_release);
+        m_sourceSampleRate.store(cmd.sampleRate, std::memory_order_release);
+        m_sourceTotalFrames.store(static_cast<int64_t>(cmd.totalFrames),
+                                  std::memory_order_release);
         m_graphRate.store(cmd.graphRate, std::memory_order_release);
+        // Synthetic generator writes directly at source rate (bypasses SoXR)
+        m_activeGraphRate.store(cmd.sampleRate, std::memory_order_release);
+        m_playheadAnchorFrame.store(0, std::memory_order_release);
+        m_graphFramesConsumed.store(0, std::memory_order_release);
         m_playhead.store(0, std::memory_order_release);
         m_isOpen.store(true, std::memory_order_release);
         m_openPhase.store(static_cast<uint8_t>(OpenTransitionPhase::AfterPlayCleared),
@@ -1082,6 +1122,9 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     int64_t actual = cmd.targetFrame;
     if (m_isSynthetic.load(std::memory_order_relaxed)) {
       m_syntheticPos = cmd.targetFrame;
+      m_playheadAnchorFrame.store(cmd.targetFrame, std::memory_order_release);
+      m_graphFramesConsumed.store(0, std::memory_order_release);
+      m_playhead.store(cmd.targetFrame, std::memory_order_release);
       for (int i = 0; i < 4; ++i) {
         doDecodeChunk();
         if (transitionGuard.isActive() &&
@@ -1096,8 +1139,16 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
       ok = m_decoder->seek(cmd.targetFrame);
       m_resampler.reset();
       if (ok) {
+        bool anchorSynced = false;
         for (int i = 0; i < 4; ++i) {
           doDecodeChunk();
+          if (!anchorSynced) {
+            actual = m_decoder->lastSeekActualFrame();
+            m_playheadAnchorFrame.store(actual, std::memory_order_release);
+            m_graphFramesConsumed.store(0, std::memory_order_release);
+            m_playhead.store(actual, std::memory_order_release);
+            anchorSynced = true;
+          }
           if (transitionGuard.isActive() &&
               (m_ringBuffer.availableRead() > 0 ||
                m_isEof.load(std::memory_order_acquire))) {
@@ -1126,6 +1177,9 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
     m_isEof.store(false, std::memory_order_release);
     m_eofDelivered.store(false, std::memory_order_release);
     m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
+    m_playheadAnchorFrame.store(0, std::memory_order_release);
+    m_graphFramesConsumed.store(0, std::memory_order_release);
+    m_playhead.store(0, std::memory_order_release);
     m_syntheticPos = 0;
     if (m_decoder) {
       m_decoder->seek(0);
@@ -1151,10 +1205,18 @@ void DecoderWorker::processCommand(const WorkerCommand &cmd) {
           m_eofDelivered.store(false, std::memory_order_release);
           m_eofEpoch.fetch_add(1, std::memory_order_acq_rel);
           const int64_t resumeFrame = std::max<int64_t>(0, m_playhead.load(std::memory_order_acquire));
+          m_playheadAnchorFrame.store(resumeFrame, std::memory_order_release);
+          m_graphFramesConsumed.store(0, std::memory_order_release);
+          m_playhead.store(resumeFrame, std::memory_order_release);
           if (m_isSynthetic.load(std::memory_order_relaxed)) {
+            m_activeGraphRate.store(m_trackInfo.sampleRate,
+                                    std::memory_order_release);
             m_syntheticPos = resumeFrame;
             shouldPrefill = true;
           } else if (m_decoder) {
+            m_activeGraphRate.store(
+                m_resampler.isBypass() ? m_trackInfo.sampleRate : cmd.graphRate,
+                std::memory_order_release);
             m_decoder->seek(resumeFrame);
             m_resampler.reset();
             shouldPrefill = true;

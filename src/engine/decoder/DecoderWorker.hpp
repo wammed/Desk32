@@ -265,8 +265,13 @@ private:
     std::atomic<int64_t> m_eofEmittedTimestampMs{0};
     std::atomic<bool> m_isSynthetic{false};
     std::atomic<int64_t> m_playhead{0};
+    std::atomic<int64_t> m_playheadAnchorFrame{0};
+    std::atomic<uint64_t> m_graphFramesConsumed{0};
+    std::atomic<double> m_sourceSampleRate{48000.0};
+    std::atomic<int64_t> m_sourceTotalFrames{0};
     std::atomic<uint64_t> m_underrunCount{0};
     std::atomic<double> m_graphRate{48000.0};
+    std::atomic<double> m_activeGraphRate{48000.0};
     std::atomic<uint64_t> m_seekSequence{0};
     std::atomic<uint64_t> m_seekCompleted{0};
     std::atomic<bool> m_seekSuccess{true};

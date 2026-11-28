@@ -151,6 +151,7 @@ private slots:
     void testComparativeSwitchTerminatesFolderSession();
     void testPhase1GapFixesFolderAndTransport();
     void testKWeightingSampleRatesAndGatedLufs();
+    void testPlayheadAdvancesInSourceFramesUnderResampling();
     void cleanupTestCase();
 
 private:
@@ -2607,6 +2608,77 @@ void TestReferenceDecks::testKWeightingSampleRatesAndGatedLufs()
     QVERIFY(ReferenceDeck::measureTrackLufs(silentIntroTone.toStdString(), gatedLufs));
     QVERIFY2(std::abs(pureLufs - gatedLufs) < 0.2,
              qPrintable(QString("pure=%1 LUFS vs gated=%2 LUFS").arg(pureLufs).arg(gatedLufs)));
+}
+
+void TestReferenceDecks::testPlayheadAdvancesInSourceFramesUnderResampling()
+{
+    // 3.0s 44.1 kHz track (132,300 source frames)
+    const QString wav44k = createSyntheticWav("playhead_44k_3s.wav", 44100.0, 44100 * 3);
+    QVERIFY(!wav44k.isEmpty());
+
+    auto renderExactGraphFrames = [](ReferenceDeck& deck, size_t totalGraphFrames) -> size_t {
+        std::vector<double> bufL(1024, 0.0), bufR(1024, 0.0);
+        size_t gotTotal = 0;
+        int retries = 0;
+        while (gotTotal < totalGraphFrames && retries < 200) {
+            const size_t want = std::min<size_t>(1024, totalGraphFrames - gotTotal);
+            const size_t got = deck.renderBlock(bufL.data(), bufR.data(), want);
+            gotTotal += got;
+            if (got < want) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                ++retries;
+            }
+        }
+        return gotTotal;
+    };
+
+    // 1. 44.1 kHz track on 48 kHz graph: 24,000 graph frames (= 0.500s) -> 22,050 source frames (NOT 24,000!)
+    {
+        ReferenceDeck deck('A');
+        QVERIFY(deck.loadTrack(wav44k.toStdString(), 48000.0));
+        deck.play();
+        const size_t rendered = renderExactGraphFrames(deck, 24000);
+        QCOMPARE(rendered, size_t(24000));
+        const int64_t pos = deck.playhead();
+        QVERIFY2(std::abs(pos - 22050) <= 2,
+                 qPrintable(QString("44.1k@48k 0.5s expected ~22050 source frames, got %1").arg(pos)));
+    }
+
+    // 2. 44.1 kHz track on 96 kHz graph: 48,000 graph frames (= 0.500s) -> 22,050 source frames (NOT 48,000!)
+    {
+        ReferenceDeck deck('A');
+        QVERIFY(deck.loadTrack(wav44k.toStdString(), 96000.0));
+        deck.play();
+        const size_t rendered = renderExactGraphFrames(deck, 48000);
+        QCOMPARE(rendered, size_t(48000));
+        const int64_t pos = deck.playhead();
+        QVERIFY2(std::abs(pos - 22050) <= 2,
+                 qPrintable(QString("44.1k@96k 0.5s expected ~22050 source frames, got %1").arg(pos)));
+
+        // 3. Seek to 1.000s (44,100 source frames) on 96 kHz graph, then render 24,000 graph frames (0.250s) -> 55,125
+        auto seekRes = deck.seekWithResult(44100);
+        QVERIFY(seekRes.success);
+        const int64_t afterSeek = deck.playhead();
+        QVERIFY2(std::abs(afterSeek - 44100) <= 64,
+                 qPrintable(QString("afterSeek expected ~44100, got %1").arg(afterSeek)));
+        const size_t rendered2 = renderExactGraphFrames(deck, 24000);
+        QCOMPARE(rendered2, size_t(24000));
+        const int64_t posAfterSeekPlay = deck.playhead();
+        QVERIFY2(std::abs(posAfterSeekPlay - (afterSeek + 11025)) <= 4,
+                 qPrintable(QString("44.1k@96k after seek +0.25s expected ~%1, got %2")
+                                .arg(afterSeek + 11025).arg(posAfterSeekPlay)));
+
+        // 4. Mid-stream graph rate change 96 kHz -> 48 kHz, wait for prefill, render 12,000 graph frames (0.250s) -> +11,025
+        deck.configureGraphRate(48000.0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        const int64_t posBeforeRatePlay = deck.playhead();
+        const size_t rendered3 = renderExactGraphFrames(deck, 12000);
+        QCOMPARE(rendered3, size_t(12000));
+        const int64_t posAfterRatePlay = deck.playhead();
+        QVERIFY2(std::abs(posAfterRatePlay - (posBeforeRatePlay + 11025)) <= 4,
+                 qPrintable(QString("44.1k@48k after rate change +0.25s expected ~%1, got %2")
+                                .arg(posBeforeRatePlay + 11025).arg(posAfterRatePlay)));
+    }
 }
 
 void TestReferenceDecks::cleanupTestCase()

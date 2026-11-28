@@ -1391,6 +1391,18 @@ void EngineController::checkAudioHealthAndGraph() {
       m_lastGraphSampleRate = diag.sampleRate;
       m_lastGraphBufferFrames = effectiveQuantum;
       m_lastDirectModeStatus = curDirect;
+
+      if (diag.sampleRate > 0 && m_deckManager && m_pipeline &&
+          std::abs(m_deckManager->graphRate() -
+                   static_cast<double>(diag.sampleRate)) > 0.5) {
+        const double actualSr = static_cast<double>(diag.sampleRate);
+        m_deckManager->setGraphRate(actualSr);
+        m_pipeline->setGraphSampleRate(actualSr);
+        m_gainSmootherL.configure(actualSr, 15.0);
+        m_gainSmootherR.configure(actualSr, 15.0);
+        emit graphSampleRateChanged(actualSr);
+      }
+      emit diagnosticsChanged();
     }
 
     // 2. Aggregated PipeWire XRUN reporting (§6)

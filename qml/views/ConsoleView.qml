@@ -120,8 +120,8 @@ Item {
 
     function refreshWaveform() {
         var w = (typeof waveCanvas !== "undefined" && waveCanvas.width > 64)
-                ? Math.min(1024, Math.max(200, Math.round(waveCanvas.width / 2.0)))
-                : 360
+                ? Math.min(1024, Math.max(120, Math.floor(waveCanvas.width / 3.0)))
+                : 320
         cachedWaveData = EngineController.getDeckWaveformPeaks(EngineController.activeDeckId, w)
         if (typeof waveCanvas !== "undefined") waveCanvas.requestPaint()
     }
@@ -842,22 +842,22 @@ Item {
                                         ctx.clearRect(0, 0, width, height)
 
                                         var midY = height * 0.5
-                                        var halfH = height * 0.34
+                                        var halfH = height * 0.44
 
                                         // Subtle -6 dB reference lines and exact center 0-axis line
-                                        ctx.strokeStyle = "rgba(32, 48, 64, 0.55)"
+                                        ctx.strokeStyle = "rgba(32, 48, 64, 0.45)"
                                         ctx.lineWidth = 1
                                         ctx.beginPath()
-                                        ctx.moveTo(0, midY - halfH * 0.5)
-                                        ctx.lineTo(width, midY - halfH * 0.5)
-                                        ctx.moveTo(0, midY + halfH * 0.5)
-                                        ctx.lineTo(width, midY + halfH * 0.5)
+                                        ctx.moveTo(0, Math.round(midY - halfH * 0.5) + 0.5)
+                                        ctx.lineTo(width, Math.round(midY - halfH * 0.5) + 0.5)
+                                        ctx.moveTo(0, Math.round(midY + halfH * 0.5) + 0.5)
+                                        ctx.lineTo(width, Math.round(midY + halfH * 0.5) + 0.5)
                                         ctx.stroke()
 
                                         ctx.strokeStyle = "#1B2836"
                                         ctx.beginPath()
-                                        ctx.moveTo(0, midY)
-                                        ctx.lineTo(width, midY)
+                                        ctx.moveTo(0, Math.round(midY) + 0.5)
+                                        ctx.lineTo(width, Math.round(midY) + 0.5)
                                         ctx.stroke()
 
                                         var wd = consoleRoot.cachedWaveData
@@ -879,6 +879,8 @@ Item {
                                         var peaksPos = new Array(n)
                                         var peaksNeg = new Array(n)
                                         var rmsVals = new Array(n)
+                                        var nzRms = []
+                                        var nzPeak = []
                                         for (var i = 0; i < n; ++i) {
                                             var mn, mx, rv
                                             if (chMode === 1) {
@@ -900,61 +902,77 @@ Item {
                                             }
                                             var pos = Math.max(0.0, Math.min(1.0, mx))
                                             var neg = Math.max(0.0, Math.min(1.0, -mn))
+                                            var pk = Math.max(pos, neg)
+                                            var clRms = Math.min(pk, Math.max(0.0, Math.min(1.0, rv)))
                                             peaksPos[i] = pos
                                             peaksNeg[i] = neg
-                                            rmsVals[i] = Math.min(Math.max(pos, neg), Math.max(0.0, Math.min(1.0, rv)))
+                                            rmsVals[i] = clRms
+                                            if (clRms > 0.005) nzRms.push(clRms)
+                                            if (pk > 0.005) nzPeak.push(pk)
                                         }
 
-                                        // Layer 1: Translucent outer peak envelope + crisp 1px contour
-                                        function drawPeakEnvelope(fillColor, strokeColor) {
-                                            ctx.beginPath()
-                                            for (var k = 0; k < n; ++k) {
-                                                var x = ((k + 0.5) / n) * width
-                                                var yTop = midY - peaksPos[k] * halfH
-                                                if (k === 0) ctx.moveTo(x, yTop)
-                                                else ctx.lineTo(x, yTop)
-                                            }
-                                            for (var j = n - 1; j >= 0; --j) {
-                                                var xb = ((j + 0.5) / n) * width
-                                                var yBot = midY + peaksNeg[j] * halfH
-                                                ctx.lineTo(xb, yBot)
-                                            }
-                                            ctx.closePath()
-                                            ctx.fillStyle = fillColor
-                                            ctx.fill()
-                                            ctx.strokeStyle = strokeColor
-                                            ctx.lineWidth = 1.0
-                                            ctx.stroke()
+                                        // Track-aware perceptual RMS reference (preserves quiet tracks honestly while revealing dynamics on loud masters)
+                                        var p98Rms = 0.25
+                                        var p98Peak = 1.0
+                                        if (nzRms.length > 0) {
+                                            nzRms.sort(function(a, b) { return a - b })
+                                            p98Rms = Math.max(0.18, nzRms[Math.min(nzRms.length - 1, Math.floor(nzRms.length * 0.98))])
                                         }
+                                        if (nzPeak.length > 0) {
+                                            nzPeak.sort(function(a, b) { return a - b })
+                                            p98Peak = Math.max(0.08, nzPeak[Math.min(nzPeak.length - 1, Math.floor(nzPeak.length * 0.98))])
+                                        }
+                                        var rmsCeiling = Math.min(1.0, p98Peak) * 0.88
 
-                                        if (playX > 0.5) {
-                                            ctx.save()
-                                            ctx.beginPath()
-                                            ctx.rect(0, 0, playX, height)
-                                            ctx.clip()
-                                            drawPeakEnvelope("rgba(54, 227, 255, 0.20)", "rgba(64, 224, 255, 0.62)")
-                                            ctx.restore()
-                                        }
-                                        if (playX < width - 0.5) {
-                                            ctx.save()
-                                            ctx.beginPath()
-                                            ctx.rect(playX, 0, width - playX, height)
-                                            ctx.clip()
-                                            drawPeakEnvelope("rgba(28, 110, 133, 0.18)", "rgba(42, 148, 176, 0.46)")
-                                            ctx.restore()
-                                        }
-
-                                        // Layer 2: True RMS energy core (slender spaced bars for clear dynamics)
-                                        var step = width / n
-                                        var barW = Math.max(1.0, step * 0.60)
+                                        // Discrete integer-aligned vertical bars with guaranteed dark gap (no solid polygon fill)
+                                        var pitch = width / n
+                                        var barW = (pitch >= 3.0) ? Math.max(1, Math.floor(pitch) - 1) : 1
+                                        var lastX = -9999
                                         for (var m = 0; m < n; ++m) {
-                                            var xc = ((m + 0.5) / n) * width
-                                            var rmsPx = rmsVals[m] * halfH
-                                            if (rmsPx < 0.6 && peaksPos[m] < 0.005 && peaksNeg[m] < 0.005) continue
-                                            var hHalf = Math.max(0.75, rmsPx)
-                                            ctx.fillStyle = (xc <= playX) ? "#32D8F5" : "#1D7E9A"
-                                            ctx.fillRect(xc - barW * 0.5, midY - hHalf, barW, hHalf * 2.0)
+                                            var xSlot = Math.floor(m * pitch)
+                                            if (pitch < 2.0 && xSlot <= lastX + 1) continue
+                                            lastX = xSlot
+
+                                            var pkPos = peaksPos[m]
+                                            var pkNeg = peaksNeg[m]
+                                            var pkMax = Math.max(pkPos, pkNeg)
+                                            if (pkMax < 0.003 && rmsVals[m] < 0.003) continue
+
+                                            var played = (xSlot + barW * 0.5) <= playX
+
+                                            // Perceptually contoured RMS energy height (capped at actual peak)
+                                            var normRms = Math.min(1.0, rmsVals[m] / p98Rms)
+                                            var shapedRms = Math.min(pkMax, Math.pow(normRms, 1.45) * rmsCeiling)
+                                            var rmsPx = Math.max(1.0, shapedRms * halfH)
+
+                                            // Layer 1: Delicate 1px peak transient needle above RMS (never forms a solid wall)
+                                            var topPeakPx = pkPos * halfH
+                                            var botPeakPx = pkNeg * halfH
+                                            var hairX = xSlot + Math.floor(barW * 0.5)
+                                            if (topPeakPx > rmsPx + 0.8) {
+                                                ctx.fillStyle = played ? "rgba(68, 224, 255, 0.30)" : "rgba(44, 134, 160, 0.20)"
+                                                ctx.fillRect(hairX, Math.round(midY - topPeakPx), 1, Math.max(1, Math.round(topPeakPx - rmsPx)))
+                                            }
+                                            if (botPeakPx > rmsPx + 0.8) {
+                                                ctx.fillStyle = played ? "rgba(68, 224, 255, 0.26)" : "rgba(44, 134, 160, 0.18)"
+                                                ctx.fillRect(hairX, Math.round(midY + rmsPx), 1, Math.max(1, Math.round(botPeakPx - rmsPx)))
+                                            }
+
+                                            // Layer 2: Primary RMS energy bar (clear verse/chorus/transient phrasing)
+                                            ctx.fillStyle = played ? "#2DD8F6" : "#1C6E88"
+                                            ctx.fillRect(xSlot, Math.round(midY - rmsPx), barW, Math.max(2, Math.round(rmsPx * 2.0)))
+
+                                            // Layer 3: Bright inner core highlight for depth
+                                            var corePx = rmsPx * 0.42
+                                            if (corePx >= 1.0) {
+                                                ctx.fillStyle = played ? "#8CF3FF" : "#2FA0BF"
+                                                ctx.fillRect(xSlot, Math.round(midY - corePx), barW, Math.max(1, Math.round(corePx * 2.0)))
+                                            }
                                         }
+
+                                        // Crisp subtle center zero-line slit across bars
+                                        ctx.fillStyle = "rgba(6, 9, 14, 0.45)"
+                                        ctx.fillRect(0, Math.round(midY), width, 1)
                                     }
                                 }
 
