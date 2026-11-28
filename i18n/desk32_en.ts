@@ -4,903 +4,903 @@
 <context>
     <name>ConsoleView</name>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="93"/>
-        <location filename="../qml/views/ConsoleView.qml" line="99"/>
+        <location filename="../qml/views/ConsoleView.qml" line="94"/>
+        <location filename="../qml/views/ConsoleView.qml" line="100"/>
         <source>BELL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="94"/>
+        <location filename="../qml/views/ConsoleView.qml" line="95"/>
         <source>LO-SHELF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="95"/>
+        <location filename="../qml/views/ConsoleView.qml" line="96"/>
         <source>HI-SHELF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="96"/>
+        <location filename="../qml/views/ConsoleView.qml" line="97"/>
         <source>NOTCH</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="97"/>
+        <location filename="../qml/views/ConsoleView.qml" line="98"/>
         <source>LPF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="98"/>
+        <location filename="../qml/views/ConsoleView.qml" line="99"/>
         <source>HPF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="526"/>
+        <location filename="../qml/views/ConsoleView.qml" line="527"/>
         <source>REFERENCE DECK</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="553"/>
+        <location filename="../qml/views/ConsoleView.qml" line="554"/>
         <source>A ⇄ B</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="557"/>
+        <location filename="../qml/views/ConsoleView.qml" line="558"/>
         <source>Quick Switch Active Deck between A and B</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="567"/>
+        <location filename="../qml/views/ConsoleView.qml" line="568"/>
         <source>NORMAL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="577"/>
+        <location filename="../qml/views/ConsoleView.qml" line="578"/>
         <source>COMPARE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="581"/>
+        <location filename="../qml/views/ConsoleView.qml" line="582"/>
         <source>Synchronized A/B position + per-deck ms nudge comparison</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="667"/>
+        <location filename="../qml/views/ConsoleView.qml" line="668"/>
         <source>AUTO</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="668"/>
+        <location filename="../qml/views/ConsoleView.qml" line="669"/>
         <source>WAVE+SPEC</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="669"/>
+        <location filename="../qml/views/ConsoleView.qml" line="670"/>
         <source>WAVE ONLY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="670"/>
+        <location filename="../qml/views/ConsoleView.qml" line="671"/>
         <source>SPEC+EQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="717"/>
+        <location filename="../qml/views/ConsoleView.qml" line="718"/>
         <source>+GEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="724"/>
+        <location filename="../qml/views/ConsoleView.qml" line="725"/>
         <source>Overlay faint 32-GEQ composite curve in Main Monitor</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="748"/>
+        <location filename="../qml/views/ConsoleView.qml" line="749"/>
         <source>MAIN MONITOR — READY (NO TRACK LOADED)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="987"/>
+        <location filename="../qml/views/ConsoleView.qml" line="988"/>
         <source>OVERVIEW WAVEFORM TIMELINE — NO TRACK LOADED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="989"/>
+        <location filename="../qml/views/ConsoleView.qml" line="990"/>
         <source>EXTRACTING WAVEFORM...</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="990"/>
+        <location filename="../qml/views/ConsoleView.qml" line="991"/>
         <source>WAVEFORM READY ON LOAD</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1396"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1397"/>
         <source>2048-PT HANN FFT (%1)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1399"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1400"/>
         <source>EQ RESPONSE ACTIVE  •  FFT STANDBY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1400"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1401"/>
         <source>REAL-TIME FFT SPECTRUM STANDBY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1425"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1426"/>
         <source>PATH: %1   |   HEADROOM: %2 dB   |   DSP BYPASS: %3   |   INSERT: %4   |   BIT-PERFECT: %5</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1426"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1427"/>
         <source>LISTENING</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1426"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1427"/>
         <source>RENDER MONITOR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1428"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1429"/>
         <source>DIRECT</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1428"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3164"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3280"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3373"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3475"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3698"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3874"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1429"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3168"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3284"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3377"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3479"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3702"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3878"/>
         <source>ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1428"/>
-        <location filename="../qml/views/ConsoleView.qml" line="2799"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3164"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3280"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3373"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3475"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3698"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3874"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1429"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2803"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3168"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3284"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3377"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3479"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3702"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3878"/>
         <source>OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1483"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1484"/>
         <source>ROUTING</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1511"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1512"/>
         <source>MONITOR OUTPUT</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1519"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1520"/>
         <source>PRESET:</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1542"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1543"/>
         <source>Listening</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1553"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1554"/>
         <source>Render Monitor</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1568"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1569"/>
         <source>EXPORT PATH</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1581"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1582"/>
         <source>Render-File (Exporting %1%)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1582"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1583"/>
         <source>Render-File</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1621"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1622"/>
         <source>LINK: ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1621"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1622"/>
         <source>LINK: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1667"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1671"/>
         <source>BAL: C</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1667"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1671"/>
         <source>BAL: L%1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1667"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1671"/>
         <source>BAL: R%1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1713"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1717"/>
         <source>Balance (drag L/R, double-click or right-click to Center)
 L: %1  |  R: %2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1720"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1724"/>
         <source>HR %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1739"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1743"/>
         <source>Left</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1847"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1851"/>
         <source>Right</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1870"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1874"/>
         <source>L MUTED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1870"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1874"/>
         <source>L MUTE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1878"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1882"/>
         <source>Independent Left Mute (auto-clears Direct Mode)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1885"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1889"/>
         <source>MUTED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1885"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1889"/>
         <source>MUTE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1899"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1903"/>
         <source>R MUTED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1899"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1903"/>
         <source>R MUTE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1907"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1911"/>
         <source>Independent Right Mute (auto-clears Direct Mode)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1926"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1930"/>
         <source>RENDERING</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1926"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1930"/>
         <source>RENDER</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1942"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1946"/>
         <source>DIRECT MODE: ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1942"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1946"/>
         <source>DIRECT MODE</source>
         <translation type="unfinished">DIRECT MODE</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1962"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1966"/>
         <source>DIM
 ON -20dB</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1962"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1966"/>
         <source>DIM
 -20dB</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1969"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1973"/>
         <source>Fixed -20 dB Monitor-Only Dim (Listening &amp; Render Monitor only; never affects Render-File)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1977"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1981"/>
         <source>LEVEL
 MATCH</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1980"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1984"/>
         <source>Batch Auto Level Match across loaded decks</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1990"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1994"/>
         <source>GLOBAL BYPASS
 ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="1990"/>
+        <location filename="../qml/views/ConsoleView.qml" line="1994"/>
         <source>GLOBAL BYPASS
 OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2001"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2005"/>
         <source>Bypass all Master DSP nodes (Toggle ON/OFF)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2012"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2016"/>
         <source>DSP PRESET: %1%2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2014"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2018"/>
         <source>  [MODIFIED]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2021"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2025"/>
         <source>Open layered DSP Preset Manager (Global, Per-DSP, and Listening Correction)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2029"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2033"/>
         <source>BIT-PERFECT: %1   [L1 / L2 / L3 REPORT]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2177"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2181"/>
         <source>GEQ Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2177"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2181"/>
         <source>GEQ Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2185"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2189"/>
         <source>NODE OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2185"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2189"/>
         <source>NODE ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2190"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2194"/>
         <source>GEQ DSP Node ON / OFF (saved in Global presets)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2198"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2202"/>
         <source>BYP ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2198"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2202"/>
         <source>BYP</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2203"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2207"/>
         <source>Temporary GEQ Global Bypass (excluded from presets and modified state)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2217"/>
-        <location filename="../qml/views/ConsoleView.qml" line="2887"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3325"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3418"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3624"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3817"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4036"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2221"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2891"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3329"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3422"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3628"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3821"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4040"/>
         <source>IN</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2235"/>
-        <location filename="../qml/views/ConsoleView.qml" line="2896"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3334"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3427"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3633"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3826"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4045"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2239"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2900"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3338"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3431"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3637"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3830"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4049"/>
         <source>OUT</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2253"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2257"/>
         <source>FLATTEN ALL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2319"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2323"/>
         <source>LEFT CHANNEL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2724"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2728"/>
         <source>SELECTED BAND INSPECTOR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2733"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2737"/>
         <source>LISTENING PEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2733"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2737"/>
         <source>MASTER PEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2739"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2743"/>
         <source>Switch between Master PEQ and Listening Correction PEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2752"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
         <source>PEQ Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2752"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
         <source>PEQ Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
         <source>EQ BYPASSED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2756"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2760"/>
         <source>EQ ACTIVE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2773"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2777"/>
         <source>BAND </source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2799"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2803"/>
         <source>ACTIVE</source>
         <translation type="unfinished">ACTIVE</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2829"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2833"/>
         <source>FREQUENCY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2845"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2849"/>
         <source>GAIN</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2861"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2865"/>
         <source>Q</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="2918"/>
+        <location filename="../qml/views/ConsoleView.qml" line="2922"/>
         <source>RIGHT CHANNEL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3157"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3161"/>
         <source>HPF / LPF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3170"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3174"/>
         <source>Toggle HPF/LPF Module ON / OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3238"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3242"/>
         <source>FILTER RESPONSE (20Hz–20kHz)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3269"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3273"/>
         <source>HPF Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3269"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3273"/>
         <source>HPF Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3303"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3307"/>
         <source>HPF Freq</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3313"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3317"/>
         <source>HPF Q</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3362"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3366"/>
         <source>LPF Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3362"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3366"/>
         <source>LPF Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3396"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3400"/>
         <source>LPF Freq</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3406"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3410"/>
         <source>LPF Q</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3459"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3463"/>
         <source>COMPRESSOR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3470"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3474"/>
         <source>Compressor Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3470"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3474"/>
         <source>Compressor Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3481"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3485"/>
         <source>Toggle Compressor ON / OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3514"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3518"/>
         <source>GAIN REDUCTION</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3563"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3567"/>
         <source>Threshold</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3572"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3576"/>
         <source>Ratio</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3581"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3585"/>
         <source>Knee</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3590"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3594"/>
         <source>Attack</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3599"/>
-        <location filename="../qml/views/ConsoleView.qml" line="3792"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3603"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3796"/>
         <source>Release</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3608"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3612"/>
         <source>Makeup</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3665"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3669"/>
         <source>LIMITER</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3693"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3697"/>
         <source>Limiter Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3693"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3697"/>
         <source>Limiter Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3704"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3708"/>
         <source>Toggle Peak Limiter ON / OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3737"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3741"/>
         <source>LIMITING ATTENUATION</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3783"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3787"/>
         <source>Ceiling</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3801"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3805"/>
         <source>Lookahead</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3858"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3862"/>
         <source>REVERB</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3869"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3873"/>
         <source>Reverb Preset Applied</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3869"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3873"/>
         <source>Reverb Preset Indicator: OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3880"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3884"/>
         <source>Toggle Reverb ON / OFF</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3948"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3952"/>
         <source>TAIL DECAY ENVELOPE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3971"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3975"/>
         <source>Pre-Delay</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3980"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3984"/>
         <source>Size</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3989"/>
+        <location filename="../qml/views/ConsoleView.qml" line="3993"/>
         <source>Damping</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3998"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4002"/>
         <source>TAIL-
 PRESERVE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="3998"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4002"/>
         <source>IMMEDIATE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4011"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4015"/>
         <source>Wet/Dry</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4020"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4024"/>
         <source>Decay</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4081"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4085"/>
         <source>GRAPH:</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4087"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4091"/>
         <source>LIVE %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4093"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4097"/>
         <source>SCAN PORTS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4102"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4106"/>
         <source>TARGET CLIENT:</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4111"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4115"/>
         <source>No External Insert Ports Discovered</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4159"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4160"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4161"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4162"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4163"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4164"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4165"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4166"/>
         <source>(candidate)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4163"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4163"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4163"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4163"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4167"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4167"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4167"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4167"/>
         <source>(unpatched)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4197"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4201"/>
         <source>DISCONNECT POLICY: SAFE BYPASS (Dry)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4222"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4226"/>
         <source>SIGNAL FLOW &amp; INSERT STATE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4256"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4260"/>
         <source>INSERT STATUS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4306"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4310"/>
         <source>BIT-PERFECT</source>
         <translation type="unfinished">BIT-PERFECT</translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4313"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4317"/>
         <source>EXCLUDED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4337"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4341"/>
         <source>PEQ → GEQ → HPF/LPF → COMP → REV → LIM   [INSERT @ SLOT %1]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4382"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4386"/>
         <source>SEND LEVEL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4404"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4408"/>
         <source>RETURN LEVEL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4433"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4437"/>
         <source>RECONNECT HOST</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4434"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4438"/>
         <source>CONNECT HOST</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4443"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4447"/>
         <source>INSERT BYPASS: ON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4443"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4447"/>
         <source>INSERT BYPASS (DRY)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4471"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4475"/>
         <source>LATENCY &amp; DIAGNOSTICS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4487"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4491"/>
         <source>REPORTED LATENCY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4492"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4496"/>
         <source>Not Reported</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4502"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4506"/>
         <source>MEASURED ROUND-TRIP</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4507"/>
-        <location filename="../qml/views/ConsoleView.qml" line="4559"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4511"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4563"/>
         <source>Not Measured</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4517"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4521"/>
         <source>APPLIED ALIGNMENT</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4538"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4542"/>
         <source>1. MEASURE IMPULSE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4547"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4551"/>
         <source>2. APPROVE &amp; APPLY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4557"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4561"/>
         <source>%1 kHz   |   Measured: %2   |   XRUN: %3   |   Loop Guard: ARMED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4592"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4596"/>
         <source>32-GEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4593"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4597"/>
         <source>32-PEQ</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4594"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4598"/>
         <source>DSP</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4595"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4599"/>
         <source>External Host</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/ConsoleView.qml" line="4630"/>
+        <location filename="../qml/views/ConsoleView.qml" line="4634"/>
         <source>BYPASSED BY DIRECT MODE</source>
         <translation type="unfinished"></translation>
     </message>
@@ -908,182 +908,182 @@ PRESERVE</source>
 <context>
     <name>DeckSlotCard</name>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="67"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="68"/>
         <source>ERR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="68"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="69"/>
         <source>PLAY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="69"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="70"/>
         <source>PAUSE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="70"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="71"/>
         <source>ROUTED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="70"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="71"/>
         <source>STBY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="71"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="72"/>
         <source>EMPTY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="116"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="117"/>
         <source>DISCARDED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="117"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="118"/>
         <source>ENDED</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="214"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="215"/>
         <source>Folder Session Previous Track</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="244"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="245"/>
         <source>Folder Session Next Track</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="255"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="256"/>
         <source>Deck Locked</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="255"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="256"/>
         <source>Lock Deck Context</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="280"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="281"/>
         <source>FOLDER SESSION</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="308"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="309"/>
         <source>Play Deck %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="329"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="330"/>
         <source>Pause Deck %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="343"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="344"/>
         <source>Stop Deck %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="395"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="396"/>
         <source>No track loaded</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="460"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="461"/>
         <source>FOLDER %1/%2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="490"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="491"/>
         <source>Folder Session active: %1 (%2/%3)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="492"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="493"/>
         <source>Next: %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="584"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="585"/>
         <source>WS: APP</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="585"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="586"/>
         <source>WS: EXT</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="585"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="586"/>
         <source>OUTSIDE WS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="600"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="601"/>
         <source>Workspace (App-Copied): Copied into the open workspace by Desk32</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="602"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="603"/>
         <source>Workspace (External): Copied or moved into the workspace externally</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="603"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="604"/>
         <source>Outside Workspace: Located outside the open workspace directory (Read-Only)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="607"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="608"/>
         <source>ERROR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="623"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="624"/>
         <source>Load</source>
         <translation type="unfinished">Load</translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="628"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="629"/>
         <source>Load audio file into Deck %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="633"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="634"/>
         <source>Folder</source>
         <translation type="unfinished">Folder</translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="641"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="642"/>
         <source>Folder Session active (%1/%2) — click to restart from track 1 (re-scans folder)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="644"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="645"/>
         <source>Start Folder Session from first track</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="655"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="656"/>
         <source>Copy track into open Workspace</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="690"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="691"/>
         <source>Compare Nudge -10 ms (double-click ms box to reset)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="703"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="704"/>
         <source>Compare Nudge +10 ms (double-click ms box to reset)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/components/DeckSlotCard.qml" line="726"/>
+        <location filename="../qml/components/DeckSlotCard.qml" line="727"/>
         <source>LEVEL TRIM</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1321,297 +1321,307 @@ PRESERVE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="200"/>
+        <location filename="../qml/views/LogView.qml" line="201"/>
         <source>Cat: All</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="200"/>
+        <location filename="../qml/views/LogView.qml" line="201"/>
         <source>Cat: %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="201"/>
+        <location filename="../qml/views/LogView.qml" line="202"/>
         <source>Status: %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="202"/>
+        <location filename="../qml/views/LogView.qml" line="203"/>
         <source>Playback</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="203"/>
+        <location filename="../qml/views/LogView.qml" line="204"/>
         <source>Time Filtered</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="204"/>
+        <location filename="../qml/views/LogView.qml" line="205"/>
         <source>Search</source>
         <translation type="unfinished">Search</translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="205"/>
+        <location filename="../qml/views/LogView.qml" line="206"/>
         <source>Limit: %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="418"/>
+        <location filename="../qml/views/LogView.qml" line="447"/>
         <source>AUDIT LOGS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="441"/>
+        <location filename="../qml/views/LogView.qml" line="470"/>
         <source>PLAYBACK HIST</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="454"/>
+        <location filename="../qml/views/LogView.qml" line="483"/>
         <source>Search message, target, or operation ID...</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="481"/>
+        <location filename="../qml/views/LogView.qml" line="510"/>
         <source>REFRESH</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="488"/>
+        <location filename="../qml/views/LogView.qml" line="517"/>
         <source>EXPORT JSONL ▾</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="525"/>
+        <location filename="../qml/views/LogView.qml" line="554"/>
         <source>SELECT JSONL EXPORT SCOPE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="556"/>
+        <location filename="../qml/views/LogView.qml" line="585"/>
         <source>All Stored Logs (%1)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="565"/>
+        <location filename="../qml/views/LogView.qml" line="594"/>
         <source>Export all retained logs in the database</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="610"/>
+        <location filename="../qml/views/LogView.qml" line="639"/>
         <source>Displayed Logs (%1)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="651"/>
+        <location filename="../qml/views/LogView.qml" line="680"/>
         <source>DATE / TIME</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="657"/>
+        <location filename="../qml/views/LogView.qml" line="686"/>
         <source>ALL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="664"/>
+        <location filename="../qml/views/LogView.qml" line="693"/>
         <source>1H</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="671"/>
+        <location filename="../qml/views/LogView.qml" line="700"/>
         <source>24H</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="678"/>
+        <location filename="../qml/views/LogView.qml" line="707"/>
         <source>TODAY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="685"/>
+        <location filename="../qml/views/LogView.qml" line="714"/>
         <source>7D</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="696"/>
+        <location filename="../qml/views/LogView.qml" line="725"/>
         <source>SINGLE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="700"/>
+        <location filename="../qml/views/LogView.qml" line="729"/>
         <source>Filter by a single date or timestamp (e.g. 2026-11-28 or 2026-11-28 08:30)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="714"/>
+        <location filename="../qml/views/LogView.qml" line="743"/>
         <source>RANGE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="718"/>
+        <location filename="../qml/views/LogView.qml" line="747"/>
         <source>Filter by a start/end date-time range (From ~ To)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="740"/>
+        <location filename="../qml/views/LogView.qml" line="769"/>
         <source>YYYY-MM-DD [HH:MM[:SS]]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="772"/>
+        <location filename="../qml/views/LogView.qml" line="801"/>
         <source>From: YYYY-MM-DD HH:MM</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="809"/>
+        <location filename="../qml/views/LogView.qml" line="838"/>
         <source>To: YYYY-MM-DD HH:MM</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="835"/>
+        <location filename="../qml/views/LogView.qml" line="864"/>
         <source>LOCAL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="835"/>
+        <location filename="../qml/views/LogView.qml" line="864"/>
         <source>UTC</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="839"/>
+        <location filename="../qml/views/LogView.qml" line="868"/>
         <source>Toggle UTC / Local timezone for date-time filter and timestamp column</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="852"/>
+        <location filename="../qml/views/LogView.qml" line="881"/>
         <source>APPLY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="861"/>
+        <location filename="../qml/views/LogView.qml" line="890"/>
         <source>CLEAR</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="885"/>
+        <location filename="../qml/views/LogView.qml" line="914"/>
         <source>UTC: %1 .. %2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="933"/>
+        <location filename="../qml/views/LogView.qml" line="962"/>
         <source>TIMESTAMP (LOCAL)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="933"/>
+        <location filename="../qml/views/LogView.qml" line="962"/>
         <source>TIMESTAMP (UTC)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="934"/>
+        <location filename="../qml/views/LogView.qml" line="963"/>
         <source>CATEGORY</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="935"/>
+        <location filename="../qml/views/LogView.qml" line="964"/>
         <source>OPERATION</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="936"/>
+        <location filename="../qml/views/LogView.qml" line="965"/>
         <source>STATUS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="937"/>
+        <location filename="../qml/views/LogView.qml" line="966"/>
         <source>TARGET</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="938"/>
+        <location filename="../qml/views/LogView.qml" line="967"/>
         <source>DUR(ms)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="939"/>
+        <location filename="../qml/views/LogView.qml" line="968"/>
         <source>MESSAGE</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1104"/>
+        <location filename="../qml/views/LogView.qml" line="1133"/>
         <source>OPERATION DETAILS</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1109"/>
-        <source>COPY JSON</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../qml/views/LogView.qml" line="1131"/>
-        <source>Category: %1  •  Op: %2  •  Status: %3</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../qml/views/LogView.qml" line="1131"/>
-        <source>No log event selected</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../qml/views/LogView.qml" line="1137"/>
-        <source>Timestamp: %1 (%2)</source>
+        <location filename="../qml/views/LogView.qml" line="1138"/>
+        <source>COPY ALL</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../qml/views/LogView.qml" line="1141"/>
+        <source>Copy full operation summary, related events, and Details JSON to clipboard</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/views/LogView.qml" line="1146"/>
+        <source>Copied full operation details to clipboard</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/views/LogView.qml" line="1163"/>
+        <source>Category: %1  •  Op: %2  •  Status: %3</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/views/LogView.qml" line="1163"/>
+        <source>No log event selected</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/views/LogView.qml" line="1169"/>
+        <source>Timestamp: %1 (%2)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../qml/views/LogView.qml" line="1173"/>
         <source>Op ID: %1   |   Parent Op: %2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1145"/>
+        <location filename="../qml/views/LogView.qml" line="1177"/>
         <source>Target: [%1] %2   |   ErrorCode: %3   |   Duration: %4 ms</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1157"/>
+        <location filename="../qml/views/LogView.qml" line="1189"/>
         <source>RELATED EVENTS (%1)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1188"/>
+        <location filename="../qml/views/LogView.qml" line="1220"/>
         <source>DETAILS JSON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1203"/>
+        <location filename="../qml/views/LogView.qml" line="1235"/>
         <source>{}</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1227"/>
+        <location filename="../qml/views/LogView.qml" line="1259"/>
         <source>DISPLAYED: %1 / TOTAL: %2 EVENTS (%3 TREE ROWS)   |   RETENTION POLICY: 180 DAYS / 300,000 ROOT OPERATIONS   |   SESSION: %4</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1248"/>
+        <location filename="../qml/views/LogView.qml" line="1280"/>
         <source>Export All Stored Audit Logs as JSON Lines (.jsonl)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1249"/>
+        <location filename="../qml/views/LogView.qml" line="1281"/>
         <source>Export Displayed Audit Logs as JSON Lines (.jsonl)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1263"/>
+        <location filename="../qml/views/LogView.qml" line="1295"/>
         <source>Exported ALL (%1): %2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1264"/>
+        <location filename="../qml/views/LogView.qml" line="1296"/>
         <source>Exported DISPLAYED (%1): %2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../qml/views/LogView.qml" line="1266"/>
+        <location filename="../qml/views/LogView.qml" line="1298"/>
         <source>Export failed</source>
         <translation type="unfinished"></translation>
     </message>

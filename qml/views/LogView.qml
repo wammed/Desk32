@@ -216,6 +216,34 @@ Item {
         }
     }
 
+    function formatFullEventForClipboard(ev, related) {
+        if (!ev) return ""
+        var lines = []
+        lines.push("=== OPERATION DETAILS ===")
+        lines.push("Category: " + (ev.category || "") + "  |  Op: " + (ev.operation || "") + "  |  Status: " + (ev.status || ""))
+        lines.push("Timestamp: " + (ev.timestampUtc || "-") + " (" + (ev.localUtcOffset || "UTC") + ")")
+        lines.push("Op ID: " + (ev.operationId || "-") + "  |  Parent Op: " + (ev.parentOperationId || "(root)"))
+        lines.push("Target: [" + (ev.targetType || "-") + "] " + (ev.target || "-")
+                   + "  |  ErrorCode: " + (ev.errorCode || 0)
+                   + "  |  Duration: " + Number(ev.durationMs || 0).toFixed(2) + " ms")
+        lines.push("Message: " + (ev.message || ""))
+        var rel = related || []
+        if (rel.length > 0) {
+            lines.push("")
+            lines.push("=== RELATED EVENTS (" + rel.length + ") ===")
+            for (var i = 0; i < rel.length; ++i) {
+                var r = rel[i]
+                lines.push("- [" + (r.timestampUtc || "-") + "] "
+                           + (r.category || "") + "/" + (r.operation || "")
+                           + " (" + (r.status || "") + "): " + (r.message || ""))
+            }
+        }
+        lines.push("")
+        lines.push("=== DETAILS JSON ===")
+        lines.push(formatPrettyJson(ev.detailsJson))
+        return lines.join("\n")
+    }
+
     function statusColor(status) {
         if (status === "Success") return "#00E676"
         if (status === "Info") return "#33E3FF"
@@ -1107,12 +1135,15 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         ConsoleButton {
-                            text: qsTr("COPY JSON")
-                            implicitWidth: 88; implicitHeight: 26; fontSize: 9; accentColor: "#00E5FF"
+                            text: qsTr("COPY ALL")
+                            implicitWidth: 96; implicitHeight: 26; fontSize: 9; accentColor: "#00E5FF"
                             enabled: logViewRoot.selectedLog !== null
+                            toolTipText: qsTr("Copy full operation summary, related events, and Details JSON to clipboard")
                             onClicked: {
                                 if (logViewRoot.selectedLog) {
-                                    EngineController.copyToClipboard(logViewRoot.formatPrettyJson(logViewRoot.selectedLog.detailsJson))
+                                    EngineController.copyToClipboard(
+                                        logViewRoot.formatFullEventForClipboard(logViewRoot.selectedLog, logViewRoot.relatedLogs))
+                                    logViewRoot.exportFeedbackText = qsTr("Copied full operation details to clipboard")
                                 }
                             }
                         }
