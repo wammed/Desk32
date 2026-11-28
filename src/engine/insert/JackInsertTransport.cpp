@@ -8,13 +8,49 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <vector>
 
 namespace desk32::engine::insert {
 
 namespace {
+
+std::mutex g_jackInsertEnvMutex;
+
+/// Scoped RAII helper setting PipeWire-JACK latency hint around jack_client_open()
+/// so desk32-insert requests the same quantum as Desk32's main audio engine.
+class ScopedJackInsertEnvHint {
+public:
+    ScopedJackInsertEnvHint(double sampleRate, size_t bufferFrames)
+        : m_lock(g_jackInsertEnvMutex) {
+        if (const char* oldLat = std::getenv("PIPEWIRE_LATENCY")) {
+            m_hadLatency = true;
+            m_oldLatency = oldLat;
+        }
+        char latBuf[64];
+        std::snprintf(latBuf, sizeof(latBuf), "%zu/%u",
+                      bufferFrames > 0 ? bufferFrames : size_t(256),
+                      sampleRate > 0.0 ? static_cast<uint32_t>(std::llround(sampleRate)) : 48000u);
+        ::setenv("PIPEWIRE_LATENCY", latBuf, 1);
+    }
+
+    ~ScopedJackInsertEnvHint() {
+        if (m_hadLatency) {
+            ::setenv("PIPEWIRE_LATENCY", m_oldLatency.c_str(), 1);
+        } else {
+            ::unsetenv("PIPEWIRE_LATENCY");
+        }
+    }
+
+private:
+    std::lock_guard<std::mutex> m_lock;
+    bool m_hadLatency = false;
+    std::string m_oldLatency;
+};
 
 std::string toLowerAscii(std::string s)
 {
@@ -218,7 +254,10 @@ bool JackInsertTransport::configureAndConnect(const ExternalPortInfo& target,
     };
 
     jack_status_t st = static_cast<jack_status_t>(0);
-    m_client = jack_client_open("desk32-insert", JackNoStartServer, &st);
+    {
+        ScopedJackInsertEnvHint envHint(m_expectedSampleRate, m_expectedBufferSize);
+        m_client = jack_client_open("desk32-insert", JackNoStartServer, &st);
+    }
     if (!m_client) {
         failAndCleanup("PipeWire-JACK server unavailable for External Insert");
         return false;
@@ -236,11 +275,23 @@ bool JackInsertTransport::configureAndConnect(const ExternalPortInfo& target,
                        " Hz vs engine " + std::to_string(static_cast<uint32_t>(m_expectedSampleRate)) + " Hz)");
         return false;
     }
-    if (srvBuf > 0 && static_cast<size_t>(srvBuf) != m_expectedBufferSize) {
+    if (srvBuf > 0 && static_cast<size_t>(srvBuf) > m_pwSendTmpL.size()) {
         m_bufferMismatch.store(true, std::memory_order_release);
-        failAndCleanup("JACK insert buffer size mismatch (" + std::to_string(srvBuf) +
-                       " vs engine " + std::to_string(m_expectedBufferSize) + ")");
+        failAndCleanup("JACK insert buffer size exceeds ring capacity (" + std::to_string(srvBuf) +
+                       " frames > max " + std::to_string(m_pwSendTmpL.size()) + ")");
         return false;
+    }
+
+    // Prime send ring with max(engineBufferSize, srvBuf) silence frames so differing
+    // PipeWire-JACK quanta (e.g. engine 256 vs Carla/JACK 1024) run smoothly without underruns.
+    const size_t targetPrime = std::min<size_t>(
+        std::max<size_t>(m_expectedBufferSize, static_cast<size_t>(srvBuf)),
+        m_pwSendTmpL.size());
+    if (targetPrime > primeFrames) {
+        const size_t extra = targetPrime - primeFrames;
+        std::fill_n(m_pwSendTmpL.data(), extra, 0.0);
+        std::fill_n(m_pwSendTmpR.data(), extra, 0.0);
+        m_sendRing.writePlanar(m_pwSendTmpL.data(), m_pwSendTmpR.data(), extra);
     }
 
     jack_set_process_callback(m_client, &JackInsertTransport::onProcessCallback, this);
@@ -383,10 +434,13 @@ int JackInsertTransport::onBufferSizeCallback(uint32_t nframes, void* arg)
     auto* self = static_cast<JackInsertTransport*>(arg);
     if (!self || nframes == 0) return 0;
     self->m_negotiatedQuantum.store(nframes, std::memory_order_release);
-    if (static_cast<size_t>(nframes) != self->m_expectedBufferSize) {
+    // Lock-free send/return ring buffers decouple Desk32's block size from PipeWire-JACK's
+    // dynamically negotiated quantum; only reject if nframes exceeds scratch buffer capacity.
+    if (static_cast<size_t>(nframes) > self->m_pwSendTmpL.size()) {
         {
             std::lock_guard<std::mutex> lock(self->m_stateMutex);
-            self->m_errorDetail = "JACK insert buffer size mismatch (" + std::to_string(nframes) + " frames)";
+            self->m_errorDetail = "JACK insert buffer size exceeds max (" + std::to_string(nframes) +
+                                  " > " + std::to_string(self->m_pwSendTmpL.size()) + " frames)";
         }
         self->m_bufferMismatch.store(true, std::memory_order_release);
         self->m_connected.store(false, std::memory_order_release);

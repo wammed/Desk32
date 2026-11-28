@@ -244,7 +244,7 @@ Item {
             item.returnPortL,
             item.returnPortR,
             item.sampleRate > 0 ? item.sampleRate : EngineController.graphSampleRate,
-            item.bufferSize > 0 ? item.bufferSize : 256,
+            0,
             item.reportedLatencyFrames !== undefined ? item.reportedLatencyFrames : -1,
             !!item.latencyReported,
             item.clientName,

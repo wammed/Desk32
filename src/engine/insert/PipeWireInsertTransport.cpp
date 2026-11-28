@@ -405,9 +405,11 @@ bool PipeWireInsertTransport::configureAndConnect(const ExternalPortInfo& target
         return completeSimulationConnect();
     }
 
-    // Pre-prime 1 block of silence into send ring to absorb cycle-ordering jitter between
-    // desk32-playback and desk32-insert-send thread loops without startup underruns.
-    const size_t primeFrames = std::min<size_t>(m_expectedBufferSize, m_pwSendTmpL.size());
+    // Pre-prime silence into send ring to absorb cycle-ordering jitter and differing
+    // PipeWire / PipeWire-JACK quanta (e.g. engine 256 vs Carla 1024) without startup underruns.
+    const size_t primeFrames = std::min<size_t>(
+        std::max<size_t>(m_expectedBufferSize, target.bufferSize),
+        m_pwSendTmpL.size());
     if (primeFrames > 0) {
         std::fill_n(m_pwSendTmpL.data(), primeFrames, 0.0);
         std::fill_n(m_pwSendTmpR.data(), primeFrames, 0.0);
@@ -1044,7 +1046,10 @@ void PipeWireInsertTransport::onSendProcess(void* data)
                                    : static_cast<uint32_t>(self->m_expectedBufferSize);
     if (pwBuf->requested > 0) {
         self->m_negotiatedQuantum.store(static_cast<uint32_t>(pwBuf->requested), std::memory_order_release);
-        if (static_cast<size_t>(pwBuf->requested) != self->m_expectedBufferSize) {
+        // PipeWire dynamically negotiates graph quantum across linked nodes (e.g., Carla via
+        // pipewire-jack). Ring buffers absorb differing quanta; only flag mismatch if it exceeds
+        // our RT scratch buffer capacity.
+        if (static_cast<size_t>(pwBuf->requested) > self->m_pwSendTmpL.size()) {
             self->m_bufferMismatch.store(true, std::memory_order_release);
         }
     }

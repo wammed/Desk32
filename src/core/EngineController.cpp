@@ -1674,9 +1674,13 @@ void EngineController::pollExternalInsertHealth() {
     const std::string detail =
         diag.errorDetail.empty()
             ? (isRate ? (m_activeAudioBackend.toStdString() +
-                         " insert sample rate mismatch")
+                         " insert sample rate mismatch (actual=" +
+                         std::to_string(diag.negotiatedSendRate) + " Hz, expected=" +
+                         std::to_string(static_cast<uint32_t>(bridge.config().sampleRate)) + " Hz)")
                       : (m_activeAudioBackend.toStdString() +
-                         " insert buffer quantum mismatch"))
+                         " insert buffer quantum mismatch (actual=" +
+                         std::to_string(diag.negotiatedQuantum) + " frames, expected=" +
+                         std::to_string(bridge.config().bufferSize) + " frames)"))
             : diag.errorDetail;
     bridge.handleTransportMismatch(
         isRate ? engine::insert::InsertState::RateMismatch
